@@ -1,13 +1,13 @@
 # ADR-0002: Adopt Hexagonal Architecture (Ports & Adapters)
 
-- **Status:** Proposed — pending explicit review and acceptance
-- **Date:** 2026-10-31
+- **Status:** Accepted
+- **Date:** 2026-10-31 (accepted 2026-11-01)
 - **Decision owners:** Kaiwen Gateway maintainers
 - **Scope:** V1 internal dependency boundaries, Voice integrations, and application composition
 - **Related decisions:** [ADR-0001 — Modular Monolith](0001-modular-monolith.md), [ADR-0003 — Library and Server](0003-library-and-server.md)
 - **Related documents:** [Architecture](../ARCHITECTURE.md), [Requirements](../REQUIREMENTS.md), [Project overview](../../README.md)
 
-> **Implementation status:** This is an architectural decision proposal, **not** an assertion that code, adapters, public interfaces, or production integrations exist. Example names in this document are illustrative until implemented and tested.
+> **Implementation status:** This is an accepted architectural decision for V1 design boundaries (approved 2026-11-01), **not** an assertion that code, adapters, public interfaces, or production integrations exist. Example names in this document are illustrative until implemented and tested.
 
 ## 1. Context
 
@@ -289,7 +289,7 @@ A superseding ADR must explain the trigger, alternatives, consequences, migratio
 
 ## 11. Decision governance and implementation sequence
 
-1. Review and explicitly accept (or revise) this proposal before treating it as a binding agent implementation rule.
+1. Treat this accepted ADR as a binding V1 dependency-boundary rule; any material boundary change requires maintainer review and a superseding ADR.
 2. Bootstrap the minimal package, app factory, strict tooling and import checks.
 3. Implement call context, Voice ports and deterministic fake adapters with conformance tests.
 4. Implement the WSS/ASGI adapter and Voice supervisor with safe cancellation, flow control and cleanup.
@@ -299,9 +299,9 @@ A superseding ADR must explain the trigger, alternatives, consequences, migratio
 
 ### Review record
 
-- **Decision state:** Proposed
-- **Approved by:** Not yet recorded
-- **Implementation evidence:** Not yet recorded
+- **Decision state:** Accepted (2026-11-01)
+- **Approved by:** Maintainer
+- **Implementation evidence:** Not yet recorded (pre-implementation phase)
 - **Next review trigger:** Before first Gateway Core / Voice port implementation
 
 ---

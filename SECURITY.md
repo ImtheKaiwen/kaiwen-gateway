@@ -1,9 +1,9 @@
 # Security Policy
 
 > **Project:** [Kaiwen Gateway](https://github.com/ImtheKaiwen/kaiwen-gateway)
-> **Status:** Design / pre-implementation; this policy is a proposed documentation baseline.
+> **Status:** Design / pre-implementation; M0 security policy baseline (private vulnerability reporting activation pending).
 > **Target first alpha:** `0.1.0a1` (**not published**).
-> **Last reviewed:** 2026-10-31
+> **Last reviewed:** 2026-11-01
 
 Kaiwen Gateway is intended to handle authenticated, real-time communication between external providers and AI systems. Its initial use case is a bidirectional telephone-audio bridge over WebSockets. A failure at this boundary could expose sensitive conversations, mix different tenants' sessions, authorize unintended actions, or incur upstream service costs.
 
@@ -23,7 +23,7 @@ The intended channel is **GitHub Private Vulnerability Reporting**, using this r
 - Security and advisories page: https://github.com/ImtheKaiwen/kaiwen-gateway/security
 - GitHub instructions for reporting privately: https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately
 
-**Important: The private-reporting setting has not been verified as enabled.** Publishing `SECURITY.md` does **not** enable private vulnerability reporting. The maintainer must enable the setting in the repository's security settings, verify that the **Report a vulnerability** action is available to an external reporter, and enable appropriate notifications before treating this channel as operational.
+**Important: GitHub Private Vulnerability Reporting is currently disabled (`{"enabled": false}` verified on 2026-11-01).** Publishing `SECURITY.md` does **not** enable private vulnerability reporting. The maintainer must enable the setting in the repository's security settings, verify that the **Report a vulnerability** action is available to an external reporter, and enable appropriate notifications before treating this channel as operational.
 
 If that action is unavailable, **do not submit the vulnerability details publicly**. A generic issue asking the maintainer to establish a confidential reporting route is acceptable **only if it includes no vulnerability details or hints that would enable exploitation**. This is a temporary fallback, **not** a substitute for a configured private reporting channel. No alternative security email address is currently designated; do not guess or invent one.
 

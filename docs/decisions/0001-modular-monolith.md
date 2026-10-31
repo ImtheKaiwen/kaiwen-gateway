@@ -1,13 +1,13 @@
 # ADR-0001: Adopt a Modular Monolith for Kaiwen Gateway V1
 
-- **Status:** Proposed — pending owner review
-- **Date:** 2026-10-31
+- **Status:** Accepted
+- **Date:** 2026-10-31 (accepted 2026-11-01)
 - **Decision owners:** Kaiwen Gateway project maintainers
 - **Scope:** V1 application structure, module ownership, packaging, and deployment
 - **Related:** [Architecture](../ARCHITECTURE.md) · [Requirements](../REQUIREMENTS.md) · [Project overview](../../README.md)
 - **Related decisions:** [ADR-0002 — Hexagonal Architecture](0002-hexagonal-architecture.md) · [ADR-0003 — Library and Server](0003-library-and-server.md)
 
-> **Decision status note:** This ADR records the agreed design direction for review. It does **not** imply the repository already contains a running Gateway, a tested Verimor adapter, or a production deployment. Change the status to **Accepted** only when the project owner explicitly approves the document and its constraints.
+> **Decision status note:** This ADR records the accepted V1 architectural decision (approved 2026-11-01). Acceptance applies to the architectural design and boundaries only; it does **not** imply the repository already contains a running Gateway, a tested Verimor adapter, or a production deployment.
 
 ## 1. Context
 

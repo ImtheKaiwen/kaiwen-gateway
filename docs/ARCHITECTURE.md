@@ -1,9 +1,9 @@
 # Kaiwen Gateway — V1 Architecture
 
-> **Status:** Proposed design baseline — pending review and ADR acceptance
-> **Document version:** 1.0-draft
+> **Status:** Approved M0 V1 design baseline (ADR-0001..0003 accepted 2026-11-01) — not an implementation report
+> **Document version:** 1.0
 > **Initial release target:** `0.1.0a1` (synthetic alpha)
-> **Last updated:** 2026-10-31
+> **Last updated:** 2026-11-01
 > **Scope:** Reusable Python library + deployable ASGI server; **Voice** is the only V1 communication module.
 
 ## 1. Purpose, authority, and implementation status
@@ -427,15 +427,15 @@ A release pipeline verifies its artifact before publication, uses least-privileg
 
 Architecture changes affecting module boundaries, security ownership, realtime media path, public protocols, storage or deployment should update this document, requirements/tests and a numbered ADR in one reviewable change when feasible.
 
-## 11. Planned ADRs and decision boundaries
+## 11. Accepted V1 ADRs and decision boundaries
 
-These **proposed records** are included under [`decisions/`](decisions/) and require explicit maintainer acceptance before their status changes from `Proposed` to `Accepted`:
+The initial three V1 architecture decision records under [`decisions/`](decisions/) have been reviewed and accepted (`2026-11-01`) as the V1 design baseline (not as proof of runtime implementation):
 
-| Proposed ADR | Subject | Main decision |
-| --- | --- | --- |
-| [`0001-modular-monolith.md`](decisions/0001-modular-monolith.md) | Packaging and deployment | One modular library + runnable app; no premature microservices |
-| [`0002-hexagonal-architecture.md`](decisions/0002-hexagonal-architecture.md) | Dependency direction and replaceable ports | Core owns interfaces; integrations implement them |
-| [`0003-library-and-server.md`](decisions/0003-library-and-server.md) | Reuse + ASGI hosting | Importable package, explicit app factory, optional CLI/server |
+| Accepted ADR | Status | Subject | Main decision |
+| --- | --- | --- | --- |
+| [`0001-modular-monolith.md`](decisions/0001-modular-monolith.md) | `Accepted` | Packaging and deployment | One modular library + runnable app; no premature microservices |
+| [`0002-hexagonal-architecture.md`](decisions/0002-hexagonal-architecture.md) | `Accepted` | Dependency direction and replaceable ports | Core owns interfaces; integrations implement them |
+| [`0003-library-and-server.md`](decisions/0003-library-and-server.md) | `Accepted` | Reuse + ASGI hosting | Importable package, explicit app factory, optional CLI/server |
 
 Future ADRs only when justified: audio bypasses general event bus; verified identity versus provider metadata; deployment model changes; persistent stores; additional providers. An ADR records accepted rationale and its alternatives, not an agent's unfiltered internal deliberations.
 

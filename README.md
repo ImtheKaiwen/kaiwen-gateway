@@ -167,10 +167,10 @@ A passing unit suite does **not** prove real telephony interoperability, securit
 For now:
 
 1. Read [`ROADMAP.md`](ROADMAP.md) and [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the V1 scope, milestones, and acceptance gates.
-2. Review [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/decisions/`](docs/decisions/) for boundaries and proposed design decisions.
+2. Review [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/decisions/`](docs/decisions/) for boundaries and accepted V1 architectural decisions.
 3. Track implementation through issues and pull requests rather than treating this README as an implementation checklist.
 
-**Note:** The repository documentation is currently in the M0 baseline review phase; design documents and ADRs describe intended V1 architecture rather than shipped runtime functionality.
+**Note:** The M0 documentation baseline and initial ADRs (`ADR-0001`–`0003`) have been accepted as the V1 design baseline (`2026-11-01`); they describe intended V1 architecture rather than shipped runtime functionality.
 
 ## Documentation map
 
@@ -193,4 +193,4 @@ Decisions document **what was decided and why**, not a coding agent's private re
 
 The repository is public to support transparent development and reusable infrastructure. Contributions should follow [`CONTRIBUTING.md`](CONTRIBUTING.md). Public issues and pull requests must use synthetic or sanitized data, never real customer recordings or private provider credentials.
 
-**Intended license: MIT.** The license becomes authoritative when a `LICENSE` file is committed. The project is not yet represented as a published package or production-supported service.
+**License: [MIT](LICENSE).** This repository is licensed under the MIT License (`Copyright (c) 2026 Kaiwen`). The project is in the pre-implementation phase and is not yet a published PyPI package or production-supported service.

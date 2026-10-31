@@ -4,13 +4,15 @@ All notable **user-facing changes** to Kaiwen Gateway are recorded in this file.
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for its Python distribution. The **Python package version**, any **external Gateway wire/API protocol version**, and **provider adapter compatibility** are separate concerns; a package release does not automatically change a wire protocol version.
 
-> **Project status (2026-10-31): Design / pre-implementation.** The intended first alpha is `0.1.0a1`, but **no alpha package, GitHub release, public protocol implementation, or production deployment has been published or verified**. Items under **Unreleased** are not shipped features. Proposed architecture documents are not proof of working code or accepted ADRs.
+> **Project status (2026-11-01): Design / pre-implementation.** The intended first alpha is `0.1.0a1`, but **no alpha package, GitHub release, public protocol implementation, or production deployment has been published or verified**. Items under **Unreleased** are not shipped runtime features. Accepted ADRs define V1 architectural boundaries, not proof of working code.
 
 ## [Unreleased]
 
 ### Added
 
-- Prepared the initial, **proposed** V1 documentation set: project overview (`README.md`), requirements (`docs/REQUIREMENTS.md`), architecture (`docs/ARCHITECTURE.md`), development roadmap (`ROADMAP.md`), coding-agent rules (`AGENTS.md`), contribution guide (`CONTRIBUTING.md`), security policy (`SECURITY.md`), and the first three Architecture Decision Records (`docs/decisions/0001`–`0003`).
+- Prepared and published the initial V1 documentation baseline (`d422350`): project overview (`README.md`), requirements (`docs/REQUIREMENTS.md`), architecture (`docs/ARCHITECTURE.md`), development roadmap (`ROADMAP.md`), coding-agent rules (`AGENTS.md`), contribution guide (`CONTRIBUTING.md`), security policy (`SECURITY.md`), and the first three Architecture Decision Records (`docs/decisions/0001`–`0003`).
+- Accepted the initial V1 Architecture Decision Records (`ADR-0001` Modular Monolith, `ADR-0002` Hexagonal Architecture, `ADR-0003` Library and Server) and Gate A documentation baseline (**architectural design approval only; runtime implementation has not started**).
+- Added the repository [`LICENSE`](LICENSE) file (MIT License, `Copyright (c) 2026 Kaiwen`).
 - Documented the intended initial scope: a provider-neutral Python library with an optional ASGI server, focusing exclusively on the Voice module for V1. **This is design documentation, not an implemented or tested feature.**
 
 ## Maintenance policy

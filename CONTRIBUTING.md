@@ -2,9 +2,9 @@
 
 > **Project:** [Kaiwen Gateway](https://github.com/ImtheKaiwen/kaiwen-gateway)
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
-> **Phase:** Design / pre-implementation; initial documentation is under review
+> **Phase:** Design / pre-implementation; M0 documentation baseline approved
 > **Planned first alpha:** `0.1.0a1` — **not released**
-> **Document status:** Proposed contributor guide; pending maintainer approval
+> **Document status:** Active contributor guide (accepted 2026-11-01)
 > **Last reviewed:** 2026-11-01
 
 Thank you for your interest in Kaiwen Gateway. This guide describes how to propose, develop, test, review, and document changes to the project. It applies to human contributors and complements the [coding-agent instructions](AGENTS.md). It does **not** grant permission to use production systems, customer data, paid AI services, or release credentials.
@@ -289,7 +289,7 @@ Do not claim a milestone is completed merely because files were written; require
 
 Keep contributions respectful, technical, and reviewable. Offer clear reasons when disagreeing and focus reviews on behavior, risks, maintainability, and measured results rather than personal judgments. The maintainer may defer an otherwise valuable contribution to preserve the V1 scope.
 
-**License:** The intended repository license is MIT; verify the actual committed `LICENSE` file before contributing or making redistribution claims. If the license file is missing, ask the maintainer to resolve licensing before submitting substantive reusable code. Do not assume third-party code, provider specifications, sample audio, or model weights are automatically redistributable.
+**License:** This repository is licensed under the [MIT License](LICENSE) (`Copyright (c) 2026 Kaiwen`). Do not assume third-party code, provider specifications, sample audio, or model weights are automatically redistributable.
 
 **Questions and non-sensitive proposals:** Use repository Issues or Discussions **if enabled**. For private security matters, follow [SECURITY.md](SECURITY.md).
 

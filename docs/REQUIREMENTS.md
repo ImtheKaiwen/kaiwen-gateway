@@ -1,9 +1,9 @@
 # Kaiwen Gateway — V1 Requirements
 
-> **Status:** Proposed baseline for review — not an implementation report
-> **Document version:** 1.0-draft
+> **Status:** Approved M0 V1 requirements baseline (accepted 2026-11-01) — not an implementation report
+> **Document version:** 1.0
 > **Initial target:** `0.1.0a1` (alpha)
-> **Last updated:** 2026-10-31
+> **Last updated:** 2026-11-01
 > **Scope:** Reusable Python library + deployable ASGI service; Voice is the only implemented communication module in V1.
 
 ## 1. Purpose and document rules
@@ -270,9 +270,9 @@ An ADR records a **concise, reviewable decision rationale**, not a coding agent'
 
 ### 7.2 Gate A — Documentation / implementation authorization
 
-- [ ] README, requirements, architecture, roadmap and initial ADRs agree on ownership and V1 boundaries.
-- [ ] Known unknowns are tracked; unknown Verimor protocol fields have not been fabricated.
-- [ ] Agent work is broken into separately reviewable increments and requires explicit scope approval for major changes.
+- [x] README, requirements, architecture, roadmap and initial ADRs agree on ownership and V1 boundaries.
+- [x] Known unknowns are tracked; unknown Verimor protocol fields have not been fabricated.
+- [x] Agent work is broken into separately reviewable increments and requires explicit scope approval for major changes.
 
 ### 7.3 Gate B — Alpha (`0.1.0a1`, synthetic environment)
 

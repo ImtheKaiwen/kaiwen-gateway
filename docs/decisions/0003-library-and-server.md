@@ -1,14 +1,14 @@
 # ADR-0003: Distribute One Python Library with an Optional ASGI Server and CLI
 
-- **Status:** Proposed — pending explicit review and acceptance
-- **Date:** 2026-10-31
+- **Status:** Accepted
+- **Date:** 2026-10-31 (accepted 2026-11-01)
 - **Decision owners:** Kaiwen Gateway maintainers
 - **Scope:** V1 packaging, public API, host composition, application lifecycle, CLI, configuration, and distribution
 - **Related decisions:** [ADR-0001 — Modular Monolith](0001-modular-monolith.md), [ADR-0002 — Hexagonal Architecture](0002-hexagonal-architecture.md)
 - **Related documents:** [Architecture](../ARCHITECTURE.md), [Requirements](../REQUIREMENTS.md), [Project overview](../../README.md), [Roadmap](../../ROADMAP.md)
 - **Primary requirements:** `FR-CORE-001` through `FR-CORE-008`, `FR-CONN-003` through `FR-CONN-006`, `FR-CONN-009`, `SEC-*`, `ENG-*`
 
-> **Implementation status:** This ADR specifies the **intended design**, not a completed package, executable, API, protocol, release, or deployment. Names, commands, imports, extras, and paths shown as examples are **illustrative** and are not frozen until implemented, exercised, and documented. The GitHub repository being public does not mean a PyPI package has been published.
+> **Implementation status:** This accepted ADR (approved 2026-11-01) specifies the **approved V1 packaging and hosting design**, not a completed package, executable, API, protocol, release, or deployment. Names, commands, imports, extras, and paths shown as examples are **illustrative** and are not frozen until implemented, exercised, and documented. The GitHub repository being public does not mean a PyPI package has been published.
 
 ## 1. Context
 
@@ -338,7 +338,7 @@ Reconsideration requires evidence, migration and compatibility impact, operation
 
 ## 15. Implementation order and governance
 
-1. Review/accept ADR-0001, ADR-0002 and this ADR; align requirements and architecture links.
+1. Maintain alignment between accepted ADR-0001, ADR-0002, and this ADR across requirements and architecture links.
 2. Establish `pyproject.toml`, minimal package, clean build/import tests, developer lockfile and code-quality tools.
 3. Define only the small public contracts needed for explicit module registration, configuration and independent composition.
 4. Add the optional ASGI factory, CLI and safe startup/readiness/draining behavior with fake adapters.

@@ -1,15 +1,15 @@
 # Kaiwen Gateway — Development Roadmap
 
-> **Status:** Proposed plan — pending maintainer review
+> **Status:** Active M0 baseline (Gate A and ADR-0001..0003 accepted 2026-11-01; M1 not started)
 > **Project phase:** Design / pre-implementation
 > **Initial target release:** `0.1.0a1` (synthetic-environment alpha)
-> **Last reviewed:** 2026-10-31
+> **Last reviewed:** 2026-11-01
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
 > **Primary scope:** Reusable Python library and optional ASGI service; **Voice is the only V1 functional module**.
 
 This document describes **the order in which Kaiwen Gateway will be built**, the evidence required to close each milestone, and the dependencies that can block the next stage. It is not an implementation report or a substitute for GitHub Issues and Pull Requests.
 
-**Important status distinction:** The initial documentation baseline has been placed in the repository workspace for M0 review; **the proposed documents and milestones must not be represented as accepted, implemented, tested, released, or deployed** merely because they are listed here. Update status only from verified repository and test evidence.
+**Important status distinction:** The initial documentation baseline was published in commit `d4223509f50b67f556420138c669ca1f33ba0abd` and ADR-0001..0003 were accepted on 2026-11-01; **this approval covers the V1 architectural design only and must not be represented as an implemented package, tested integration, release, or deployment**. Update status only from verified repository and test evidence.
 
 ## 1. Sources of truth and decision authority
 
@@ -58,7 +58,7 @@ Use only these milestone status values:
 
 | ID | Milestone | Initial status | Depends on |
 | --- | --- | --- | --- |
-| **M0** | Documentation baseline and approval | `In progress` (staged in repository; pending maintainer review) | Maintainer review |
+| **M0** | Documentation baseline and approval | `Ready for review` (Gate A & ADR-0001..0003 accepted; awaiting GitHub Private Vulnerability Reporting activation per `SECURITY.md §8`) | Maintainer review |
 | **M1** | Python package and CI foundation | `Not started` | M0 |
 | **M2** | Core contracts, identity and security/admission | `Not started` | M1 |
 | **M3** | ASGI/WSS ingress and synthetic telephony adapter | `Not started` | M2 |
@@ -78,18 +78,18 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 **Deliverables**
 
-- [ ] `README.md` updated to accurately describe the *planned*, not-yet-implemented product.
-- [ ] `docs/REQUIREMENTS.md` defines requirements, priorities, `AT-*` scenarios and Gates A–D.
-- [ ] `docs/ARCHITECTURE.md` describes boundaries, trust flow, lifecycle, media/control paths and deployment assumptions.
-- [ ] `docs/decisions/0001-modular-monolith.md` reviewed and accepted or revised.
-- [ ] `docs/decisions/0002-hexagonal-architecture.md` reviewed and accepted or revised.
-- [ ] `docs/decisions/0003-library-and-server.md` reviewed and accepted or revised.
-- [ ] `AGENTS.md` defines agent permissions, quality checks, documentation rules and stop conditions.
-- [ ] `ROADMAP.md`, `CHANGELOG.md`, `SECURITY.md` and `CONTRIBUTING.md` created with accurate statuses/policies.
-- [ ] Links, scope exclusions, dependency direction, proposed package/API status and terminology cross-checked.
-- [ ] Maintainer explicitly approves the documentation baseline and authorizes M1 separately.
+- [x] `README.md` updated to accurately describe the *planned*, not-yet-implemented product.
+- [x] `docs/REQUIREMENTS.md` defines requirements, priorities, `AT-*` scenarios and Gates A–D.
+- [x] `docs/ARCHITECTURE.md` describes boundaries, trust flow, lifecycle, media/control paths and deployment assumptions.
+- [x] `docs/decisions/0001-modular-monolith.md` reviewed and accepted or revised (`Accepted`, 2026-11-01).
+- [x] `docs/decisions/0002-hexagonal-architecture.md` reviewed and accepted or revised (`Accepted`, 2026-11-01).
+- [x] `docs/decisions/0003-library-and-server.md` reviewed and accepted or revised (`Accepted`, 2026-11-01).
+- [x] `AGENTS.md` defines agent permissions, quality checks, documentation rules and stop conditions.
+- [x] `ROADMAP.md`, `CHANGELOG.md`, `SECURITY.md`, `CONTRIBUTING.md`, and `LICENSE` (MIT) created with accurate statuses/policies.
+- [x] Links, scope exclusions, dependency direction, proposed package/API status and terminology cross-checked (112+ relative links, 5 anchors, 106 unique IDs verified).
+- [ ] Maintainer explicitly approves the documentation baseline, enables/verifies GitHub Private Vulnerability Reporting ([`SECURITY.md §8`](SECURITY.md#8-security-verification-and-release-gates)), and authorizes M1 separately (Gate A and ADR-0001..0003 accepted 2026-11-01; Private Vulnerability Reporting verified as `{"enabled": false}` on GitHub; M1 authorization pending).
 
-**Exit evidence:** Reviewed diff/file inventory; link-check or documented manual link review; no contradictory V1 claims; acceptance of **Gate A** in [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md). Merely drafting local Markdown files does not close M0.
+**Exit evidence:** Baseline published in commit `d4223509f50b67f556420138c669ca1f33ba0abd`; reviewed file inventory (11 Markdown files + MIT `LICENSE`), automated relative link/anchor verification, requirement traceability verification (106 unique IDs), and **Gate A** acceptance in [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) with `ADR-0001`..`0003` accepted on 2026-11-01. Status remains `Ready for review` until GitHub Private Vulnerability Reporting ([`SECURITY.md §8`](SECURITY.md#8-security-verification-and-release-gates)) is enabled in repository settings and M1 is separately authorized.
 
 **Prohibited during M0:** Implementing transport/Voice code; adding production keys; launching deployments; publishing releases; treating `Proposed` ADRs as accepted without approval.
 
@@ -372,6 +372,7 @@ A future idea becomes committed scope **only after** the maintainer approves an 
 | Date | Change | Status |
 | --- | --- | --- |
 | 2026-10-31 | Drafted M0–M8 plan and synthetic-alpha/pilot/production boundaries | Proposed; not a record of completed implementation |
+| 2026-11-01 | Published M0 baseline (`d422350`), accepted ADR-0001..0003 and Gate A, added MIT `LICENSE` | `Ready for review` (awaiting GitHub Private Vulnerability Reporting activation and separate M1 authorization) |
 
 ---
 

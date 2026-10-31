@@ -4,8 +4,8 @@
 > **Package:** `kaiwen-gateway` / import `kaiwen_gateway`
 > **Product phase:** Design / pre-implementation
 > **Target first alpha:** `0.1.0a1`
-> **Document status:** Proposed operating rules, pending maintainer acceptance
-> **Last reviewed:** 2026-10-31
+> **Document status:** Active operating rules (M0 baseline accepted 2026-11-01)
+> **Last reviewed:** 2026-11-01
 
 This file governs autonomous and assisted coding work in the Kaiwen Gateway repository, including work performed by Antigravity, Codex, and other coding agents. It is a **repository-level working contract**, not permission to expand the project, deploy a system, or claim that unimplemented features exist.
 
@@ -71,7 +71,7 @@ Do not create empty future-module directories simply to make the repository look
 - **ADR-0002:** Hexagonal Architecture — inward dependencies, typed ports, replaceable adapters and explicit composition.
 - **ADR-0003:** Library and Server — one Python distribution; minimal importable library core; optional hosting and CLI, not two implementations.
 
-Read the **actual ADR status** before describing these as formally accepted. They are proposed documents during initial setup.
+ADR-0001 through ADR-0003 were accepted by the maintainer on 2026-11-01 as the V1 architectural design baseline (not as proof of runtime implementation). Always read the **actual ADR status** in `docs/decisions/` before describing any future ADR as formally accepted.
 
 ### 3.2 Dependency direction
 
