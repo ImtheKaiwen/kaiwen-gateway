@@ -1,7 +1,7 @@
 # Security Policy
 
 > **Project:** [Kaiwen Gateway](https://github.com/ImtheKaiwen/kaiwen-gateway)
-> **Status:** Design / pre-implementation; M0 security policy baseline (private vulnerability reporting activation pending).
+> **Status:** Design / pre-implementation; active M0 security policy baseline (accepted 2026-11-01).
 > **Target first alpha:** `0.1.0a1` (**not published**).
 > **Last reviewed:** 2026-11-01
 
@@ -17,13 +17,13 @@ The authoritative implementation requirements are in [docs/REQUIREMENTS.md](docs
 
 ### Preferred private reporting channel
 
-The intended channel is **GitHub Private Vulnerability Reporting**, using this repository's **Security / Advisories / Report a vulnerability** flow **once the repository owner enables that feature**.
+The primary channel is **GitHub Private Vulnerability Reporting**, using this repository's **Security / Advisories / Report a vulnerability** flow.
 
 - Repository: https://github.com/ImtheKaiwen/kaiwen-gateway
 - Security and advisories page: https://github.com/ImtheKaiwen/kaiwen-gateway/security
 - GitHub instructions for reporting privately: https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately
 
-**Important: GitHub Private Vulnerability Reporting is currently disabled (`{"enabled": false}` verified on 2026-11-01).** Publishing `SECURITY.md` does **not** enable private vulnerability reporting. The maintainer must enable the setting in the repository's security settings, verify that the **Report a vulnerability** action is available to an external reporter, and enable appropriate notifications before treating this channel as operational.
+**Verification status:** GitHub Private Vulnerability Reporting is enabled on this repository (`{"enabled": true}` verified via the GitHub API on 2026-11-01). Publishing `SECURITY.md` alone does not maintain repository settings; maintainers should periodically verify that the **Report a vulnerability** action and security advisory notifications remain active.
 
 If that action is unavailable, **do not submit the vulnerability details publicly**. A generic issue asking the maintainer to establish a confidential reporting route is acceptable **only if it includes no vulnerability details or hints that would enable exploitation**. This is a temporary fallback, **not** a substitute for a configured private reporting channel. No alternative security email address is currently designated; do not guess or invent one.
 
@@ -204,4 +204,4 @@ No milestone is complete merely because the table lists a desired check. Status 
 
 ---
 
-**Maintainer action required before public security intake:** Enable and verify GitHub Private Vulnerability Reporting, configure notifications, and review this proposed policy. Do not publish an unverified email address or claim a response SLA that has not been staffed.
+**Maintainer note:** GitHub Private Vulnerability Reporting has been enabled and verified (`2026-11-01`). Keep repository advisory notifications active, and do not publish an unverified email address or claim a response SLA that has not been staffed.

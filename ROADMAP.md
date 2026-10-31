@@ -1,6 +1,6 @@
 # Kaiwen Gateway — Development Roadmap
 
-> **Status:** Active M0 baseline (Gate A and ADR-0001..0003 accepted 2026-11-01; M1 not started)
+> **Status:** Active roadmap — M0 Complete (2026-11-01); M1 Not started (awaiting separate authorization)
 > **Project phase:** Design / pre-implementation
 > **Initial target release:** `0.1.0a1` (synthetic-environment alpha)
 > **Last reviewed:** 2026-11-01
@@ -58,7 +58,7 @@ Use only these milestone status values:
 
 | ID | Milestone | Initial status | Depends on |
 | --- | --- | --- | --- |
-| **M0** | Documentation baseline and approval | `Ready for review` (Gate A & ADR-0001..0003 accepted; awaiting GitHub Private Vulnerability Reporting activation per `SECURITY.md §8`) | Maintainer review |
+| **M0** | Documentation baseline and approval | `Complete` (closed 2026-11-01; commits `d422350`, `27ab0f9`) | Maintainer review |
 | **M1** | Python package and CI foundation | `Not started` | M0 |
 | **M2** | Core contracts, identity and security/admission | `Not started` | M1 |
 | **M3** | ASGI/WSS ingress and synthetic telephony adapter | `Not started` | M2 |
@@ -86,10 +86,10 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - [x] `docs/decisions/0003-library-and-server.md` reviewed and accepted or revised (`Accepted`, 2026-11-01).
 - [x] `AGENTS.md` defines agent permissions, quality checks, documentation rules and stop conditions.
 - [x] `ROADMAP.md`, `CHANGELOG.md`, `SECURITY.md`, `CONTRIBUTING.md`, and `LICENSE` (MIT) created with accurate statuses/policies.
-- [x] Links, scope exclusions, dependency direction, proposed package/API status and terminology cross-checked (112+ relative links, 5 anchors, 106 unique IDs verified).
-- [ ] Maintainer explicitly approves the documentation baseline, enables/verifies GitHub Private Vulnerability Reporting ([`SECURITY.md §8`](SECURITY.md#8-security-verification-and-release-gates)), and authorizes M1 separately (Gate A and ADR-0001..0003 accepted 2026-11-01; Private Vulnerability Reporting verified as `{"enabled": false}` on GitHub; M1 authorization pending).
+- [x] Links, scope exclusions, dependency direction, proposed package/API status and terminology cross-checked (117 relative links, 7 anchors, 106 unique IDs verified).
+- [x] Maintainer explicitly approves the documentation baseline and enables/verifies GitHub Private Vulnerability Reporting ([`SECURITY.md §8`](SECURITY.md#8-security-verification-and-release-gates)); M1 authorization remains a separate step (Gate A and ADR-0001..0003 accepted 2026-11-01; Private Vulnerability Reporting verified as `{"enabled": true}` via GitHub API on 2026-11-01; M1 remains `Not started`).
 
-**Exit evidence:** Baseline published in commit `d4223509f50b67f556420138c669ca1f33ba0abd`; reviewed file inventory (11 Markdown files + MIT `LICENSE`), automated relative link/anchor verification, requirement traceability verification (106 unique IDs), and **Gate A** acceptance in [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) with `ADR-0001`..`0003` accepted on 2026-11-01. Status remains `Ready for review` until GitHub Private Vulnerability Reporting ([`SECURITY.md §8`](SECURITY.md#8-security-verification-and-release-gates)) is enabled in repository settings and M1 is separately authorized.
+**Exit evidence:** Baseline published in commit `d4223509f50b67f556420138c669ca1f33ba0abd` and updated with accepted ADRs and MIT `LICENSE` in commit `27ab0f96c42ad150ca7b1191fa94e78bdf38e452`; reviewed file inventory (11 Markdown files + MIT `LICENSE`), automated relative link/anchor verification (117 links, 7 anchors), requirement traceability verification (106 unique IDs), **Gate A** acceptance in [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md), `ADR-0001`..`0003` marked `Accepted`, and GitHub Private Vulnerability Reporting verified as `{"enabled": true}` (`2026-11-01`). Closing M0 does **not** automatically authorize M1; M1 remains `Not started` until separately authorized.
 
 **Prohibited during M0:** Implementing transport/Voice code; adding production keys; launching deployments; publishing releases; treating `Proposed` ADRs as accepted without approval.
 
@@ -372,7 +372,7 @@ A future idea becomes committed scope **only after** the maintainer approves an 
 | Date | Change | Status |
 | --- | --- | --- |
 | 2026-10-31 | Drafted M0–M8 plan and synthetic-alpha/pilot/production boundaries | Proposed; not a record of completed implementation |
-| 2026-11-01 | Published M0 baseline (`d422350`), accepted ADR-0001..0003 and Gate A, added MIT `LICENSE` | `Ready for review` (awaiting GitHub Private Vulnerability Reporting activation and separate M1 authorization) |
+| 2026-11-01 | Published M0 baseline (`d422350`), accepted ADR-0001..0003 and Gate A (`27ab0f9`), added MIT `LICENSE`, verified GitHub Private Vulnerability Reporting (`{"enabled": true}`), and closed M0 | `Complete` (M0 closed; M1 remains `Not started`) |
 
 ---
 
