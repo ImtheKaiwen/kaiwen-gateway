@@ -1,0 +1,34 @@
+# Python virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[codz]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+wheels/
+*.egg-info/
+*.egg
+
+# Testing and type checking caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor artifacts
+.DS_Store
+Thumbs.db
