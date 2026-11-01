@@ -1,6 +1,6 @@
 # Kaiwen Gateway — Development Roadmap
 
-> **Status:** Active roadmap — M0 Complete (2026-11-01); M1 Not started (awaiting separate authorization)
+> **Status:** Active roadmap — M0 Complete (2026-11-01); M1 Complete (2026-11-01; M1.1–M1.4 verified); M2 Not started (awaiting separate authorization)
 > **Project phase:** Design / pre-implementation
 > **Initial target release:** `0.1.0a1` (synthetic-environment alpha)
 > **Last reviewed:** 2026-11-01
@@ -59,7 +59,7 @@ Use only these milestone status values:
 | ID | Milestone | Initial status | Depends on |
 | --- | --- | --- | --- |
 | **M0** | Documentation baseline and approval | `Complete` (closed 2026-11-01; commits `d422350`, `27ab0f9`, `4a8fe82`) | Maintainer review |
-| **M1** | Python package and CI foundation | `In progress` (M1.1 merged in `#1`; M1.2 merged in `#2`; M1.3 merged in `#3` / `1355b0c` & verified on `main` run `41263309448`; M1.4A verified on PR `#4` / run `41264257695`, merge & M1.4B branch protection pending) | M0 |
+| **M1** | Python package and CI foundation | `Complete` (M1.1 merged in `#1` / `b0a666e`; M1.2 merged in `#2` / `9c0293c`; M1.3 merged in `#3` / `1355b0c` & verified on `main` run `41263309448`; M1.4A merged in `#4` / `32111a4` & verified on `main` run `41264905664` + Dependabot runs `41264912866`, `41264912883`; M1.4B.1 `main` branch protection enabled & verified via GitHub API) | M0 |
 | **M2** | Core contracts, identity and security/admission | `Not started` | M1 |
 | **M3** | ASGI/WSS ingress and synthetic telephony adapter | `Not started` | M2 |
 | **M4** | Voice audio bridge and Kaiwen Agent integration | `Not started` | M3 |
@@ -105,10 +105,10 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - [x] Ruff formatting/lint, strict mypy and pytest configuration; small unit-test harness (M1.2: configured in `pyproject.toml` and verified on `src` and `tests`, merged in `#2` / `9c0293c`).
 - [x] `tests/` layout and a clean-environment wheel build/install/import smoke test (M1.1–M1.2: `tests/test_package.py` unit/subprocess tests and isolated wheel/sdist smoke verification, merged in `#2` / `9c0293c`).
 - [x] GitHub Actions **fast CI** for checks, tests and wheel validation, with minimal permissions (M1.3: `.github/workflows/ci.yml` merged in [PR #3](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/3) / commit `1355b0c2093bfac4d0520ffb3ffb06ccc5f2b937` and verified on `push -> main` in [GitHub Actions run `41263309448`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41263309448) with all 4 jobs — Python 3.11, Python 3.12, Python 3.13, and Package Build & Clean Wheel Smoke Test — passing).
-- [ ] Basic security/dependency/workflow hygiene (e.g., least-privilege Actions, dependency update policy and checks as available; M1.4A `.github/dependabot.yml` for `uv` and `github-actions`, `uv audit --locked` CI gate, and Node 24 SHA-pinned actions verified on open [PR #4](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/4) in [GitHub Actions run `41264257695`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264257695) with all 4 jobs and the `uv audit` step passing; PR #4 merge to `main` and M1.4B branch protection/closure pending).
-- [x] README developer setup instructions updated **only after commands are verified** (M1.1–M1.2 verified local `uv` quality/test/build commands documented in `README.md`, `CONTRIBUTING.md`, and `AGENTS.md`).
+- [x] Basic security/dependency/workflow hygiene (e.g., least-privilege Actions, dependency update policy and checks as available; M1.4A `.github/dependabot.yml` for weekly `uv` and `github-actions` updates, `uv audit --locked` CI gate, and Node 24 SHA-pinned actions merged in [PR #4](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/4) / commit `32111a402b289a5608cd70effdb70fa0fe53d877` and verified on `push -> main` in [GitHub Actions run `41264905664`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264905664) plus initial Dependabot runs [`41264912866`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264912866) for `uv` and [`41264912883`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264912883) for `github-actions`; M1.4B.1 `main` branch protection enabled and verified via GitHub API with `protected: true`, PR requirement, `required_approving_review_count: 0`, `strict: true`, 4 required status checks bound to GitHub Actions `app_id: 15368`, `enforce_admins: true`, `required_linear_history: true`, `allow_force_pushes: false`, and `allow_deletions: false`).
+- [x] README developer setup instructions updated **only after commands are verified** (M1.1–M1.4 verified local `uv` quality/test/audit/build commands and CI/branch-protection status documented in `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `AGENTS.md`).
 
-**Exit evidence:** Passing formatter/linter/typecheck/tests/build in documented environment; workflow run link or explicit explanation why no remote run exists; installed-wheel smoke result. Package install must not start a server or contact any provider.
+**Exit evidence:** Passing formatter/linter/typecheck/tests/audit/build in documented local environment and across Python 3.11, 3.12, and 3.13 in GitHub Actions ([run `41263309448`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41263309448) for M1.3 and [run `41264905664`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264905664) for M1.4A); initial Dependabot runs ([`41264912866`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264912866), [`41264912883`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264912883)); isolated installed-wheel smoke test confirming side-effect-free import without starting a server or contacting any provider; and verified `main` branch protection configuration (`protected: true`, 4 required checks bound to `app_id: 15368`, `strict: true`, `enforce_admins: true`, `required_linear_history: true`). Closing M1 takes effect on `main` once the M1 closure PR is merged and does **not** automatically authorize M2; M2 remains `Not started` until separately authorized.
 
 **Relevant IDs:** `FR-CORE-001`, `FR-CORE-005`, `ENG-*`, `CI-001` through `CI-003`, `AT-001` (package portion).
 
@@ -373,6 +373,7 @@ A future idea becomes committed scope **only after** the maintainer approves an 
 | --- | --- | --- |
 | 2026-10-31 | Drafted M0–M8 plan and synthetic-alpha/pilot/production boundaries | Proposed; not a record of completed implementation |
 | 2026-11-01 | Published M0 baseline (`d422350`), accepted ADR-0001..0003 and Gate A (`27ab0f9`), added MIT `LICENSE`, verified GitHub Private Vulnerability Reporting (`{"enabled": true}`), and closed M0 | `Complete` (M0 closed; M1 remains `Not started`) |
+| 2026-11-01 | Completed M1 package, quality/testing, Fast CI, dependency/workflow security (`#1` / `b0a666e`, `#2` / `9c0293c`, `#3` / `1355b0c`, `#4` / `32111a4`), and `main` branch protection (`M1.4B.1`), and prepared M1 closure documentation (`M1.4B.2`) | `Complete` (M1 closed upon merge to `main`; M2 remains `Not started`) |
 
 ---
 
