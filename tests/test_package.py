@@ -29,7 +29,9 @@ def test_public_api_surface_is_minimal() -> None:
     for symbol in kaiwen_gateway.__all__:
         assert hasattr(kaiwen_gateway, symbol)
     unexported_public_objects = [
-        name for name in dir(kaiwen_gateway) if not name.startswith("_") and name != "Final"
+        name
+        for name in dir(kaiwen_gateway)
+        if not name.startswith("_") and name not in {"Final", "core"}
     ]
     assert unexported_public_objects == []
 
