@@ -162,15 +162,25 @@ A passing unit suite does **not** prove real telephony interoperability, securit
 
 ## Getting started
 
-**The package and CLI are not yet released.** Installation commands, a working quickstart, endpoint paths, and configuration examples will be published **after they are implemented and covered by tests**. Please do not assume an example endpoint or command from design discussions is available today.
+**The package is not yet released on PyPI, and the CLI, ASGI server, and Voice runtime are not yet implemented.** Public endpoint paths, server commands, and configuration examples will be published **after they are implemented and covered by tests**. Please do not assume an example endpoint or command from design discussions is available today.
 
-For now:
+### Verified local package foundation (M1.1)
+
+From a local clone with Python 3.11+ and [`uv`](https://docs.astral.sh/uv/) installed, the minimal package skeleton can be synced, imported, and built locally:
+
+```bash
+uv sync
+uv run python -c "import kaiwen_gateway; print(kaiwen_gateway.__version__)"
+uv build
+```
+
+For architecture and milestone tracking:
 
 1. Read [`ROADMAP.md`](ROADMAP.md) and [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the V1 scope, milestones, and acceptance gates.
 2. Review [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/decisions/`](docs/decisions/) for boundaries and accepted V1 architectural decisions.
 3. Track implementation through issues and pull requests rather than treating this README as an implementation checklist.
 
-**Note:** The M0 documentation baseline and initial ADRs (`ADR-0001`–`0003`) have been accepted as the V1 design baseline (`2026-11-01`); they describe intended V1 architecture rather than shipped runtime functionality.
+**Note:** The M0 documentation baseline and initial ADRs (`ADR-0001`–`0003`) have been accepted as the V1 design baseline (`2026-11-01`), and only the M1.1 Python package skeleton is implemented so far.
 
 ## Documentation map
 

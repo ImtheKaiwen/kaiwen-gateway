@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kaiwen-gateway"
+version = "0.1.0a1"
+description = "Modular, provider-agnostic communication gateway for real-time AI applications."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Kaiwen" },
+]
+keywords = [
+    "ai",
+    "gateway",
+    "realtime",
+    "telephony",
+    "voice",
+    "websocket",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Telephony",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ImtheKaiwen/kaiwen-gateway"
+Repository = "https://github.com/ImtheKaiwen/kaiwen-gateway.git"
+Documentation = "https://github.com/ImtheKaiwen/kaiwen-gateway/tree/main/docs"
+Issues = "https://github.com/ImtheKaiwen/kaiwen-gateway/issues"
+Changelog = "https://github.com/ImtheKaiwen/kaiwen-gateway/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kaiwen_gateway"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src/kaiwen_gateway",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "pyproject.toml",
+]
