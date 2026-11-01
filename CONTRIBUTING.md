@@ -76,6 +76,7 @@ The repository uses a PEP 735 `dependency-groups.dev` group in [`pyproject.toml`
 
 ```bash
 uv sync --locked --group dev
+uv audit --locked --preview-features audit-command
 uv run --locked --group dev ruff format --check .
 uv run --locked --group dev ruff check .
 uv run --locked --group dev mypy src tests
