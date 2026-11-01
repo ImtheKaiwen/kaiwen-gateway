@@ -1,0 +1,160 @@
+name: Fast CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  quality:
+    name: Quality & Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Verify lockfile
+        run: uv lock --check
+
+      - name: Sync development environment for Python ${{ matrix.python-version }}
+        run: uv sync --python "${{ matrix.python-version }}" --locked --group dev
+
+      - name: Verify active Python interpreter matches matrix
+        run: |
+          uv run --no-sync python -c "import sys; actual = f'{sys.version_info.major}.{sys.version_info.minor}'; expected = '${{ matrix.python-version }}'; print(f'Active Python: {sys.version} (expected {expected})'); assert actual == expected, f'Expected Python {expected}, got {actual}'"
+
+      - name: Run Ruff linter
+        run: uv run --no-sync ruff check .
+
+      - name: Run Ruff format check
+        run: uv run --no-sync ruff format --check .
+
+      - name: Run strict mypy type check
+        run: uv run --no-sync mypy src tests
+
+      - name: Run pytest with coverage
+        run: uv run --no-sync pytest -q --cov=kaiwen_gateway --cov-report=term-missing
+
+  package-smoke:
+    name: Package Build & Clean Wheel Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python 3.12
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Build wheel and sdist distributions
+        run: uv build
+
+      - name: Inspect wheel and sdist contents and metadata
+        run: |
+          uv run --no-project --python 3.12 python - <<'PY'
+          import pathlib
+          import tarfile
+          import zipfile
+
+          dist_dir = pathlib.Path("dist")
+          wheels = list(dist_dir.glob("*.whl"))
+          sdists = list(dist_dir.glob("*.tar.gz"))
+          assert len(wheels) == 1, f"Expected 1 wheel, found: {wheels}"
+          assert len(sdists) == 1, f"Expected 1 sdist, found: {sdists}"
+
+          with zipfile.ZipFile(wheels[0]) as zf:
+              wheel_names = zf.namelist()
+              print("Wheel entries:", wheel_names)
+              assert "kaiwen_gateway/__init__.py" in wheel_names
+              assert "kaiwen_gateway/py.typed" in wheel_names
+              assert not any(name.startswith("tests/") for name in wheel_names), "tests/ leaked into wheel"
+              meta_files = [name for name in wheel_names if name.endswith(".dist-info/METADATA")]
+              assert len(meta_files) == 1
+              metadata_text = zf.read(meta_files[0]).decode("utf-8")
+              req_lines = [line for line in metadata_text.splitlines() if line.startswith("Requires-Dist:")]
+              assert req_lines == [], f"Unexpected runtime dependencies in wheel: {req_lines}"
+
+          with tarfile.open(sdists[0], "r:gz") as tf:
+              sdist_names = tf.getnames()
+              print("sdist entries:", sdist_names)
+              assert any(name.endswith("/src/kaiwen_gateway/__init__.py") for name in sdist_names)
+              assert any(name.endswith("/src/kaiwen_gateway/py.typed") for name in sdist_names)
+              assert any(name.endswith("/tests/test_package.py") for name in sdist_names)
+          PY
+
+      - name: Install wheel into isolated virtualenv and verify side-effect-free import outside repo
+        run: |
+          WHEEL_PATH="$(pwd)/dist/kaiwen_gateway-0.1.0a1-py3-none-any.whl"
+          SMOKE_DIR="$(mktemp -d)"
+          cd "${SMOKE_DIR}"
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python "${WHEEL_PATH}"
+          .venv/bin/python - <<'PY'
+          import importlib.metadata
+          import os
+          import pathlib
+          import socket
+          import sys
+          import threading
+          import typing
+
+          def _deny_network(*args: object, **kwargs: object) -> None:
+              raise AssertionError(f"Unexpected network call during import: {args!r} {kwargs!r}")
+
+          socket.socket.connect = _deny_network
+          socket.socket.connect_ex = _deny_network
+          socket.socket.bind = _deny_network
+          socket.create_connection = _deny_network
+          socket.getaddrinfo = _deny_network
+
+          _ = typing.Final
+          cwd_before = set(os.listdir("."))
+          threads_before = threading.active_count()
+          modules_before = set(sys.modules.keys())
+
+          import kaiwen_gateway
+
+          cwd_after = set(os.listdir("."))
+          threads_after = threading.active_count()
+          new_modules = sorted(set(sys.modules.keys()) - modules_before)
+
+          assert kaiwen_gateway.__file__ is not None
+          installed_path = pathlib.Path(kaiwen_gateway.__file__).resolve()
+          print("Imported from:", installed_path)
+          assert "site-packages" in installed_path.parts
+          assert (installed_path.parent / "py.typed").is_file()
+          assert kaiwen_gateway.__version__ == "0.1.0a1"
+          assert importlib.metadata.version("kaiwen-gateway") == "0.1.0a1"
+          assert importlib.metadata.requires("kaiwen-gateway") is None
+          assert cwd_before == cwd_after
+          assert threads_before == threads_after == 1
+          assert new_modules == ["kaiwen_gateway"]
+          PY

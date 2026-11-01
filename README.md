@@ -183,7 +183,9 @@ For architecture and milestone tracking:
 2. Review [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/decisions/`](docs/decisions/) for boundaries and accepted V1 architectural decisions.
 3. Track implementation through issues and pull requests rather than treating this README as an implementation checklist.
 
-**Note:** The M0 documentation baseline and initial ADRs (`ADR-0001`–`0003`) have been accepted as the V1 design baseline (`2026-11-01`), and only the M1.1–M1.2 Python package and local code-quality/test foundation are implemented so far.
+A fast GitHub Actions CI workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) is configured for pull requests and pushes to `main` across Python 3.11, 3.12, and 3.13, plus isolated wheel/sdist smoke validation (verified on [PR #3](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/3) in [GitHub Actions run `41262776544`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41262776544); `main` branch push run pending PR merge).
+
+**Note:** The M0 documentation baseline and initial ADRs (`ADR-0001`–`0003`) have been accepted as the V1 design baseline (`2026-11-01`), and only the M1.1–M1.3 Python package, local quality/test suite, and fast CI workflow configuration are implemented so far.
 
 ## Documentation map
 
