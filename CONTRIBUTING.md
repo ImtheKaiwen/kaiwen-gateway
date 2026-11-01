@@ -83,7 +83,9 @@ uv run --locked --group dev pytest -q --cov=kaiwen_gateway --cov-report=term-mis
 uv build
 ```
 
-**Never invent a passing result** for a command that was not executed. If a check cannot run, mark it `NOT RUN` or `BLOCKED` and state why. Passing local checks do not imply that GitHub Actions CI has run until the workflow is implemented and executed.
+These commands mirror the fast CI quality gates in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), which runs on `pull_request` and `push` to `main` across Python 3.11, 3.12, and 3.13 alongside an isolated wheel/sdist build and import smoke job.
+
+**Never invent a passing result** for a command that was not executed. If a check cannot run, mark it `NOT RUN` or `BLOCKED` and state why. Passing local checks do not imply that a remote GitHub Actions run has succeeded until the workflow run is observed on GitHub.
 
 Avoid manually modifying the generated lockfile. When dependencies change, regenerate it using the selected package manager, include the updated lockfile when required by repository policy, and explain the dependency's purpose.
 
