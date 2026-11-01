@@ -59,7 +59,7 @@ Use only these milestone status values:
 | ID | Milestone | Initial status | Depends on |
 | --- | --- | --- | --- |
 | **M0** | Documentation baseline and approval | `Complete` (closed 2026-11-01; commits `d422350`, `27ab0f9`, `4a8fe82`) | Maintainer review |
-| **M1** | Python package and CI foundation | `In progress` (M1.1 merged in `#1`; M1.2 merged in `#2`; M1.3 fast CI verified on PR `#3` / run `41262776544`, merge review & M1.4 pending) | M0 |
+| **M1** | Python package and CI foundation | `In progress` (M1.1 merged in `#1`; M1.2 merged in `#2`; M1.3 merged in `#3` / `1355b0c` & verified on `main` run `41263309448`; M1.4A security hardening prepared locally, M1.4B pending) | M0 |
 | **M2** | Core contracts, identity and security/admission | `Not started` | M1 |
 | **M3** | ASGI/WSS ingress and synthetic telephony adapter | `Not started` | M2 |
 | **M4** | Voice audio bridge and Kaiwen Agent integration | `Not started` | M3 |
@@ -104,8 +104,8 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - [x] `uv` project/lock setup and documented local commands; resolve supported Python version policy (M1.1–M1.3: `uv.lock`, `uv sync --locked --group dev`, and Python 3.11/3.12/3.13 matrix verified locally).
 - [x] Ruff formatting/lint, strict mypy and pytest configuration; small unit-test harness (M1.2: configured in `pyproject.toml` and verified on `src` and `tests`, merged in `#2` / `9c0293c`).
 - [x] `tests/` layout and a clean-environment wheel build/install/import smoke test (M1.1–M1.2: `tests/test_package.py` unit/subprocess tests and isolated wheel/sdist smoke verification, merged in `#2` / `9c0293c`).
-- [ ] GitHub Actions **fast CI** for checks, tests and wheel validation, with minimal permissions (M1.3 `.github/workflows/ci.yml` configured with `contents: read`, SHA-pinned actions, and verified across all 4 jobs — Python 3.11, 3.12, 3.13, and clean wheel smoke — on [PR #3](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/3) in [GitHub Actions run `41262776544`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41262776544); checkbox remains open pending PR #3 merge to `main` and post-merge `main` push run).
-- [ ] Basic security/dependency/workflow hygiene (e.g., least-privilege Actions, dependency update policy and checks as available).
+- [x] GitHub Actions **fast CI** for checks, tests and wheel validation, with minimal permissions (M1.3: `.github/workflows/ci.yml` merged in [PR #3](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/3) / commit `1355b0c2093bfac4d0520ffb3ffb06ccc5f2b937` and verified on `push -> main` in [GitHub Actions run `41263309448`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41263309448) with all 4 jobs — Python 3.11, Python 3.12, Python 3.13, and Package Build & Clean Wheel Smoke Test — passing).
+- [ ] Basic security/dependency/workflow hygiene (e.g., least-privilege Actions, dependency update policy and checks as available; M1.4A `.github/dependabot.yml` for `uv` and `github-actions`, `uv audit --locked` CI gate, and Node 24 SHA-pinned actions prepared locally; remote verification and M1.4B branch protection/closure pending).
 - [x] README developer setup instructions updated **only after commands are verified** (M1.1–M1.2 verified local `uv` quality/test/build commands documented in `README.md`, `CONTRIBUTING.md`, and `AGENTS.md`).
 
 **Exit evidence:** Passing formatter/linter/typecheck/tests/build in documented environment; workflow run link or explicit explanation why no remote run exists; installed-wheel smoke result. Package install must not start a server or contact any provider.

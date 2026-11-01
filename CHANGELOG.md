@@ -16,7 +16,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - Verified GitHub Private Vulnerability Reporting (`{"enabled": true}`) and closed the M0 documentation baseline milestone (`4a8fe82`).
 - Added the initial M1.1 local Python package foundation (`pyproject.toml`, `uv.lock`, `.gitignore`, `src/kaiwen_gateway/__init__.py`, and `src/kaiwen_gateway/py.typed`) targeting Python `>=3.11` with Hatchling, zero mandatory runtime dependencies, and no import-time side effects (`b0a666e`, **package skeleton only; not published to PyPI**).
 - Added the M1.2 local code-quality and testing foundation (`dependency-groups.dev` with Ruff, strict mypy, pytest, and pytest-cov in `pyproject.toml` and `uv.lock`, plus package/import verification tests in `tests/test_package.py`, `9c0293c`).
-- Added the M1.3 GitHub Actions fast CI workflow (`.github/workflows/ci.yml`) configured for `pull_request` and `push` to `main` across Python 3.11, 3.12, and 3.13 with `contents: read` permissions, commit-SHA-pinned actions, and an isolated wheel/sdist build and import smoke job.
+- Added the M1.3 GitHub Actions fast CI workflow (`.github/workflows/ci.yml`) configured for `pull_request` and `push` to `main` across Python 3.11, 3.12, and 3.13 with `contents: read` permissions, commit-SHA-pinned actions, and an isolated wheel/sdist build and import smoke job (`1355b0c`).
+- Added the M1.4A dependency and workflow security configuration: `.github/dependabot.yml` for weekly `uv` and `github-actions` updates, `uv audit --locked` vulnerability checking in `.github/workflows/ci.yml`, and Node.js 24 native SHA-pinned GitHub Actions (`actions/checkout@v6.1.0`, `astral-sh/setup-uv@v8.3.2`).
 - Documented the intended initial scope: a provider-neutral Python library with an optional ASGI server, focusing exclusively on the Voice module for V1. **Runtime features are not yet implemented.**
 
 ## Maintenance policy

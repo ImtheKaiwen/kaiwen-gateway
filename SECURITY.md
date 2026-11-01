@@ -145,8 +145,8 @@ The required engineering direction is:
 
 - Keep `main` protected by reviewed pull requests and required status checks when repository controls are configured.
 - Use Ruff, strict type checking, unit/integration/contract tests, negative-auth tests, cross-tenant tests, and malformed-frame/fault tests as appropriate to each change.
-- Scan dependencies, source, secrets, container artifacts, and GitHub Actions configurations with tools supported by the actual repository and plan. Review findings rather than treating a scan's exit status as a complete security assessment.
-- Pin and review build/workflow dependencies; give each workflow the **least GitHub token permissions** needed.
+- Scan dependencies, source, secrets, container artifacts, and GitHub Actions configurations with tools supported by the actual repository and plan (`uv audit --locked` in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), weekly Dependabot version-update configuration for `uv` and `github-actions` in [`.github/dependabot.yml`](.github/dependabot.yml) once merged to `main` ? distinct from the repository-level Dependabot Security Updates setting, which remains disabled ? and GitHub Secret Scanning with push protection). Review findings rather than treating a scan's exit status as a complete security assessment.
+- Pin and review build/workflow dependencies to full 40-character commit SHAs; give each workflow the **least GitHub token permissions** needed (`permissions: contents: read` and `persist-credentials: false`).
 - Keep release credentials and deployment authority isolated from ordinary CI/PR jobs. Prefer **OIDC / trusted publishing** to persistent publishing tokens when supported.
 - Build reproducible-enough, traceable artifacts and record the source commit and image/package identifiers. Do not claim signatures, attestations, or provenance exist before they are generated and verified.
 - Review third-party contribution changes to security boundaries and dependencies before merge; untrusted PRs must not receive production secrets.
