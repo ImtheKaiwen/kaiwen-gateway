@@ -2,14 +2,14 @@
 
 > **Project:** [Kaiwen Gateway](https://github.com/ImtheKaiwen/kaiwen-gateway)
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
-> **Phase:** Design / pre-implementation; M0 documentation baseline approved
+> **Phase:** Pre-implementation; M0 documentation baseline and M1 engineering foundation verified
 > **Planned first alpha:** `0.1.0a1` — **not released**
 > **Document status:** Active contributor guide (accepted 2026-11-01)
 > **Last reviewed:** 2026-11-01
 
 Thank you for your interest in Kaiwen Gateway. This guide describes how to propose, develop, test, review, and document changes to the project. It applies to human contributors and complements the [coding-agent instructions](AGENTS.md). It does **not** grant permission to use production systems, customer data, paid AI services, or release credentials.
 
-**Current state:** The repository is still in its documentation/design phase. The intended Python package, CLI, WebSocket server, provider adapters, tests, and GitHub Actions may not exist yet. Commands in this guide that depend on those files are **planned for milestone M1 and later**; do not report them as working until they have been implemented and executed successfully.
+**Current state:** The M0 documentation baseline and M1 engineering foundation (minimal `kaiwen_gateway` package skeleton, `uv.lock`, Ruff, strict mypy, pytest, fast GitHub Actions CI, `uv audit`, Dependabot version updates, and `main` branch protection) are in place. Gateway Core runtime, Voice bridge, ASGI/WSS server, CLI, and provider adapters are **planned for milestone M2 and later**; do not report unimplemented runtime features or commands as working until they have been implemented and executed successfully.
 
 ## 1. Before you contribute
 
@@ -66,7 +66,7 @@ cd kaiwen-gateway
 git switch -c docs/contributing-guide
 ```
 
-For external contributors, fork the repository first and clone your fork. The maintainer may choose a different branch/PR workflow while repository protections are being configured; **do not assume branch protection is already enabled**.
+For external contributors, fork the repository first and clone your fork. The `main` branch is protected (`protected: true`, `enforce_admins: true`, `required_linear_history: true`, `allow_force_pushes: false`, `allow_deletions: false`): all changes must be proposed via a Pull Request from an up-to-date branch (`strict: true`), pass all four required GitHub Actions status checks (`Quality & Tests (Python 3.11)`, `Quality & Tests (Python 3.12)`, `Quality & Tests (Python 3.13)`, and `Package Build & Clean Wheel Smoke Test`), and be merged using **Squash and Merge**. Do not push directly to `main` or force-push to shared branches.
 
 Suggested branch prefixes: `docs/`, `feat/`, `fix/`, `test/`, `security/`, `perf/`, and `chore/`.
 
@@ -213,7 +213,7 @@ Reviewers should verify correctness **and** containment of the change:
 - Are new runtime/development dependencies justified, versioned and reviewed?
 - Is documentation updated without marking proposed features as shipped or ADRs as accepted?
 
-The maintainer decides when to merge. A green CI status is necessary when required checks are configured, but it is **not** a substitute for scope and security review.
+The maintainer decides when to merge. On `main`, branch protection enforces Pull Requests, `strict: true` up-to-date branches, `enforce_admins: true`, `required_linear_history: true` (via **Squash and Merge**), and all four required GitHub Actions checks (`Quality & Tests (Python 3.11)`, `Quality & Tests (Python 3.12)`, `Quality & Tests (Python 3.13)`, and `Package Build & Clean Wheel Smoke Test`, bound to `github-actions` `app_id: 15368`). Never merge a PR with failing or pending required checks. While `required_approving_review_count` is set to `0` so the single maintainer can merge verified PRs without requiring a second human reviewer, a green CI status is **not** a substitute for scope and security review.
 
 ## 6. Documentation and design decisions
 

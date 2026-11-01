@@ -164,12 +164,13 @@ A passing unit suite does **not** prove real telephony interoperability, securit
 
 **The package is not yet released on PyPI, and the CLI, ASGI server, and Voice runtime are not yet implemented.** Public endpoint paths, server commands, and configuration examples will be published **after they are implemented and covered by tests**. Please do not assume an example endpoint or command from design discussions is available today.
 
-### Verified local package and quality checks (M1.1–M1.2)
+### Verified local package, quality, and CI foundation (M1)
 
 From a local clone with Python 3.11+ and [`uv`](https://docs.astral.sh/uv/) installed, the minimal package skeleton and development quality checks can be synced, verified, and built locally:
 
 ```bash
 uv sync --locked --group dev
+uv audit --locked --preview-features audit-command
 uv run --locked --group dev ruff check .
 uv run --locked --group dev ruff format --check .
 uv run --locked --group dev mypy src tests
@@ -186,9 +187,10 @@ For architecture and milestone tracking:
 A fast GitHub Actions CI workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on pull requests and pushes to `main` across Python 3.11, 3.12, and 3.13, plus isolated wheel/sdist smoke validation:
 
 - **M1.3 baseline CI verification (`main`):** Verified on `main` commit `1355b0c2093bfac4d0520ffb3ffb06ccc5f2b937` in [GitHub Actions run `41263309448`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41263309448) across Python 3.11, 3.12, 3.13, and the package smoke job (prior to adding `uv audit`).
-- **M1.4A security hardening verification ([PR #4](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/4)):** Verified on PR #4 head commit `70f8d1a7622ac807be406c3315c290055c11ab9e` in [GitHub Actions run `41264257695`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264257695) with all 4 CI jobs and the `uv audit --locked` step (on Python 3.12) succeeding; `main` branch push verification of this security configuration is pending PR #4 merge.
+- **M1.4A security hardening verification (`main`):** Merged in [PR #4](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/4) (`32111a402b289a5608cd70effdb70fa0fe53d877`) and verified on `push -> main` in [GitHub Actions run `41264905664`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264905664) with all 4 CI jobs and the `uv audit --locked` step (on Python 3.12) succeeding, alongside initial Dependabot version-update checks ([run `41264912866`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264912866) for `uv` and [run `41264912883`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264912883) for `github-actions`).
+- **M1.4B.1 protected `main` branch:** Classic GitHub branch protection is enabled on `main` (`protected: true`, pull request required, `strict: true` up-to-date branch enforcement, `enforce_admins: true`, `required_linear_history: true`, `allow_force_pushes: false`, `allow_deletions: false`, and `required_approving_review_count: 0` for single-maintainer operation) with four required GitHub Actions status checks bound to `app_id: 15368`: `Quality & Tests (Python 3.11)`, `Quality & Tests (Python 3.12)`, `Quality & Tests (Python 3.13)`, and `Package Build & Clean Wheel Smoke Test`.
 
-**Note:** The M0 documentation baseline and initial ADRs (`ADR-0001`–`0003`) have been accepted as the V1 design baseline (`2026-11-01`), and only the M1.1–M1.4A Python package, quality/test suite, fast CI workflow, and dependency/workflow security configuration are implemented so far.
+**Note:** The M0 documentation baseline and initial ADRs (`ADR-0001`–`0003`) have been accepted as the V1 design baseline (`2026-11-01`), and the M1 engineering foundation (`src/kaiwen_gateway` minimal importable package skeleton, Ruff, strict mypy, pytest, Python 3.11/3.12/3.13 fast CI, wheel/sdist smoke validation, `uv audit`, weekly Dependabot version updates, and `main` branch protection) is implemented and verified. The `100%` coverage reported by pytest applies **only to the minimal package skeleton (`src/kaiwen_gateway/__init__.py`)**, not to the unimplemented Gateway application. **Gateway Core runtime, Voice bridge, ASGI/WSS server, CLI, real Verimor integration, and PyPI release are not yet implemented.**
 
 ## Documentation map
 
