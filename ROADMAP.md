@@ -59,7 +59,7 @@ Use only these milestone status values:
 | ID | Milestone | Initial status | Depends on |
 | --- | --- | --- | --- |
 | **M0** | Documentation baseline and approval | `Complete` (closed 2026-11-01; commits `d422350`, `27ab0f9`, `4a8fe82`) | Maintainer review |
-| **M1** | Python package and CI foundation | `In progress` (M1.1 package foundation implemented; M1.2–M1.4 pending) | M0 |
+| **M1** | Python package and CI foundation | `In progress` (M1.1 merged in `#1`; M1.2 local quality/test foundation implemented; M1.3–M1.4 pending) | M0 |
 | **M2** | Core contracts, identity and security/admission | `Not started` | M1 |
 | **M3** | ASGI/WSS ingress and synthetic telephony adapter | `Not started` | M2 |
 | **M4** | Voice audio bridge and Kaiwen Agent integration | `Not started` | M3 |
@@ -99,14 +99,14 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 **Deliverables**
 
-- [x] `src/kaiwen_gateway/` package with intentionally minimal public exports and no import side effects (M1.1: `src/kaiwen_gateway/__init__.py` and `src/kaiwen_gateway/py.typed`).
-- [ ] `pyproject.toml` with Hatchling, Python 3.11+, metadata, typed-package marker where appropriate, and justified dependencies/extras (M1.1 base `pyproject.toml` with Hatchling, Python `>=3.11`, `py.typed`, and zero runtime dependencies is implemented; M1.2 quality/test tool configuration remains pending).
-- [ ] `uv` project/lock setup and documented local commands; resolve supported Python version policy (M1.1 `uv.lock`, `uv sync`, and `uv build` are verified; M1.2 linter/typecheck/test commands remain pending).
-- [ ] Ruff formatting/lint, strict mypy and pytest configuration; small unit-test harness.
-- [ ] `tests/` layout and a clean-environment wheel build/install/import smoke test (M1.1 wheel/sdist build and clean-virtualenv import smoke test verified; M1.2+ `tests/` layout remains pending).
+- [x] `src/kaiwen_gateway/` package with intentionally minimal public exports and no import side effects (M1.1: `src/kaiwen_gateway/__init__.py` and `src/kaiwen_gateway/py.typed`, merged in `#1` / `b0a666e`).
+- [x] `pyproject.toml` with Hatchling, Python 3.11+, metadata, typed-package marker where appropriate, and justified dependencies/extras (M1.1–M1.2: Hatchling, Python `>=3.11`, `py.typed`, zero runtime dependencies, and `dependency-groups.dev` for Ruff, mypy, pytest, and pytest-cov).
+- [ ] `uv` project/lock setup and documented local commands; resolve supported Python version policy (M1.1–M1.2 `uv.lock`, `uv sync --locked --group dev`, and local lint/typecheck/test/build commands are verified; CI multi-version Python matrix policy remains pending in M1.3–M1.4).
+- [x] Ruff formatting/lint, strict mypy and pytest configuration; small unit-test harness (M1.2: configured in `pyproject.toml` and verified on `src` and `tests`).
+- [x] `tests/` layout and a clean-environment wheel build/install/import smoke test (M1.1–M1.2: `tests/test_package.py` unit/subprocess tests and isolated wheel/sdist smoke verification).
 - [ ] GitHub Actions **fast CI** for checks, tests and wheel validation, with minimal permissions.
 - [ ] Basic security/dependency/workflow hygiene (e.g., least-privilege Actions, dependency update policy and checks as available).
-- [ ] README developer setup instructions updated **only after commands are verified** (M1.1 package build/import commands documented; M1.2+ quality/test commands pending).
+- [x] README developer setup instructions updated **only after commands are verified** (M1.1–M1.2 verified local `uv` quality/test/build commands documented in `README.md`, `CONTRIBUTING.md`, and `AGENTS.md`).
 
 **Exit evidence:** Passing formatter/linter/typecheck/tests/build in documented environment; workflow run link or explicit explanation why no remote run exists; installed-wheel smoke result. Package install must not start a server or contact any provider.
 

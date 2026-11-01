@@ -164,13 +164,16 @@ A passing unit suite does **not** prove real telephony interoperability, securit
 
 **The package is not yet released on PyPI, and the CLI, ASGI server, and Voice runtime are not yet implemented.** Public endpoint paths, server commands, and configuration examples will be published **after they are implemented and covered by tests**. Please do not assume an example endpoint or command from design discussions is available today.
 
-### Verified local package foundation (M1.1)
+### Verified local package and quality checks (M1.1–M1.2)
 
-From a local clone with Python 3.11+ and [`uv`](https://docs.astral.sh/uv/) installed, the minimal package skeleton can be synced, imported, and built locally:
+From a local clone with Python 3.11+ and [`uv`](https://docs.astral.sh/uv/) installed, the minimal package skeleton and development quality checks can be synced, verified, and built locally:
 
 ```bash
-uv sync
-uv run python -c "import kaiwen_gateway; print(kaiwen_gateway.__version__)"
+uv sync --locked --group dev
+uv run --locked --group dev ruff check .
+uv run --locked --group dev ruff format --check .
+uv run --locked --group dev mypy src tests
+uv run --locked --group dev pytest -q --cov=kaiwen_gateway --cov-report=term-missing
 uv build
 ```
 
@@ -180,7 +183,7 @@ For architecture and milestone tracking:
 2. Review [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/decisions/`](docs/decisions/) for boundaries and accepted V1 architectural decisions.
 3. Track implementation through issues and pull requests rather than treating this README as an implementation checklist.
 
-**Note:** The M0 documentation baseline and initial ADRs (`ADR-0001`–`0003`) have been accepted as the V1 design baseline (`2026-11-01`), and only the M1.1 Python package skeleton is implemented so far.
+**Note:** The M0 documentation baseline and initial ADRs (`ADR-0001`–`0003`) have been accepted as the V1 design baseline (`2026-11-01`), and only the M1.1–M1.2 Python package and local code-quality/test foundation are implemented so far.
 
 ## Documentation map
 
