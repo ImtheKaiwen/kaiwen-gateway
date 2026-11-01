@@ -14,7 +14,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - Accepted the initial V1 Architecture Decision Records (`ADR-0001` Modular Monolith, `ADR-0002` Hexagonal Architecture, `ADR-0003` Library and Server) and Gate A documentation baseline (`27ab0f9`, **architectural design approval only; runtime implementation has not started**).
 - Added the repository [`LICENSE`](LICENSE) file (MIT License, `Copyright (c) 2026 Kaiwen`).
 - Verified GitHub Private Vulnerability Reporting (`{"enabled": true}`) and closed the M0 documentation baseline milestone (`4a8fe82`).
-- Added the initial M1.1 local Python package foundation (`pyproject.toml`, `uv.lock`, `.gitignore`, `src/kaiwen_gateway/__init__.py`, and `src/kaiwen_gateway/py.typed`) targeting Python `>=3.11` with Hatchling, zero mandatory runtime dependencies, and no import-time side effects (**package skeleton only; not published to PyPI**).
+- Added the initial M1.1 local Python package foundation (`pyproject.toml`, `uv.lock`, `.gitignore`, `src/kaiwen_gateway/__init__.py`, and `src/kaiwen_gateway/py.typed`) targeting Python `>=3.11` with Hatchling, zero mandatory runtime dependencies, and no import-time side effects (`b0a666e`, **package skeleton only; not published to PyPI**).
+- Added the M1.2 local code-quality and testing foundation (`dependency-groups.dev` with Ruff, strict mypy, pytest, and pytest-cov in `pyproject.toml` and `uv.lock`, plus package/import verification tests in `tests/test_package.py`).
 - Documented the intended initial scope: a provider-neutral Python library with an optional ASGI server, focusing exclusively on the Voice module for V1. **Runtime features are not yet implemented.**
 
 ## Maintenance policy

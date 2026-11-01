@@ -195,18 +195,19 @@ Default test I/O must be synthetic and deterministic. Stub external provider req
 
 ### 7.2 Quality checks (when tooling is installed)
 
-Use repository-defined commands and versions from `pyproject.toml`, the lockfile and CI. The examples below are **intended checks**, not evidence that the repository has working tooling today:
+Use repository-defined commands and versions from `pyproject.toml`, the lockfile and CI. The repository configures development tools under `[dependency-groups] dev`:
 
 ```bash
-uv sync --extra dev
-uv run ruff format --check .
-uv run ruff check .
-uv run mypy src/kaiwen_gateway
-uv run pytest
+uv lock --check
+uv sync --locked --group dev
+uv run --locked --group dev ruff format --check .
+uv run --locked --group dev ruff check .
+uv run --locked --group dev mypy src tests
+uv run --locked --group dev pytest -q --cov=kaiwen_gateway --cov-report=term-missing
 uv build
 ```
 
-The exact extras, dependency groups and commands **must be adjusted to the actual implemented `pyproject.toml`**. Do not mark a check “passed” unless it was executed successfully and its exit status/result was observed.
+The exact extras, dependency groups and commands **must match the actual implemented `pyproject.toml`**. Do not mark a check “passed” unless it was executed successfully and its exit status/result was observed.
 
 When a check cannot run, state `NOT RUN` or `BLOCKED`, name the blocker and explain the resulting validation gap. Never invent coverage percentages, latency data, capacity limits, benchmark numbers, smoke-test results or live-provider compatibility.
 

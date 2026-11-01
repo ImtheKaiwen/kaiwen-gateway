@@ -70,20 +70,20 @@ For external contributors, fork the repository first and clone your fork. The ma
 
 Suggested branch prefixes: `docs/`, `feat/`, `fix/`, `test/`, `security/`, `perf/`, and `chore/`.
 
-### 2.3 Python setup — only after M1 creates `pyproject.toml`
+### 2.3 Python setup and local quality checks
 
-The following commands are **proposed**, not presently verified. Use the actual dependency groups/extras and commands defined by the committed `pyproject.toml` and CI when they exist:
+The repository uses a PEP 735 `dependency-groups.dev` group in [`pyproject.toml`](pyproject.toml). Run the following verified local commands from the repository root:
 
 ```bash
-uv sync --extra dev
-uv run ruff format --check .
-uv run ruff check .
-uv run mypy src/kaiwen_gateway
-uv run pytest
+uv sync --locked --group dev
+uv run --locked --group dev ruff format --check .
+uv run --locked --group dev ruff check .
+uv run --locked --group dev mypy src tests
+uv run --locked --group dev pytest -q --cov=kaiwen_gateway --cov-report=term-missing
 uv build
 ```
 
-The `dev` extra is illustrative: the project may ultimately use a `dependency-groups.dev` group, in which case the setup command will differ. **Never invent a passing result** for a command that could not run because the scaffold is absent. Mark it `NOT RUN` or `BLOCKED` and state why.
+**Never invent a passing result** for a command that was not executed. If a check cannot run, mark it `NOT RUN` or `BLOCKED` and state why. Passing local checks do not imply that GitHub Actions CI has run until the workflow is implemented and executed.
 
 Avoid manually modifying the generated lockfile. When dependencies change, regenerate it using the selected package manager, include the updated lockfile when required by repository policy, and explain the dependency's purpose.
 
