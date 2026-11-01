@@ -183,7 +183,10 @@ For architecture and milestone tracking:
 2. Review [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/decisions/`](docs/decisions/) for boundaries and accepted V1 architectural decisions.
 3. Track implementation through issues and pull requests rather than treating this README as an implementation checklist.
 
-A fast GitHub Actions CI workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on pull requests and pushes to `main` across Python 3.11, 3.12, and 3.13, including dependency vulnerability auditing (`uv audit --locked`) and isolated wheel/sdist smoke validation (verified on `main` in [GitHub Actions run `41263309448`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41263309448)).
+A fast GitHub Actions CI workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on pull requests and pushes to `main` across Python 3.11, 3.12, and 3.13, plus isolated wheel/sdist smoke validation:
+
+- **M1.3 baseline CI verification (`main`):** Verified on `main` commit `1355b0c2093bfac4d0520ffb3ffb06ccc5f2b937` in [GitHub Actions run `41263309448`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41263309448) across Python 3.11, 3.12, 3.13, and the package smoke job (prior to adding `uv audit`).
+- **M1.4A security hardening verification ([PR #4](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/4)):** Verified on PR #4 head commit `70f8d1a7622ac807be406c3315c290055c11ab9e` in [GitHub Actions run `41264257695`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264257695) with all 4 CI jobs and the `uv audit --locked` step (on Python 3.12) succeeding; `main` branch push verification of this security configuration is pending PR #4 merge.
 
 **Note:** The M0 documentation baseline and initial ADRs (`ADR-0001`–`0003`) have been accepted as the V1 design baseline (`2026-11-01`), and only the M1.1–M1.4A Python package, quality/test suite, fast CI workflow, and dependency/workflow security configuration are implemented so far.
 
