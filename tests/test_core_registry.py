@@ -9,8 +9,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
+from mypy import api as mypy_api
 
 from kaiwen_gateway.core import (
     CORE_CONTRACT_VERSION,
@@ -280,15 +282,65 @@ def test_invalid_descriptor_and_lifecycle_rejection() -> None:
         def shutdown(self) -> None:
             pass
 
+    class ExtraPositionalStartupModule:
+        @property
+        def descriptor(self) -> ModuleDescriptor:
+            return ModuleDescriptor(module_id="voice")
+
+        async def startup(self, config: str) -> None:
+            _ = config
+
+        async def shutdown(self) -> None:
+            pass
+
+    class ExtraKwonlyStartupModule:
+        @property
+        def descriptor(self) -> ModuleDescriptor:
+            return ModuleDescriptor(module_id="voice")
+
+        async def startup(self, *, force: bool) -> None:
+            _ = force
+
+        async def shutdown(self) -> None:
+            pass
+
+    class ExtraArgShutdownModule:
+        @property
+        def descriptor(self) -> ModuleDescriptor:
+            return ModuleDescriptor(module_id="voice")
+
+        async def startup(self) -> None:
+            pass
+
+        async def shutdown(self, timeout: float) -> None:
+            _ = timeout
+
+    class RaisingHookPropertyModule:
+        @property
+        def descriptor(self) -> ModuleDescriptor:
+            return ModuleDescriptor(module_id="voice")
+
+        @property
+        def startup(self) -> object:
+            raise RuntimeError("hook attribute access failed")
+
+        async def shutdown(self) -> None:
+            pass
+
     registry = ModuleRegistry()
     for invalid_module in (
         NoDescriptorModule(),
         RaisingDescriptorModule(),
         SyncStartupModule(),
         SyncShutdownModule(),
+        ExtraPositionalStartupModule(),
+        ExtraKwonlyStartupModule(),
+        ExtraArgShutdownModule(),
+        RaisingHookPropertyModule(),
     ):
         with pytest.raises(InvalidModuleDescriptorError):
-            registry.register(invalid_module)
+            registry.register(cast(GatewayModule, invalid_module))
+    assert len(registry) == 0
 
 
 def test_failed_registration_does_not_mutate_registry_state() -> None:
@@ -312,15 +364,42 @@ def test_failed_registration_does_not_mutate_registry_state() -> None:
     with pytest.raises(UnsupportedContractVersionError):
         registry.register(_make_module("voice_v2", contract_version="2.0"))
 
-    # Attempt invalid module object
+    # Attempt invalid module object and invalid lifecycle signature
     with pytest.raises(InvalidModuleDescriptorError):
-        registry.register(object())
+        registry.register(cast(GatewayModule, object()))
+
+    class BadSignatureModule:
+        @property
+        def descriptor(self) -> ModuleDescriptor:
+            return ModuleDescriptor(module_id="voice_bad_sig")
+
+        async def startup(self, required_arg: int) -> None:
+            _ = required_arg
+
+        async def shutdown(self) -> None:
+            pass
+
+    with pytest.raises(InvalidModuleDescriptorError):
+        registry.register(cast(GatewayModule, BadSignatureModule()))
 
     assert len(registry) == 1
     assert registry.module_ids() == snapshot_ids == ("voice",)
     assert registry.descriptors() == snapshot_descriptors
     assert registry.modules() == snapshot_modules
     assert registry.get("voice") is voice
+
+
+def test_static_type_checker_rejects_object_registration(tmp_path: Path) -> None:
+    """Bulgu A: mypy --strict rejects ModuleRegistry().register(object()) at the call site."""
+    snippet = tmp_path / "bad_register_call.py"
+    snippet.write_text(
+        "from kaiwen_gateway.core import ModuleRegistry\nModuleRegistry().register(object())\n",
+        encoding="utf-8",
+    )
+    stdout, stderr, exit_code = mypy_api.run(["--strict", str(snippet)])
+    assert exit_code != 0, f"Expected mypy failure, got exit_code=0:\n{stdout}\n{stderr}"
+    assert "GatewayModule" in stdout
+    assert "[arg-type]" in stdout
 
 
 def test_registry_instance_isolation() -> None:

@@ -140,12 +140,27 @@ def validate_gateway_module(module: object) -> tuple[GatewayModule, ModuleDescri
     descriptor = validate_module_descriptor(raw_descriptor)
 
     for hook_name in ("startup", "shutdown"):
-        hook = getattr(module, hook_name, None)
-        if not inspect.iscoroutinefunction(hook):
+        try:
+            hook = getattr(module, hook_name)
+        except Exception as exc:
+            raise InvalidModuleDescriptorError(
+                f"Module {descriptor.module_id!r} ({type(module).__name__}) failed to provide "
+                f"lifecycle hook {hook_name!r}"
+            ) from exc
+
+        if not callable(hook) or not inspect.iscoroutinefunction(hook):
             raise InvalidModuleDescriptorError(
                 f"Module {descriptor.module_id!r} ({type(module).__name__}) must define "
                 f"'async def {hook_name}(self) -> None'"
             )
+
+        try:
+            inspect.signature(hook).bind()
+        except Exception as exc:
+            raise InvalidModuleDescriptorError(
+                f"Module {descriptor.module_id!r} ({type(module).__name__}) lifecycle hook "
+                f"{hook_name!r} must have a valid signature with no required arguments"
+            ) from exc
 
     return cast(GatewayModule, module), descriptor
 

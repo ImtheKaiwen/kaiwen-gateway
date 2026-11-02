@@ -36,7 +36,7 @@ class ModuleRegistry:
     def __init__(self) -> None:
         self._entries: dict[str, tuple[ModuleDescriptor, GatewayModule]] = {}
 
-    def register(self, module: object) -> GatewayModule:
+    def register(self, module: GatewayModule) -> GatewayModule:
         """Validate and register ``module`` under its ``descriptor.module_id``.
 
         Raises:
