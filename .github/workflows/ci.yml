@@ -102,6 +102,8 @@ jobs:
               assert "kaiwen_gateway/__init__.py" in wheel_names
               assert "kaiwen_gateway/py.typed" in wheel_names
               assert "kaiwen_gateway/core/__init__.py" in wheel_names
+              assert "kaiwen_gateway/core/composition.py" in wheel_names
+              assert "kaiwen_gateway/core/config.py" in wheel_names
               assert "kaiwen_gateway/core/contracts.py" in wheel_names
               assert "kaiwen_gateway/core/exceptions.py" in wheel_names
               assert "kaiwen_gateway/core/registry.py" in wheel_names
@@ -119,10 +121,13 @@ jobs:
               assert any(name.endswith("/src/kaiwen_gateway/py.typed") for name in sdist_names)
               assert any(name.endswith("/tests/test_package.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/__init__.py") for name in sdist_names)
+              assert any(name.endswith("/src/kaiwen_gateway/core/composition.py") for name in sdist_names)
+              assert any(name.endswith("/src/kaiwen_gateway/core/config.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/contracts.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/exceptions.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/registry.py") for name in sdist_names)
               assert any(name.endswith("/tests/test_core_registry.py") for name in sdist_names)
+              assert any(name.endswith("/tests/test_core_composition.py") for name in sdist_names)
           PY
 
       - name: Install wheel into isolated virtualenv and verify side-effect-free import outside repo
@@ -175,8 +180,11 @@ jobs:
 
           from kaiwen_gateway.core import (
               CORE_CONTRACT_VERSION,
+              CoreConfig,
+              CoreConfigurationError,
               ModuleDescriptor,
               ModuleRegistry,
+              compose_gateway_core,
           )
 
           class SmokeVoiceModule:
@@ -196,6 +204,25 @@ jobs:
           assert registry.get("voice") is smoke_module
           assert registry.module_ids() == ("voice",)
           assert CORE_CONTRACT_VERSION == "1.0"
+
+          core_a = compose_gateway_core(
+              CoreConfig(instance_name="smoke_a"),
+              modules=[SmokeVoiceModule()],
+          )
+          core_b = compose_gateway_core(
+              CoreConfig(instance_name="smoke_b"),
+              modules=[SmokeVoiceModule()],
+          )
+          assert core_a.instance_id != core_b.instance_id
+          assert core_a.get_module("voice") is not core_b.get_module("voice")
+
+          try:
+              CoreConfig(ingress_mode="public")
+          except CoreConfigurationError:
+              pass
+          else:
+              raise AssertionError("Expected CoreConfigurationError for ingress_mode='public'")
+
           assert cwd_before == set(os.listdir("."))
           assert threads_before == threading.active_count() == 1
           PY

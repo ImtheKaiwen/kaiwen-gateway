@@ -1,10 +1,19 @@
-"""Typed exceptions for Kaiwen Gateway Core contracts and module registration."""
+"""Typed exceptions for Kaiwen Gateway Core configuration, contracts, and module registration."""
 
 from __future__ import annotations
 
 
 class CoreError(Exception):
     """Base exception for all framework-independent Gateway Core errors."""
+
+
+class CoreConfigurationError(CoreError, ValueError):
+    """Raised when Core configuration is malformed, out of range, or violates fail-closed policy."""
+
+    def __init__(self, message: str, *, field_name: str | None = None) -> None:
+        self.field_name: str | None = field_name
+        prefix = f"Invalid CoreConfig.{field_name}: " if field_name else "Invalid CoreConfig: "
+        super().__init__(f"{prefix}{message}")
 
 
 class ModuleRegistrationError(CoreError):
@@ -62,6 +71,7 @@ class ModuleNotRegisteredError(CoreError, KeyError):
 
 
 __all__ = [
+    "CoreConfigurationError",
     "CoreError",
     "DuplicateModuleError",
     "InvalidModuleDescriptorError",
