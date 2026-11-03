@@ -148,10 +148,7 @@ class AdmissionLease:
 
     def __repr__(self) -> str:
         status = "active" if self.is_active else "released"
-        return (
-            f"AdmissionLease(connection_id={self.connection_id!r}, "
-            f"tenant_id={self.tenant_id!r}, status={status!r})"
-        )
+        return f"AdmissionLease(status={status!r})"
 
 
 class AdmissionController:

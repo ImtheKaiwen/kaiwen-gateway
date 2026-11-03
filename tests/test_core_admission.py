@@ -108,7 +108,8 @@ def test_successful_first_admission_and_lease_attributes() -> None:
         assert lease.is_active is True
         assert controller.has_active_connection("conn_01") is True
         assert controller.is_active_lease(lease) is True
-        assert "status='active'" in repr(lease)
+        assert repr(lease) == "AdmissionLease(status='active')"
+        assert "conn_01" not in repr(lease)
 
         snapshot = controller.snapshot()
         assert snapshot.active_connections == 1
@@ -174,7 +175,9 @@ def test_tenant_capacity_limit_rejection() -> None:
         assert err.tenant_id == "tenant_alpha"
         assert err.limit == 2
         assert err.current == 2
-        assert "Tenant connection capacity exhausted for 'tenant_alpha': 2/2 active" in str(err)
+        assert "Tenant connection capacity exhausted: 2/2 active" in str(err)
+        assert "tenant_alpha" not in str(err)
+        assert "tenant_alpha" not in repr(err)
 
         # Invariant: Global capacity is not fully consumed, but tenant quota blocks
         snapshot = controller.snapshot()
@@ -256,6 +259,8 @@ def test_duplicate_connection_id_rejection() -> None:
 
         assert exc_info.value.connection_id == "conn_dup"
         assert "already holds an active capacity lease" in str(exc_info.value)
+        assert "conn_dup" not in str(exc_info.value)
+        assert "conn_dup" not in repr(exc_info.value)
 
         # Invariant: Counters are not incremented on rejection
         assert controller.snapshot().active_connections == 1
@@ -388,7 +393,8 @@ def test_normal_release_behavior() -> None:
         assert controller.active_connections_for_tenant("tenant_rel") == 0
         assert controller.has_active_connection("conn_rel") is False
         assert controller.is_active_lease(lease) is False
-        assert "status='released'" in repr(lease)
+        assert repr(lease) == "AdmissionLease(status='released')"
+        assert "conn_rel" not in repr(lease)
 
     asyncio.run(_run())
 
@@ -919,6 +925,61 @@ def test_cross_event_loop_boundary_raises_runtime_error() -> None:
 
     with pytest.raises(RuntimeError, match="is bound to a single event loop"):
         asyncio.run(_release_loop2())
+
+
+def test_admission_identifier_redaction_in_errors_and_repr() -> None:
+    """Item 31: Verify raw tenant_id and connection_id are redacted from error messages, repr, and tracebacks."""
+    import traceback
+
+    tenant_marker = "tenant_SECRET_MARKER_123"
+    conn_marker = "conn_SECRET_MARKER_456"
+
+    # 1. TenantCapacityExceededError redaction
+    t_err = TenantCapacityExceededError(tenant_id=tenant_marker, limit=5, current=5)
+    assert tenant_marker not in str(t_err)
+    assert tenant_marker not in repr(t_err)
+    assert t_err.tenant_id == tenant_marker
+    assert t_err.limit == 5
+    assert t_err.current == 5
+    assert "Tenant connection capacity exhausted: 5/5 active" in str(t_err)
+
+    t_tb = "".join(traceback.format_exception(type(t_err), t_err, t_err.__traceback__))
+    assert tenant_marker not in t_tb
+
+    # 2. DuplicateConnectionAdmissionError redaction
+    d_err = DuplicateConnectionAdmissionError(connection_id=conn_marker)
+    assert conn_marker not in str(d_err)
+    assert conn_marker not in repr(d_err)
+    assert d_err.connection_id == conn_marker
+    assert "already holds an active capacity lease" in str(d_err)
+
+    d_tb = "".join(traceback.format_exception(type(d_err), d_err, d_err.__traceback__))
+    assert conn_marker not in d_tb
+
+    # 3. AdmissionLease repr redaction (active and released)
+    async def _test_lease_repr() -> None:
+        ctrl = AdmissionController(max_concurrent_connections=5, max_connections_per_tenant=5)
+        ctx = _make_context(connection_id=conn_marker, tenant_id=tenant_marker)
+        lease = await ctrl.acquire(ctx)
+
+        # Active lease repr
+        active_repr = repr(lease)
+        assert active_repr == "AdmissionLease(status='active')"
+        assert conn_marker not in active_repr
+        assert tenant_marker not in active_repr
+
+        # Public properties remain intact
+        assert lease.connection_id == conn_marker
+        assert lease.tenant_id == tenant_marker
+
+        # Released lease repr
+        assert await lease.release() is True
+        released_repr = repr(lease)
+        assert released_repr == "AdmissionLease(status='released')"
+        assert conn_marker not in released_repr
+        assert tenant_marker not in released_repr
+
+    asyncio.run(_test_lease_repr())
 
 
 def test_static_type_checker_enforces_admission_types(tmp_path: Path) -> None:

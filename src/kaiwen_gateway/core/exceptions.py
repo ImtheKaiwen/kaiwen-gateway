@@ -134,24 +134,34 @@ class GlobalCapacityExceededError(AdmissionCapacityExceededError):
 
 
 class TenantCapacityExceededError(AdmissionCapacityExceededError):
-    """Raised when a specific tenant's concurrent connection limit is reached."""
+    """Raised when a specific tenant's concurrent connection limit is reached.
+
+    Note: The error message does not include the raw tenant_id to avoid leaking
+    identifiers into unredacted application logs. The identifier remains accessible
+    programmatically via the ``tenant_id`` attribute.
+    """
 
     def __init__(self, *, tenant_id: str, limit: int, current: int) -> None:
         self.tenant_id: str = tenant_id
         super().__init__(
-            f"Tenant connection capacity exhausted for {tenant_id!r}: {current}/{limit} active",
+            f"Tenant connection capacity exhausted: {current}/{limit} active",
             limit=limit,
             current=current,
         )
 
 
 class DuplicateConnectionAdmissionError(AdmissionError):
-    """Raised when an admission attempt is made for a connection_id that already holds an active lease."""
+    """Raised when an admission attempt is made for a connection_id that already holds an active lease.
+
+    Note: The error message does not include the raw connection_id to avoid leaking
+    identifiers into unredacted application logs. The identifier remains accessible
+    programmatically via the ``connection_id`` attribute.
+    """
 
     def __init__(self, connection_id: str) -> None:
         self.connection_id: str = connection_id
         super().__init__(
-            f"Connection {connection_id!r} already holds an active capacity lease in this AdmissionController"
+            "Inbound connection already holds an active capacity lease in this AdmissionController"
         )
 
 
