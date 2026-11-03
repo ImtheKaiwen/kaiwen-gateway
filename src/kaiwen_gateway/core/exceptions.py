@@ -1,4 +1,4 @@
-"""Typed exceptions for Kaiwen Gateway Core configuration, contracts, and module registration."""
+"""Typed exceptions for Kaiwen Gateway Core configuration, contracts, identity, and registration."""
 
 from __future__ import annotations
 
@@ -70,12 +70,55 @@ class ModuleNotRegisteredError(CoreError, KeyError):
         super().__init__(f"Module {module_id!r} is not registered in this ModuleRegistry")
 
 
+class IdentityError(CoreError):
+    """Base exception for Core connection/call identity, scope, and authorization errors."""
+
+
+class InvalidIdentityError(IdentityError, ValueError):
+    """Raised when an identity or external reference field is malformed or out of bounds.
+
+    Raw input values are intentionally omitted from the formatted error message so
+    accidentally supplied secrets, tokens, or personal identifiers are never echoed
+    into logs or tracebacks.
+    """
+
+    def __init__(self, field_name: str, reason: str) -> None:
+        self.field_name: str = field_name
+        self.reason: str = reason
+        super().__init__(f"Invalid identity field {field_name!r}: {reason}")
+
+
+class InvalidScopeError(IdentityError, ValueError):
+    """Raised when a permission scope name or scope collection is malformed or out of bounds.
+
+    Raw scope inputs are intentionally omitted from the formatted error message so
+    accidentally passed secrets or tokens are never echoed into logs or tracebacks.
+    """
+
+    def __init__(self, reason: str, *, field_name: str = "allowed_scopes") -> None:
+        self.field_name: str = field_name
+        self.reason: str = reason
+        super().__init__(f"Invalid scope in {field_name!r}: {reason}")
+
+
+class IdentityAuthorizationError(IdentityError, PermissionError):
+    """Raised when provider/tenant/call binding or scope verification fails."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason: str = reason
+        super().__init__(f"Identity authorization failed: {reason}")
+
+
 __all__ = [
     "CoreConfigurationError",
     "CoreError",
     "DuplicateModuleError",
+    "IdentityAuthorizationError",
+    "IdentityError",
+    "InvalidIdentityError",
     "InvalidModuleDescriptorError",
     "InvalidModuleIdError",
+    "InvalidScopeError",
     "ModuleNotRegisteredError",
     "ModuleRegistrationError",
     "UnsupportedContractVersionError",

@@ -106,6 +106,7 @@ jobs:
               assert "kaiwen_gateway/core/config.py" in wheel_names
               assert "kaiwen_gateway/core/contracts.py" in wheel_names
               assert "kaiwen_gateway/core/exceptions.py" in wheel_names
+              assert "kaiwen_gateway/core/identity.py" in wheel_names
               assert "kaiwen_gateway/core/registry.py" in wheel_names
               assert not any(name.startswith("tests/") for name in wheel_names), "tests/ leaked into wheel"
               meta_files = [name for name in wheel_names if name.endswith(".dist-info/METADATA")]
@@ -125,9 +126,11 @@ jobs:
               assert any(name.endswith("/src/kaiwen_gateway/core/config.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/contracts.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/exceptions.py") for name in sdist_names)
+              assert any(name.endswith("/src/kaiwen_gateway/core/identity.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/registry.py") for name in sdist_names)
               assert any(name.endswith("/tests/test_core_registry.py") for name in sdist_names)
               assert any(name.endswith("/tests/test_core_composition.py") for name in sdist_names)
+              assert any(name.endswith("/tests/test_core_identity.py") for name in sdist_names)
           PY
 
       - name: Install wheel into isolated virtualenv and verify side-effect-free import outside repo
@@ -182,8 +185,15 @@ jobs:
               CORE_CONTRACT_VERSION,
               CoreConfig,
               CoreConfigurationError,
+              IdentityAuthorizationError,
+              InvalidIdentityError,
               ModuleDescriptor,
               ModuleRegistry,
+              ProviderPrincipal,
+              TenantCallBinding,
+              UntrustedConnectionClaims,
+              VerifiedConnectionContext,
+              bind_verified_connection_context,
               compose_gateway_core,
           )
 
@@ -223,6 +233,49 @@ jobs:
           else:
               raise AssertionError("Expected CoreConfigurationError for ingress_mode='public'")
 
+          principal = ProviderPrincipal("synthetic_provider")
+          binding = TenantCallBinding(
+              authorized_provider_id="synthetic_provider",
+              tenant_id="tenant_alpha",
+              call_id="call_alpha_01",
+              allowed_scopes=["voice.stream"],
+          )
+          ctx = bind_verified_connection_context(
+              principal=principal,
+              binding=binding,
+              connection_id="conn_01",
+          )
+          assert isinstance(ctx, VerifiedConnectionContext)
+          assert ctx.has_scope("voice.stream") is True
+          ctx.require_scope("voice.stream")
+          ctx.require_tenant_and_call(tenant_id="tenant_alpha", call_id="call_alpha_01")
+
+          try:
+              ctx.require_tenant_and_call(tenant_id="tenant_bravo", call_id="call_alpha_01")
+          except IdentityAuthorizationError:
+              pass
+          else:
+              raise AssertionError("Expected IdentityAuthorizationError for wrong tenant")
+
+          try:
+              ctx.require_scope("voice.admin")
+          except IdentityAuthorizationError:
+              pass
+          else:
+              raise AssertionError("Expected IdentityAuthorizationError for ungranted scope")
+
+          try:
+              bind_verified_connection_context(
+                  principal=UntrustedConnectionClaims(claimed_provider_id="synthetic_provider"),  # type: ignore[arg-type]
+                  binding=binding,
+                  connection_id="conn_02",
+              )
+          except InvalidIdentityError:
+              pass
+          else:
+              raise AssertionError("Expected InvalidIdentityError when passing UntrustedConnectionClaims as principal")
+
           assert cwd_before == set(os.listdir("."))
           assert threads_before == threading.active_count() == 1
+          print("Clean wheel smoke test passed (M1 + M2.1 + M2.2A + M2.2B).")
           PY
