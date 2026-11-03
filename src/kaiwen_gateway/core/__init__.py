@@ -1,4 +1,4 @@
-"""Framework-independent Kaiwen Gateway Core contracts, configuration, composition, and identity.
+"""Framework-independent Kaiwen Gateway Core contracts, configuration, composition, identity, and admission.
 
 Importing :mod:`kaiwen_gateway.core` has no runtime side effects and depends only
 on the Python standard library.
@@ -6,6 +6,11 @@ on the Python standard library.
 
 from __future__ import annotations
 
+from kaiwen_gateway.core.admission import (
+    AdmissionController,
+    AdmissionLease,
+    AdmissionSnapshot,
+)
 from kaiwen_gateway.core.composition import (
     GatewayCore,
     compose_gateway_core,
@@ -36,17 +41,23 @@ from kaiwen_gateway.core.contracts import (
     validate_module_id,
 )
 from kaiwen_gateway.core.exceptions import (
+    AdmissionCapacityExceededError,
+    AdmissionError,
     CoreConfigurationError,
     CoreError,
+    DuplicateConnectionAdmissionError,
     DuplicateModuleError,
+    GlobalCapacityExceededError,
     IdentityAuthorizationError,
     IdentityError,
     InvalidIdentityError,
+    InvalidLeaseError,
     InvalidModuleDescriptorError,
     InvalidModuleIdError,
     InvalidScopeError,
     ModuleNotRegisteredError,
     ModuleRegistrationError,
+    TenantCapacityExceededError,
     UnsupportedContractVersionError,
 )
 from kaiwen_gateway.core.identity import (
@@ -81,6 +92,11 @@ from kaiwen_gateway.core.identity import (
 from kaiwen_gateway.core.registry import ModuleRegistry
 
 __all__ = [
+    "AdmissionCapacityExceededError",
+    "AdmissionController",
+    "AdmissionError",
+    "AdmissionLease",
+    "AdmissionSnapshot",
     "CORE_CONTRACT_VERSION",
     "CallAuthorizationPort",
     "CallId",
@@ -91,15 +107,18 @@ __all__ = [
     "DEFAULT_INSTANCE_NAME",
     "DEFAULT_MAX_CONCURRENT_CONNECTIONS",
     "DEFAULT_MAX_CONNECTIONS_PER_TENANT",
+    "DuplicateConnectionAdmissionError",
     "DuplicateModuleError",
     "GatewayCore",
     "GatewayModule",
+    "GlobalCapacityExceededError",
     "IDENTITY_ID_PATTERN",
     "INGRESS_MODE_DISABLED",
     "INSTANCE_NAME_PATTERN",
     "IdentityAuthorizationError",
     "IdentityError",
     "InvalidIdentityError",
+    "InvalidLeaseError",
     "InvalidModuleDescriptorError",
     "InvalidModuleIdError",
     "InvalidScopeError",
@@ -125,6 +144,7 @@ __all__ = [
     "SUPPORTED_CONTRACT_VERSIONS",
     "SUPPORTED_INGRESS_MODES",
     "TenantCallBinding",
+    "TenantCapacityExceededError",
     "TenantId",
     "UnsupportedContractVersionError",
     "UntrustedConnectionClaims",
