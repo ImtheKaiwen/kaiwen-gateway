@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import traceback
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -314,7 +315,9 @@ def test_invalid_scope_and_scope_collection_rejection(bad_scope: object) -> None
 
     with pytest.raises(InvalidScopeError) as gen_exc:
         validate_scopes(_failing_scope_gen())
-    assert isinstance(gen_exc.value.__cause__, RuntimeError)
+    assert gen_exc.value.__cause__ is None
+    assert gen_exc.value.__context__ is None
+    assert "RuntimeError" in gen_exc.value.reason
 
 
 def test_permission_scope_membership_and_enforcement() -> None:
@@ -337,7 +340,8 @@ def test_permission_scope_membership_and_enforcement() -> None:
     with pytest.raises(IdentityAuthorizationError) as exc_info:
         ctx.require_scope("voice.transfer")
     assert isinstance(exc_info.value, PermissionError)
-    assert "voice.transfer" in exc_info.value.reason
+    assert "Required permission scope is not granted" in exc_info.value.reason
+    assert "voice.transfer" not in exc_info.value.reason
 
 
 def test_untrusted_payload_cannot_override_tenant_provider_call_or_escalate_scopes() -> None:
@@ -736,7 +740,7 @@ def test_secrets_and_untrusted_values_never_leak_into_repr_or_exception_messages
         assert synthetic_secret not in str(exc_info.value)
         assert synthetic_secret not in repr(exc_info.value)
 
-    # Exception chaining in validate_scopes omits raw exception text from InvalidScopeError message
+    # Exception chaining in validate_scopes omits raw exception text and suppresses cause/context
     def _secret_raising_iter() -> Iterator[str]:
         yield "voice.stream"
         raise ValueError(f"iterator failure with {synthetic_secret}")
@@ -744,7 +748,112 @@ def test_secrets_and_untrusted_values_never_leak_into_repr_or_exception_messages
     with pytest.raises(InvalidScopeError) as chained_exc:
         validate_scopes(_secret_raising_iter())
     assert synthetic_secret not in str(chained_exc.value)
-    assert isinstance(chained_exc.value.__cause__, ValueError)
+    assert synthetic_secret not in repr(chained_exc.value)
+    assert chained_exc.value.__cause__ is None
+    assert chained_exc.value.__context__ is None
+    formatted_tb = "".join(traceback.format_exception(chained_exc.value))
+    assert synthetic_secret not in formatted_tb
+
+
+def test_untrusted_connection_claims_field_boundaries_and_redaction() -> None:
+    """Review Finding B: UntrustedConnectionClaims bounds and validates identity fields safely."""
+    # Valid claims with none and valid bounded strings
+    valid_claims = UntrustedConnectionClaims(
+        claimed_provider_id="provider_a",
+        claimed_tenant_id="tenant_b",
+        claimed_call_id="call_c",
+        provider_call_ref="ref_d",
+        claimed_scopes=["voice.stream"],
+    )
+    assert valid_claims.claimed_provider_id == "provider_a"
+    assert valid_claims.claimed_tenant_id == "tenant_b"
+    assert valid_claims.claimed_call_id == "call_c"
+    assert valid_claims.provider_call_ref == "ref_d"
+
+    # Empty string rejected for each field
+    for field_name in (
+        "claimed_provider_id",
+        "claimed_tenant_id",
+        "claimed_call_id",
+        "provider_call_ref",
+    ):
+        with pytest.raises(InvalidIdentityError) as empty_exc:
+            UntrustedConnectionClaims(**{field_name: ""})
+        assert empty_exc.value.field_name == field_name
+        assert "must not be empty when supplied" in str(empty_exc.value)
+
+    # Oversized strings rejected (> 64 for identity fields, > 128 for provider_call_ref)
+    secret_oversized = "SECRET_" + ("x" * 80)
+    for field_name in ("claimed_provider_id", "claimed_tenant_id", "claimed_call_id"):
+        with pytest.raises(InvalidIdentityError) as over_exc:
+            UntrustedConnectionClaims(**{field_name: secret_oversized})
+        assert over_exc.value.field_name == field_name
+        assert f"exceeds maximum length of {MAX_IDENTITY_LENGTH} characters" in str(over_exc.value)
+        # Raw input secret is not copied into error message
+        assert secret_oversized not in str(over_exc.value)
+        assert secret_oversized not in repr(over_exc.value)
+
+    secret_oversized_ref = "SECRET_REF_" + ("y" * 130)
+    with pytest.raises(InvalidIdentityError) as over_ref_exc:
+        UntrustedConnectionClaims(provider_call_ref=secret_oversized_ref)
+    assert over_ref_exc.value.field_name == "provider_call_ref"
+    assert f"exceeds maximum length of {MAX_PROVIDER_CALL_REF_LENGTH} characters" in str(
+        over_ref_exc.value
+    )
+    assert secret_oversized_ref not in str(over_ref_exc.value)
+    assert secret_oversized_ref not in repr(over_ref_exc.value)
+
+    # Control characters and whitespace rejected without leaking raw input
+    for bad_char in ("\n", "\r", "\t", "\x00", " ", "\x7f"):
+        bad_value = f"bad{bad_char}secret_token"
+        for field_name in (
+            "claimed_provider_id",
+            "claimed_tenant_id",
+            "claimed_call_id",
+            "provider_call_ref",
+        ):
+            with pytest.raises(InvalidIdentityError) as ctrl_exc:
+                UntrustedConnectionClaims(**{field_name: bad_value})
+            assert ctrl_exc.value.field_name == field_name
+            assert "must contain only printable ASCII" in str(ctrl_exc.value)
+            assert bad_value not in str(ctrl_exc.value)
+            assert bad_value not in repr(ctrl_exc.value)
+
+
+def test_require_scope_denial_does_not_leak_requested_scope_name() -> None:
+    """Review Finding C: require_scope denial message does not echo caller's requested scope."""
+    ctx = VerifiedConnectionContext(
+        provider_id="synthetic_provider",
+        tenant_id="tenant_alpha",
+        connection_id="conn_01",
+        call_id="call_01",
+        allowed_scopes=["voice.stream"],
+    )
+    unauthorized_scope = "voice.restricted.admin.secret"
+    with pytest.raises(IdentityAuthorizationError) as exc_info:
+        ctx.require_scope(unauthorized_scope)
+    assert "Required permission scope is not granted" in exc_info.value.reason
+    assert unauthorized_scope not in exc_info.value.reason
+    assert unauthorized_scope not in str(exc_info.value)
+
+
+def test_synthetic_test_doubles_explicit_boundary_guarantee() -> None:
+    """Review Finding D: Synthetic authenticator and authorizer test doubles do not implement live crypto."""
+    auth = SyntheticProviderAuthenticator(verified_provider_id="synthetic_provider")
+    authorizer = SyntheticCallAuthorizer(
+        binding=TenantCallBinding(
+            authorized_provider_id="synthetic_provider",
+            tenant_id="tenant_alpha",
+            call_id="call_01",
+        )
+    )
+    # They satisfy Core protocols at runtime
+    assert isinstance(auth, ProviderAuthenticatorPort)
+    assert isinstance(authorizer, CallAuthorizationPort)
+
+    # Documented boundary: They are in-memory stubs, not real JWT/HMAC/mTLS verifiers
+    assert hasattr(auth, "calls")
+    assert hasattr(authorizer, "calls")
 
 
 def test_static_type_checker_rejects_untrusted_claims_as_verified_context(

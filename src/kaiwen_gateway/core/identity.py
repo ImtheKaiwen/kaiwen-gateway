@@ -242,6 +242,35 @@ def validate_scope(scope: object, *, field_name: str = "allowed_scopes") -> str:
     return scope
 
 
+def _validate_untrusted_claim_string(
+    value: object,
+    *,
+    field_name: str,
+    max_length: int = MAX_IDENTITY_LENGTH,
+) -> str | None:
+    """Validate an untrusted identity field without normalizing or copying raw input into errors."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidIdentityError(
+            field_name,
+            f"must be a str or None, got {type(value).__name__}",
+        )
+    if not value:
+        raise InvalidIdentityError(field_name, "must not be empty when supplied")
+    if len(value) > max_length:
+        raise InvalidIdentityError(
+            field_name,
+            f"exceeds maximum length of {max_length} characters ({len(value)})",
+        )
+    if _has_control_or_surrogate_chars(value):
+        raise InvalidIdentityError(
+            field_name,
+            "must contain only printable ASCII characters without whitespace or control characters",
+        )
+    return value
+
+
 def validate_scopes(
     scopes: object,
     *,
@@ -250,22 +279,28 @@ def validate_scopes(
     """Validate and materialize a bounded, immutable ``frozenset`` of canonical scopes.
 
     Inspects at most ``MAX_ALLOWED_SCOPES + 1`` items via :func:`itertools.islice`.
-    Note that bounding item count does not bound wall-clock time if a caller-supplied
-    iterator blocks internally, and Core cannot roll back external side effects
-    performed by the caller's iterator itself.
+    If an external caller-supplied iterator raises an exception, the exception is caught
+    and a sanitized :class:`InvalidScopeError` is raised outside the exception handler block.
+    This guarantees that neither ``__cause__`` nor ``__context__`` retains the caller's
+    exception instance, preventing arbitrary caller-provided exceptions from leaking secrets
+    into tracebacks or exception inspection.
     """
     if isinstance(scopes, _NON_COLLECTION_SCOPE_ITERABLES) or not isinstance(scopes, Iterable):
         raise InvalidScopeError(
             f"must be an iterable collection of scope strings, got {type(scopes).__name__}",
             field_name=field_name,
         )
+    iterator_exc_type: type[BaseException] | None = None
     try:
         bounded_items = tuple(itertools.islice(scopes, MAX_ALLOWED_SCOPES + 1))
     except Exception as exc:
+        iterator_exc_type = type(exc)
+
+    if iterator_exc_type is not None:
         raise InvalidScopeError(
-            f"failed while iterating scope collection: {type(exc).__name__}",
+            f"failed while iterating scope collection: {iterator_exc_type.__name__}",
             field_name=field_name,
-        ) from exc
+        )
 
     if len(bounded_items) > MAX_ALLOWED_SCOPES:
         raise InvalidScopeError(
@@ -285,6 +320,10 @@ class UntrustedConnectionClaims:
     - Carries zero authorization or identity authority on its own.
     - Never stores raw credentials or bearer tokens; ``__repr__`` redacts claim values so
       unverified external strings cannot leak into logs or exception tracebacks.
+    - Fields are bounded: ``claimed_provider_id``, ``claimed_tenant_id``, and ``claimed_call_id``
+      are at most ``MAX_IDENTITY_LENGTH`` (64) characters when supplied; ``provider_call_ref`` is
+      at most ``MAX_PROVIDER_CALL_REF_LENGTH`` (128) characters; control and whitespace characters
+      are rejected; raw input is never copied into error messages.
     """
 
     claimed_provider_id: str | None = None
@@ -302,25 +341,34 @@ class UntrustedConnectionClaims:
         provider_call_ref: str | None = None,
         claimed_scopes: Iterable[str | PermissionScope] = (),
     ) -> None:
-        for field_name, raw_val in (
-            ("claimed_provider_id", claimed_provider_id),
-            ("claimed_tenant_id", claimed_tenant_id),
-            ("claimed_call_id", claimed_call_id),
-            ("provider_call_ref", provider_call_ref),
-        ):
-            if raw_val is not None and not isinstance(raw_val, str):
-                raise InvalidIdentityError(
-                    field_name,
-                    f"must be a str or None, got {type(raw_val).__name__}",
-                )
+        valid_provider = _validate_untrusted_claim_string(
+            claimed_provider_id,
+            field_name="claimed_provider_id",
+            max_length=MAX_IDENTITY_LENGTH,
+        )
+        valid_tenant = _validate_untrusted_claim_string(
+            claimed_tenant_id,
+            field_name="claimed_tenant_id",
+            max_length=MAX_IDENTITY_LENGTH,
+        )
+        valid_call = _validate_untrusted_claim_string(
+            claimed_call_id,
+            field_name="claimed_call_id",
+            max_length=MAX_IDENTITY_LENGTH,
+        )
+        valid_ref = _validate_untrusted_claim_string(
+            provider_call_ref,
+            field_name="provider_call_ref",
+            max_length=MAX_PROVIDER_CALL_REF_LENGTH,
+        )
         validated_claimed_scopes = validate_scopes(
             claimed_scopes,
             field_name="claimed_scopes",
         )
-        object.__setattr__(self, "claimed_provider_id", claimed_provider_id)
-        object.__setattr__(self, "claimed_tenant_id", claimed_tenant_id)
-        object.__setattr__(self, "claimed_call_id", claimed_call_id)
-        object.__setattr__(self, "provider_call_ref", provider_call_ref)
+        object.__setattr__(self, "claimed_provider_id", valid_provider)
+        object.__setattr__(self, "claimed_tenant_id", valid_tenant)
+        object.__setattr__(self, "claimed_call_id", valid_call)
+        object.__setattr__(self, "provider_call_ref", valid_ref)
         object.__setattr__(self, "claimed_scopes", validated_claimed_scopes)
 
     def __repr__(self) -> str:
@@ -393,9 +441,11 @@ class VerifiedConnectionContext:
       identity (``call_id``) and optional non-authoritative ``provider_call_ref`` metadata.
     - ``allowed_scopes`` is always an immutable ``frozenset[str]`` of validated scope names.
     - Contains no raw credentials, API keys, bearer tokens, or caller phone numbers.
-    - Constructed in production paths via :func:`bind_verified_connection_context` or
-      :func:`resolve_verified_connection_context` after provider authentication and host
-      application call authorization succeed.
+    - Public Python constructor: Note that while this class has a standard Python
+      constructor, security guarantees (preventing tenant escalation, validating providers,
+      and rejecting forged untrusted claims) depend entirely on host application and adapter
+      integration using :func:`resolve_verified_connection_context` or
+      :func:`bind_verified_connection_context`.
     """
 
     provider_id: str
@@ -459,7 +509,7 @@ class VerifiedConnectionContext:
         canonical = validate_scope(scope, field_name="scope")
         if canonical not in self.allowed_scopes:
             raise IdentityAuthorizationError(
-                f"Required scope {canonical!r} is not granted in this VerifiedConnectionContext"
+                "Required permission scope is not granted in this VerifiedConnectionContext"
             )
 
     def require_tenant_and_call(
@@ -488,6 +538,9 @@ class ProviderAuthenticatorPort(Protocol):
 
     Note: This is a pure Core contract in M2.2B; concrete transport authenticators
     (e.g. mTLS or signed short-lived token verifiers) belong in transport/provider adapters.
+    Note that Python's ``@runtime_checkable`` validates only the presence of the method name
+    at runtime; it does not verify asynchronous signature compatibility or cryptographic
+    credential validity.
     """
 
     async def authenticate_provider(
@@ -501,7 +554,11 @@ class ProviderAuthenticatorPort(Protocol):
 
 @runtime_checkable
 class CallAuthorizationPort(Protocol):
-    """Application/policy port that authorizes a tenant, call, and scopes for an authenticated provider."""
+    """Application/policy port that authorizes a tenant, call, and scopes for an authenticated provider.
+
+    Note: Pure Core contract in M2.2B; concrete authorization policy engines belong in
+    host application adapters. ``@runtime_checkable`` validates only method name presence.
+    """
 
     async def authorize_call(
         self,
