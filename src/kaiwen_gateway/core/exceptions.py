@@ -172,9 +172,33 @@ class InvalidLeaseError(AdmissionError, ValueError):
         super().__init__(message)
 
 
+class ConnectionLifecycleError(CoreError):
+    """Base exception for all connection lifecycle and supervisor errors."""
+
+
+class InvalidConnectionTransitionError(ConnectionLifecycleError, ValueError):
+    """Raised when an invalid connection state machine transition is attempted."""
+
+    def __init__(
+        self,
+        current_state: str,
+        target_state: str,
+        message: str | None = None,
+    ) -> None:
+        self.current_state: str = current_state
+        self.target_state: str = target_state
+        msg = message or f"Cannot transition from {current_state} to {target_state}"
+        super().__init__(msg)
+
+
+class LifecycleTimeoutError(ConnectionLifecycleError, TimeoutError):
+    """Raised when a lifecycle operation or cleanup deadline expires."""
+
+
 __all__ = [
     "AdmissionCapacityExceededError",
     "AdmissionError",
+    "ConnectionLifecycleError",
     "CoreConfigurationError",
     "CoreError",
     "DuplicateConnectionAdmissionError",
@@ -182,11 +206,13 @@ __all__ = [
     "GlobalCapacityExceededError",
     "IdentityAuthorizationError",
     "IdentityError",
+    "InvalidConnectionTransitionError",
     "InvalidIdentityError",
     "InvalidLeaseError",
     "InvalidModuleDescriptorError",
     "InvalidModuleIdError",
     "InvalidScopeError",
+    "LifecycleTimeoutError",
     "ModuleNotRegisteredError",
     "ModuleRegistrationError",
     "TenantCapacityExceededError",

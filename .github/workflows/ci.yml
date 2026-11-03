@@ -108,6 +108,7 @@ jobs:
               assert "kaiwen_gateway/core/contracts.py" in wheel_names
               assert "kaiwen_gateway/core/exceptions.py" in wheel_names
               assert "kaiwen_gateway/core/identity.py" in wheel_names
+              assert "kaiwen_gateway/core/lifecycle.py" in wheel_names
               assert "kaiwen_gateway/core/registry.py" in wheel_names
               assert not any(name.startswith("tests/") for name in wheel_names), "tests/ leaked into wheel"
               meta_files = [name for name in wheel_names if name.endswith(".dist-info/METADATA")]
@@ -129,11 +130,13 @@ jobs:
               assert any(name.endswith("/src/kaiwen_gateway/core/contracts.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/exceptions.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/identity.py") for name in sdist_names)
+              assert any(name.endswith("/src/kaiwen_gateway/core/lifecycle.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/registry.py") for name in sdist_names)
               assert any(name.endswith("/tests/test_core_registry.py") for name in sdist_names)
               assert any(name.endswith("/tests/test_core_composition.py") for name in sdist_names)
               assert any(name.endswith("/tests/test_core_identity.py") for name in sdist_names)
               assert any(name.endswith("/tests/test_core_admission.py") for name in sdist_names)
+              assert any(name.endswith("/tests/test_core_lifecycle.py") for name in sdist_names)
           PY
 
       - name: Install wheel into isolated virtualenv and verify side-effect-free import outside repo
@@ -192,18 +195,26 @@ jobs:
               AdmissionError,
               AdmissionLease,
               AdmissionSnapshot,
+              ConnectionLifecycleError,
+              ConnectionOutcome,
+              ConnectionState,
+              ConnectionSupervisor,
               CoreConfig,
               CoreConfigurationError,
               DuplicateConnectionAdmissionError,
               GlobalCapacityExceededError,
               IdentityAuthorizationError,
+              InvalidConnectionTransitionError,
               InvalidIdentityError,
               InvalidLeaseError,
+              LifecyclePolicy,
+              LifecycleTimeoutError,
               ModuleDescriptor,
               ModuleRegistry,
               ProviderPrincipal,
               TenantCallBinding,
               TenantCapacityExceededError,
+              TerminalReason,
               UntrustedConnectionClaims,
               VerifiedConnectionContext,
               bind_verified_connection_context,
@@ -375,7 +386,60 @@ jobs:
 
           asyncio.run(_run_admission_smoke())
 
+          # M2.4A Supervised Lifecycle Smoke Verification
+          async def _run_lifecycle_smoke() -> None:
+              controller = AdmissionController(max_concurrent_connections=5, max_connections_per_tenant=2)
+              ctx_life = bind_verified_connection_context(
+                  principal=principal,
+                  binding=binding,
+                  connection_id="conn_smoke_life_01",
+              )
+              supervisor = ConnectionSupervisor(context=ctx_life, controller=controller)
+              assert supervisor.state == ConnectionState.NEW
+
+              admitted = await supervisor.admit()
+              assert admitted is True
+              assert supervisor.state == ConnectionState.ADMITTED
+              assert controller.snapshot().active_connections == 1
+
+              worker_ran = False
+
+              async def smoke_worker() -> None:
+                  nonlocal worker_ran
+                  worker_ran = True
+                  await asyncio.sleep(0.01)
+
+              await supervisor.start(smoke_worker)
+              assert supervisor.state == ConnectionState.ACTIVE
+
+              outcome = await supervisor.wait_closed()
+              assert outcome.state == ConnectionState.CLOSED
+              assert outcome.reason == TerminalReason.NORMAL
+              assert worker_ran is True
+              assert controller.snapshot().active_connections == 0
+
+              # Failure scenario
+              ctx_fail = bind_verified_connection_context(
+                  principal=principal,
+                  binding=binding,
+                  connection_id="conn_smoke_life_02",
+              )
+              supervisor_fail = ConnectionSupervisor(context=ctx_fail, controller=controller)
+              await supervisor_fail.admit()
+
+              async def failing_worker() -> None:
+                  await asyncio.sleep(0.01)
+                  raise ValueError("Synthetic worker failure")
+
+              await supervisor_fail.start(failing_worker)
+              fail_outcome = await supervisor_fail.wait_closed()
+              assert fail_outcome.state == ConnectionState.FAILED
+              assert fail_outcome.reason == TerminalReason.WORKER_FAILED
+              assert controller.snapshot().active_connections == 0
+
+          asyncio.run(_run_lifecycle_smoke())
+
           assert cwd_before == set(os.listdir("."))
           assert threads_before == threading.active_count() == 1
-          print("Clean wheel smoke test passed (M1 + M2.1 + M2.2A + M2.2B + M2.3).")
+          print("Clean wheel smoke test passed (M1 + M2.1 + M2.2A + M2.2B + M2.3 + M2.4A).")
           PY

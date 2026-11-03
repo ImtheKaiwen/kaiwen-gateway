@@ -1,4 +1,4 @@
-"""Framework-independent Kaiwen Gateway Core contracts, configuration, composition, identity, and admission.
+"""Framework-independent Kaiwen Gateway Core contracts, configuration, composition, identity, admission, and lifecycle.
 
 Importing :mod:`kaiwen_gateway.core` has no runtime side effects and depends only
 on the Python standard library.
@@ -43,6 +43,7 @@ from kaiwen_gateway.core.contracts import (
 from kaiwen_gateway.core.exceptions import (
     AdmissionCapacityExceededError,
     AdmissionError,
+    ConnectionLifecycleError,
     CoreConfigurationError,
     CoreError,
     DuplicateConnectionAdmissionError,
@@ -50,11 +51,13 @@ from kaiwen_gateway.core.exceptions import (
     GlobalCapacityExceededError,
     IdentityAuthorizationError,
     IdentityError,
+    InvalidConnectionTransitionError,
     InvalidIdentityError,
     InvalidLeaseError,
     InvalidModuleDescriptorError,
     InvalidModuleIdError,
     InvalidScopeError,
+    LifecycleTimeoutError,
     ModuleNotRegisteredError,
     ModuleRegistrationError,
     TenantCapacityExceededError,
@@ -89,6 +92,13 @@ from kaiwen_gateway.core.identity import (
     validate_scopes,
     validate_tenant_id,
 )
+from kaiwen_gateway.core.lifecycle import (
+    ConnectionOutcome,
+    ConnectionState,
+    ConnectionSupervisor,
+    LifecyclePolicy,
+    TerminalReason,
+)
 from kaiwen_gateway.core.registry import ModuleRegistry
 
 __all__ = [
@@ -101,6 +111,10 @@ __all__ = [
     "CallAuthorizationPort",
     "CallId",
     "ConnectionId",
+    "ConnectionLifecycleError",
+    "ConnectionOutcome",
+    "ConnectionState",
+    "ConnectionSupervisor",
     "CoreConfig",
     "CoreConfigurationError",
     "CoreError",
@@ -117,11 +131,14 @@ __all__ = [
     "INSTANCE_NAME_PATTERN",
     "IdentityAuthorizationError",
     "IdentityError",
+    "InvalidConnectionTransitionError",
     "InvalidIdentityError",
     "InvalidLeaseError",
     "InvalidModuleDescriptorError",
     "InvalidModuleIdError",
     "InvalidScopeError",
+    "LifecyclePolicy",
+    "LifecycleTimeoutError",
     "MAX_ALLOWED_SCOPES",
     "MAX_CONFIGURED_CONNECTIONS",
     "MAX_DESCRIPTION_LENGTH",
@@ -146,6 +163,7 @@ __all__ = [
     "TenantCallBinding",
     "TenantCapacityExceededError",
     "TenantId",
+    "TerminalReason",
     "UnsupportedContractVersionError",
     "UntrustedConnectionClaims",
     "VerifiedConnectionContext",
