@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import uuid
 from collections.abc import Iterable, Iterator, Mapping
 from typing import Final
@@ -11,6 +12,8 @@ from kaiwen_gateway.core.contracts import GatewayModule, ModuleDescriptor
 from kaiwen_gateway.core.exceptions import CoreConfigurationError
 from kaiwen_gateway.core.registry import ModuleRegistry
 
+MAX_COMPOSED_MODULES: Final[int] = 64
+
 _NON_COLLECTION_ITERABLE_TYPES: Final[tuple[type[object], ...]] = (
     str,
     bytes,
@@ -19,15 +22,38 @@ _NON_COLLECTION_ITERABLE_TYPES: Final[tuple[type[object], ...]] = (
 )
 
 
-def _validate_modules_iterable(modules: object) -> tuple[GatewayModule, ...]:
-    """Validate that ``modules`` is an explicit sequence/iterable of module objects."""
+def _validate_modules_iterable(
+    modules: object,
+    *,
+    max_modules: int = MAX_COMPOSED_MODULES,
+) -> tuple[GatewayModule, ...]:
+    """Validate and materialize at most ``max_modules`` items from ``modules``.
+
+    Inspects at most ``max_modules + 1`` items via :func:`itertools.islice` so an
+    unbounded generator cannot exhaust memory. Note that bounding item count does
+    not bound wall-clock time if a caller-supplied iterator blocks internally, and
+    Core cannot roll back external side effects performed by the iterator itself.
+    """
     if isinstance(modules, _NON_COLLECTION_ITERABLE_TYPES) or not isinstance(modules, Iterable):
         raise CoreConfigurationError(
             f"modules must be an iterable collection of GatewayModule instances, "
             f"got {type(modules).__name__}",
             field_name="modules",
         )
-    return tuple(modules)
+    try:
+        bounded_batch = tuple(itertools.islice(modules, max_modules + 1))
+    except Exception as exc:
+        raise CoreConfigurationError(
+            f"Failed while iterating modules collection: {type(exc).__name__}: {exc}",
+            field_name="modules",
+        ) from exc
+
+    if len(bounded_batch) > max_modules:
+        raise CoreConfigurationError(
+            f"modules count exceeds maximum supported composition limit of {max_modules}",
+            field_name="modules",
+        )
+    return bounded_batch
 
 
 class GatewayCore:
@@ -40,13 +66,19 @@ class GatewayCore:
       omitted from the public API; callers inspect registered modules through read-only
       lookup methods, though registered ``GatewayModule`` objects themselves may be stateful
       and Python private attributes are a convention rather than a hard capability boundary.
+    - Bounded collection: ``GatewayCore`` accepts at most :data:`MAX_COMPOSED_MODULES` (``64``)
+      modules per instance and inspects at most ``65`` items from ``modules`` before rejecting
+      oversized or unbounded iterables with :class:`~kaiwen_gateway.core.CoreConfigurationError`
+      (``field_name="modules"``). Bounding item count does not bound wall-clock execution time
+      if a caller-supplied iterator blocks internally without yielding, and Core cannot undo
+      external side effects executed by the caller's iterator or ``descriptor`` getters.
     - Construction is transactional with respect to ``GatewayCore`` state: all configuration
       fields and module descriptors/hooks are validated and registered in a fresh local
       ``ModuleRegistry`` before returning the ``GatewayCore`` instance, and ``GatewayCore``
-      never writes ownership attributes onto caller-supplied module objects (though Core
-      cannot prevent side effects inside a caller's own ``descriptor`` property getter).
-      If any module in ``modules`` fails validation or duplicates a ``module_id`` within the
-      same instance, construction raises deterministically and discards the local registry.
+      never writes ownership attributes onto caller-supplied module objects.
+      If ``modules`` exceeds :data:`MAX_COMPOSED_MODULES`, raises during iteration, fails
+      contract validation, or duplicates a ``module_id`` within the same instance, construction
+      raises deterministically and discards the local registry.
     - Module ownership contract: ``GatewayModule`` is a structural ``Protocol`` (including
       slotted or frozen implementations), and ``kaiwen_gateway.core`` intentionally avoids
       process-wide global state or locks. Callers MUST instantiate a separate stateful
@@ -140,5 +172,6 @@ def compose_gateway_core(
 
 __all__ = [
     "GatewayCore",
+    "MAX_COMPOSED_MODULES",
     "compose_gateway_core",
 ]

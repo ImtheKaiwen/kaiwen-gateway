@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import threading
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NoReturn, cast
@@ -36,6 +37,7 @@ from kaiwen_gateway.core import (
     compose_gateway_core,
     validate_core_config,
 )
+from kaiwen_gateway.core.composition import MAX_COMPOSED_MODULES
 
 
 class FakeModule:
@@ -582,3 +584,123 @@ def test_static_type_checker_rejects_invalid_composition_types(tmp_path: Path) -
     stdout, stderr, exit_code = mypy_api.run(["--strict", str(snippet)])
     assert exit_code != 0, f"Expected mypy failure, got exit_code=0:\n{stdout}\n{stderr}"
     assert "[arg-type]" in stdout or "[list-item]" in stdout
+
+
+def test_bounded_composition_accepts_empty_and_single_module_iterables() -> None:
+    """Items 1 & 2: Empty iterable and single-module iterable compose cleanly."""
+    empty_core = compose_gateway_core(modules=())
+    assert len(empty_core) == 0
+    assert empty_core.module_ids() == ()
+    assert empty_core.modules() == ()
+
+    empty_gen_core = compose_gateway_core(modules=(FakeModule(f"m_{i}") for i in range(0)))
+    assert len(empty_gen_core) == 0
+
+    voice = FakeModule("voice")
+    single_core = compose_gateway_core(modules=[voice])
+    assert len(single_core) == 1
+    assert single_core.module_ids() == ("voice",)
+    assert single_core.get_module("voice") is voice
+    assert voice.events == []
+
+
+def test_bounded_composition_accepts_exactly_64_unique_modules() -> None:
+    """Item 3: Exactly 64 valid unique modules compose cleanly."""
+    assert MAX_COMPOSED_MODULES == 64
+    modules_64 = [FakeModule(f"mod_{idx:02d}") for idx in range(MAX_COMPOSED_MODULES)]
+    snapshots = [dict(mod.__dict__) for mod in modules_64]
+
+    core = compose_gateway_core(modules=modules_64)
+    assert len(core) == 64
+    assert core.module_ids() == tuple(f"mod_{idx:02d}" for idx in range(64))
+    assert core.get_module("mod_00") is modules_64[0]
+    assert core.get_module("mod_63") is modules_64[63]
+    assert [dict(mod.__dict__) for mod in modules_64] == snapshots
+    assert all(mod.events == [] for mod in modules_64)
+
+
+def test_bounded_composition_rejects_65_modules_without_mutating_or_calling_hooks() -> None:
+    """Items 4, 8, & 9: 65 modules fail with CoreConfigurationError(field_name='modules')."""
+    modules_65 = [FakeModule(f"mod_{idx:02d}") for idx in range(MAX_COMPOSED_MODULES + 1)]
+    snapshots = [dict(mod.__dict__) for mod in modules_65]
+
+    with pytest.raises(CoreConfigurationError) as exc_info:
+        compose_gateway_core(modules=modules_65)
+
+    assert exc_info.value.field_name == "modules"
+    assert "64" in str(exc_info.value)
+
+    # Item 8 & 9: None of the supplied modules were mutated or had startup/shutdown called
+    assert [dict(mod.__dict__) for mod in modules_65] == snapshots
+    assert all(mod.events == [] for mod in modules_65)
+
+    # First 64 modules remain reusable in a subsequent valid composition
+    core = compose_gateway_core(modules=modules_65[:MAX_COMPOSED_MODULES])
+    assert len(core) == 64
+    assert core.get_module("mod_63") is modules_65[63]
+
+
+def test_bounded_composition_supports_finite_generator_and_bounds_consumption() -> None:
+    """Items 5, 6, & 10: Finite generators work; oversized generators stop at 65 items."""
+    finite_gen = (FakeModule(f"gen_mod_{idx}") for idx in range(4))
+    core_a = compose_gateway_core(
+        config=CoreConfig(instance_name="gen_a"),
+        modules=finite_gen,
+    )
+    assert core_a.module_ids() == ("gen_mod_0", "gen_mod_1", "gen_mod_2", "gen_mod_3")
+
+    consumed_count = 0
+
+    def _controlled_unbounded_generator() -> Iterator[GatewayModule]:
+        nonlocal consumed_count
+        for idx in range(1_000):
+            if idx >= MAX_COMPOSED_MODULES + 1:
+                raise AssertionError(
+                    f"Generator consumed past MAX_COMPOSED_MODULES + 1 (idx={idx})"
+                )
+            consumed_count += 1
+            yield FakeModule(f"stream_mod_{idx:03d}")
+
+    with pytest.raises(CoreConfigurationError) as exc_info:
+        compose_gateway_core(modules=_controlled_unbounded_generator())
+
+    assert exc_info.value.field_name == "modules"
+    assert consumed_count == MAX_COMPOSED_MODULES + 1 == 65
+
+    # Item 10: Existing core_a and a newly composed core_b remain completely isolated
+    core_b = compose_gateway_core(
+        config=CoreConfig(instance_name="gen_b"),
+        modules=(FakeModule(f"other_{idx}") for idx in range(2)),
+    )
+    assert core_a.module_ids() == ("gen_mod_0", "gen_mod_1", "gen_mod_2", "gen_mod_3")
+    assert core_b.module_ids() == ("other_0", "other_1")
+    assert core_a.instance_id != core_b.instance_id
+
+
+def test_bounded_composition_wraps_generator_exception_without_catching_base_exception() -> None:
+    """Item 7 & 9: Standard Exception during iteration wraps in CoreConfigurationError; BaseException propagates."""
+    yielded_modules: list[FakeModule] = []
+
+    def _failing_generator() -> Iterator[GatewayModule]:
+        first = FakeModule("mod_a")
+        second = FakeModule("mod_b")
+        yielded_modules.extend([first, second])
+        yield first
+        yield second
+        raise RuntimeError("synthetic iterator failure")
+
+    with pytest.raises(CoreConfigurationError) as exc_info:
+        compose_gateway_core(modules=_failing_generator())
+
+    assert exc_info.value.field_name == "modules"
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert "synthetic iterator failure" in str(exc_info.value)
+    assert len(yielded_modules) == 2
+    assert all(mod.events == [] for mod in yielded_modules)
+
+    def _interrupting_generator() -> Iterator[GatewayModule]:
+        yield FakeModule("mod_a")
+        raise KeyboardInterrupt("simulated interrupt")
+
+    with pytest.raises(KeyboardInterrupt, match="simulated interrupt"):
+        compose_gateway_core(modules=_interrupting_generator())
