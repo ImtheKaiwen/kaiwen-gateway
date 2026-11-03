@@ -26,6 +26,7 @@ from kaiwen_gateway.core import (
     AdmissionSnapshot,
     ConnectionId,
     CoreConfig,
+    CoreConfigurationError,
     CoreError,
     DuplicateConnectionAdmissionError,
     GlobalCapacityExceededError,
@@ -732,14 +733,85 @@ def test_controller_initialization_with_config_or_defaults() -> None:
     assert c2.max_concurrent_connections == 80
     assert c2.max_connections_per_tenant == 20
 
-    # From defaults
+    # From defaults (aligned with CoreConfig defaults: 25 global, 10 tenant)
     c3 = AdmissionController()
-    assert c3.max_concurrent_connections == 100
-    assert c3.max_connections_per_tenant == 25
+    assert c3.max_concurrent_connections == 25
+    assert c3.max_connections_per_tenant == 10
 
     # Invalid config type
     with pytest.raises(TypeError, match="must be a CoreConfig instance or None"):
         AdmissionController(config="invalid")  # type: ignore[arg-type]
+
+
+def test_controller_config_precedence_and_override_rejection() -> None:
+    """Item 26b: Passing capacity overrides alongside an explicit CoreConfig raises CoreConfigurationError."""
+    cfg = CoreConfig(max_concurrent_connections=50, max_connections_per_tenant=10)
+
+    # Config + global override
+    with pytest.raises(
+        CoreConfigurationError, match="Cannot specify explicit capacity override arguments"
+    ):
+        AdmissionController(cfg, max_concurrent_connections=100)
+
+    # Config + tenant override
+    with pytest.raises(
+        CoreConfigurationError, match="Cannot specify explicit capacity override arguments"
+    ):
+        AdmissionController(cfg, max_connections_per_tenant=25)
+
+    # Config + both overrides
+    with pytest.raises(
+        CoreConfigurationError, match="Cannot specify explicit capacity override arguments"
+    ):
+        AdmissionController(cfg, max_concurrent_connections=100, max_connections_per_tenant=25)
+
+
+def test_controller_config_validation_rejections() -> None:
+    """Item 26c: Kwargs validation rejects negative, zero, bool, excessive values, and tenant > global."""
+    # Negative global
+    with pytest.raises(
+        CoreConfigurationError, match="max_concurrent_connections must be between 1 and"
+    ):
+        AdmissionController(max_concurrent_connections=-1)
+
+    # Zero global
+    with pytest.raises(
+        CoreConfigurationError, match="max_concurrent_connections must be between 1 and"
+    ):
+        AdmissionController(max_concurrent_connections=0)
+
+    # Bool global
+    with pytest.raises(CoreConfigurationError, match="max_concurrent_connections must be an int"):
+        AdmissionController(max_concurrent_connections=True)
+
+    # Excessive global
+    with pytest.raises(
+        CoreConfigurationError, match="max_concurrent_connections must be between 1 and 10000"
+    ):
+        AdmissionController(max_concurrent_connections=99_999)
+
+    # Negative tenant
+    with pytest.raises(
+        CoreConfigurationError, match="max_connections_per_tenant must be between 1 and"
+    ):
+        AdmissionController(max_connections_per_tenant=-5)
+
+    # Tenant limit > global limit
+    with pytest.raises(CoreConfigurationError, match="must not exceed max_concurrent_connections"):
+        AdmissionController(max_concurrent_connections=10, max_connections_per_tenant=15)
+
+
+def test_controller_synchronous_inspection_without_event_loop() -> None:
+    """Item 26d: Synchronous inspection methods work outside an active event loop and are non-mutating."""
+    ctrl = AdmissionController(max_concurrent_connections=20, max_connections_per_tenant=5)
+    snap = ctrl.snapshot()
+    assert snap.active_connections == 0
+    assert snap.available_capacity == 20
+    assert snap.active_tenants == 0
+    assert ctrl.has_active_connection("conn_none") is False
+    assert ctrl.active_connections_for_tenant("tenant_none") == 0
+    assert ctrl.is_active_lease(None) is False
+    assert "AdmissionController(active=0, max_global=20, max_per_tenant=5)" in repr(ctrl)
 
 
 def test_lease_release_cancellation_and_retry_safety() -> None:

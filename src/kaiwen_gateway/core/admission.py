@@ -36,6 +36,7 @@ from types import TracebackType
 
 from kaiwen_gateway.core.config import CoreConfig
 from kaiwen_gateway.core.exceptions import (
+    CoreConfigurationError,
     DuplicateConnectionAdmissionError,
     GlobalCapacityExceededError,
     InvalidLeaseError,
@@ -159,8 +160,12 @@ class AdmissionController:
     Invariants (M2.3):
     - Instance-scoped state; no global or process-wide shared registry.
     - Single-process, single-event-loop concurrency model guarded by an internal asyncio.Lock.
-    - Thread-safety boundary: Not thread-safe for direct concurrent access across multiple
-      OS threads. Coroutines must run within the same event loop in a single thread.
+    - Event-loop ownership & thread boundaries: Mutating async methods (`acquire()` and
+      `_release_lease()`) enforce single-event-loop affinity via `_check_loop()`. Synchronous
+      inspection methods (`snapshot()`, `has_active_connection()`, `active_connections_for_tenant()`,
+      `is_active_lease()`, `__repr__()`) are process-local, lock-free readers intended for the
+      owning thread/event-loop; they do not perform cross-loop fail-fast checks or cross-thread
+      synchronization and are not thread-safe for direct concurrent access across separate OS threads.
     - Distribution boundary: Process-local; does not coordinate across separate processes
       or cluster nodes (distributed coordination is out of V1 scope per ADR-0001/ADR-0003).
     - Enforces atomic capacity reservation against global `max_concurrent_connections`
@@ -184,17 +189,22 @@ class AdmissionController:
                 raise TypeError(
                     f"config must be a CoreConfig instance or None, got {type(config).__name__}"
                 )
+            if max_concurrent_connections is not None or max_connections_per_tenant is not None:
+                raise CoreConfigurationError(
+                    "Cannot specify explicit capacity override arguments "
+                    "(max_concurrent_connections, max_connections_per_tenant) "
+                    "when a CoreConfig instance is provided",
+                    field_name="config",
+                )
             self._max_concurrent_connections: int = config.max_concurrent_connections
             self._max_connections_per_tenant: int = config.max_connections_per_tenant
         else:
-            effective_config = CoreConfig(
-                max_concurrent_connections=(
-                    max_concurrent_connections if max_concurrent_connections is not None else 100
-                ),
-                max_connections_per_tenant=(
-                    max_connections_per_tenant if max_connections_per_tenant is not None else 25
-                ),
-            )
+            kwargs: dict[str, object] = {}
+            if max_concurrent_connections is not None:
+                kwargs["max_concurrent_connections"] = max_concurrent_connections
+            if max_connections_per_tenant is not None:
+                kwargs["max_connections_per_tenant"] = max_connections_per_tenant
+            effective_config = CoreConfig(**kwargs)  # type: ignore[arg-type]
             self._max_concurrent_connections = effective_config.max_concurrent_connections
             self._max_connections_per_tenant = effective_config.max_connections_per_tenant
 
@@ -310,7 +320,11 @@ class AdmissionController:
             return True
 
     def snapshot(self) -> AdmissionSnapshot:
-        """Return an immutable snapshot of current controller capacity."""
+        """Return an immutable snapshot of current controller capacity.
+
+        Note: Synchronous, lock-free inspection method intended for the owning thread
+        and event-loop context. Does not perform cross-loop checks or cross-thread synchronization.
+        """
         active = len(self._active_leases)
         return AdmissionSnapshot(
             active_connections=active,
@@ -321,19 +335,31 @@ class AdmissionController:
         )
 
     def active_connections_for_tenant(self, tenant_id: str | TenantId) -> int:
-        """Return active connection count for a specific tenant."""
+        """Return active connection count for a specific tenant.
+
+        Note: Synchronous, lock-free inspection method intended for the owning thread
+        and event-loop context.
+        """
         canonical = tenant_id.value if isinstance(tenant_id, TenantId) else tenant_id
         return self._tenant_counts.get(canonical, 0)
 
     def has_active_connection(self, connection_id: str | ConnectionId) -> bool:
-        """Return True if connection_id currently holds an active lease."""
+        """Return True if connection_id currently holds an active lease.
+
+        Note: Synchronous, lock-free inspection method intended for the owning thread
+        and event-loop context.
+        """
         canonical = (
             connection_id.value if isinstance(connection_id, ConnectionId) else connection_id
         )
         return canonical in self._active_leases
 
     def is_active_lease(self, lease: object) -> bool:
-        """Return True if the given lease is currently recorded as active in this controller."""
+        """Return True if the given lease is currently recorded as active in this controller.
+
+        Note: Synchronous, lock-free inspection method intended for the owning thread
+        and event-loop context.
+        """
         if not isinstance(lease, AdmissionLease):
             return False
         return self._active_leases.get(lease.connection_id) is lease
