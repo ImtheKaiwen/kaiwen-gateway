@@ -5,7 +5,10 @@ This module enforces FR-CONN-004, FR-CONN-006, FR-CONN-007, NFR-REL-001, and ENG
 - Per-connection task supervisor managing worker coroutine lifecycles and cancellation propagation.
 - Deterministic, multi-step cleanup order ensuring capacity lease release under normal exits,
   unhandled exceptions, timeouts, and task cancellations.
-- Stale callback isolation via explicit object ownership.
+- Single ownership by construction: Each supervisor acquires and owns its dedicated capacity lease
+  via `admit()`; no external lease handover or module-level shared mutable registries.
+- Diagnostic privacy: Fixed canonical reason summaries preventing secret, PII, or identifier leakage.
+- Synthetic safe task names without raw connection identifiers.
 - Pure in-memory, process-local lifecycle management without network sockets, WebSocket handshakes,
   or upstream AI session creation.
 
@@ -29,8 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-import re
-import weakref
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from enum import StrEnum
@@ -132,42 +133,16 @@ _SAFE_REASON_SUMMARIES: Final[dict[TerminalReason, str]] = {
 }
 
 
-def _sanitize_error_summary(
-    summary: str | None,
-    reason: TerminalReason,
-    *,
-    context: VerifiedConnectionContext | None = None,
-) -> str:
-    """Sanitize diagnostic summary to guarantee zero credential or identifier leakage."""
-    default_summary = _SAFE_REASON_SUMMARIES.get(reason, "Connection terminated")
-    if summary is None or not summary.strip():
-        return default_summary
-
-    sanitized = summary.strip()
-    if context is not None:
-        sanitized = sanitized.replace(context.connection_id, "[REDACTED_CONN]")
-        sanitized = sanitized.replace(context.tenant_id, "[REDACTED_TENANT]")
-        sanitized = sanitized.replace(context.call_id, "[REDACTED_CALL]")
-        if context.provider_call_ref is not None:
-            sanitized = sanitized.replace(context.provider_call_ref, "[REDACTED_REF]")
-
-    # Redact common sensitive markers like SECRET_MARKER_123, passwords, tokens, API keys
-    sanitized = re.sub(
-        r"(?i)(secret\w*|bearer\s+\w+|api[_-]?key\w*|token\w*)",
-        "[REDACTED]",
-        sanitized,
-    )
-    return sanitized
-
-
 @dataclass(frozen=True, slots=True)
 class ConnectionOutcome:
     """Immutable terminal outcome for a terminated connection lifecycle.
 
     Guarantees:
     - `state` is always a terminal state (CLOSED, FAILED, or REJECTED).
-    - `error_summary` is sanitized upon assignment to prevent credential leakage.
-    - Raw tokens, credentials, or PII are never echoed into outcome representations.
+    - `reason` is a canonical `TerminalReason`.
+    - `error_summary` is strictly bound to safe canonical reason descriptions,
+      preventing accidental credential, identifier, or exception message leakage.
+    - `repr` and `str` outputs expose only `state` and `reason`.
     """
 
     state: ConnectionState
@@ -175,13 +150,11 @@ class ConnectionOutcome:
     error_summary: str | None = None
 
     def __post_init__(self) -> None:
-        if self.error_summary is not None:
-            sanitized = _sanitize_error_summary(self.error_summary, self.reason)
-            object.__setattr__(self, "error_summary", sanitized)
+        safe_summary = _SAFE_REASON_SUMMARIES.get(self.reason, "Connection terminated")
+        object.__setattr__(self, "error_summary", safe_summary)
 
     def __repr__(self) -> str:
-        summary_repr = f", error_summary={self.error_summary!r}" if self.error_summary else ""
-        return f"ConnectionOutcome(state={self.state.value!r}, reason={self.reason.value!r}{summary_repr})"
+        return f"ConnectionOutcome(state={self.state.value!r}, reason={self.reason.value!r})"
 
     def __str__(self) -> str:
         return self.__repr__()
@@ -212,26 +185,23 @@ class LifecyclePolicy:
             )
 
 
-# Process-local registry tracking active supervisor ownership of leases
-_CLAIMED_LEASES: weakref.WeakKeyDictionary[AdmissionLease, ConnectionSupervisor] = (
-    weakref.WeakKeyDictionary()
-)
-
-
 class ConnectionSupervisor:
     """Per-connection async task supervisor and lifecycle state machine manager.
 
     Invariants (M2.4A):
     - Single lifecycle owner: Owns the connection's state transitions and worker tasks.
+    - Single lease ownership by construction: Supervisor acquires and owns its dedicated lease
+      via `admit()`; no external lease injection or module-level shared registries.
     - Guarded state machine: Transitions strictly adhere to `_ALLOWED_TRANSITIONS`.
-    - Admission bound: Cannot enter `ACTIVE` without a valid `AdmissionLease`.
+    - Admission bound: Cannot enter `ACTIVE` without a valid `AdmissionLease` acquired via `admit()`.
     - Sibling cancellation: If any worker task raises an unhandled error, sibling tasks
       are deterministically cancelled and awaited before cleanup.
     - Idempotent cleanup: Multiple concurrent or sequential `close()` calls execute cleanup
       exactly once without resource leaks.
     - Cancellation resilience: Cleanup runs within an owned supervisory task, ensuring
       that outer task cancellation does not prevent capacity lease release.
-    - Zero orphan tasks: All spawned worker tasks are cancelled and awaited on termination.
+    - Zero orphan tasks: All spawned worker tasks are cancelled, observed, and awaited on termination.
+    - Diagnostic privacy: Task names and terminal outcomes use safe synthetic names and canonical summaries.
     - Stale callback isolation: Callbacks reference this supervisor instance; closing does
       not affect subsequent supervisors even if the same connection ID is re-admitted.
     """
@@ -250,7 +220,6 @@ class ConnectionSupervisor:
         "_cleanup_task",
         "_trigger_close_tasks",
         "_closed_event",
-        "__weakref__",
     )
 
     def __init__(
@@ -259,7 +228,6 @@ class ConnectionSupervisor:
         context: VerifiedConnectionContext,
         controller: AdmissionController,
         policy: LifecyclePolicy | None = None,
-        lease: AdmissionLease | None = None,
     ) -> None:
         if not isinstance(context, VerifiedConnectionContext):
             raise TypeError(
@@ -274,6 +242,8 @@ class ConnectionSupervisor:
         self._controller: AdmissionController = controller
         self._policy: LifecyclePolicy = policy if policy is not None else LifecyclePolicy()
         self._outcome: ConnectionOutcome | None = None
+        self._lease: AdmissionLease | None = None
+        self._state: ConnectionState = ConnectionState.NEW
         self._worker_factories: list[Callable[[], Coroutine[Any, Any, None]]] = []
         self._worker_tasks: list[asyncio.Task[None]] = []
         self._resources: list[Callable[[], Coroutine[Any, Any, None]]] = []
@@ -281,58 +251,6 @@ class ConnectionSupervisor:
         self._cleanup_task: asyncio.Task[None] | None = None
         self._trigger_close_tasks: set[asyncio.Task[Any]] = set()
         self._closed_event: asyncio.Event = asyncio.Event()
-
-        if lease is not None:
-            if not isinstance(lease, AdmissionLease):
-                raise TypeError(
-                    f"lease must be an AdmissionLease instance or None, got {type(lease).__name__}"
-                )
-            if lease.controller is not controller:
-                raise ConnectionLifecycleError(
-                    "Cannot initialize supervisor with a lease issued by a different AdmissionController"
-                )
-            if lease.connection_id != context.connection_id:
-                raise ConnectionLifecycleError(
-                    "Lease connection_id does not match the provided VerifiedConnectionContext"
-                )
-            # Strict trust boundary: lease context must match provided context completely
-            if lease.context != context:
-                raise ConnectionLifecycleError(
-                    "Lease VerifiedConnectionContext does not match the provided context"
-                )
-            if not lease.is_active:
-                raise ConnectionLifecycleError(
-                    "Cannot initialize supervisor with an inactive or already released lease"
-                )
-            # Exclusive lease ownership check
-            existing = _CLAIMED_LEASES.get(lease)
-            if existing is not None and existing is not self and not existing.is_closed:
-                raise ConnectionLifecycleError(
-                    "AdmissionLease is already owned by an active ConnectionSupervisor"
-                )
-            _CLAIMED_LEASES[lease] = self
-            self._lease: AdmissionLease | None = lease
-            self._state: ConnectionState = ConnectionState.ADMITTED
-        else:
-            self._lease = None
-            self._state = ConnectionState.NEW
-
-    @classmethod
-    def from_lease(
-        cls,
-        lease: AdmissionLease,
-        *,
-        policy: LifecyclePolicy | None = None,
-    ) -> ConnectionSupervisor:
-        """Construct a ConnectionSupervisor taking direct, exclusive ownership of an acquired lease."""
-        if not isinstance(lease, AdmissionLease):
-            raise TypeError(f"lease must be an AdmissionLease instance, got {type(lease).__name__}")
-        return cls(
-            context=lease.context,
-            controller=lease.controller,
-            policy=policy,
-            lease=lease,
-        )
 
     @property
     def connection_id(self) -> str:
@@ -414,7 +332,6 @@ class ConnectionSupervisor:
                 self._outcome = ConnectionOutcome(
                     state=ConnectionState.REJECTED,
                     reason=TerminalReason.ADMISSION_REJECTED,
-                    error_summary="Admission capacity rejected",
                 )
                 self._closed_event.set()
                 return False
@@ -423,7 +340,6 @@ class ConnectionSupervisor:
                 self._outcome = ConnectionOutcome(
                     state=ConnectionState.REJECTED,
                     reason=TerminalReason.TIMEOUT,
-                    error_summary="Admission acquisition timed out",
                 )
                 self._closed_event.set()
                 return False
@@ -434,7 +350,6 @@ class ConnectionSupervisor:
                 self._outcome = ConnectionOutcome(
                     state=ConnectionState.REJECTED,
                     reason=TerminalReason.CANCELLED,
-                    error_summary="Admission acquisition was cancelled",
                 )
                 self._closed_event.set()
                 raise
@@ -443,12 +358,10 @@ class ConnectionSupervisor:
                 self._outcome = ConnectionOutcome(
                     state=ConnectionState.REJECTED,
                     reason=TerminalReason.STARTUP_FAILED,
-                    error_summary="Admission acquisition failed with unexpected error",
                 )
                 self._closed_event.set()
                 raise
 
-            _CLAIMED_LEASES[lease] = self
             self._lease = lease
             self._transition_to(ConnectionState.ADMITTED)
             return True
@@ -506,9 +419,9 @@ class ConnectionSupervisor:
                         self._execute_cleanup(
                             target_terminal=ConnectionState.FAILED,
                             reason=TerminalReason.CANCELLED,
-                            error_summary="Startup cancelled during worker factory invocation",
+                            error_summary=None,
                         ),
-                        name=f"cleanup-{self._context.connection_id}",
+                        name="gw-cleanup",
                     )
                     self._cleanup_task.add_done_callback(self._on_cleanup_task_done)
                     await asyncio.shield(self._cleanup_task)
@@ -521,9 +434,9 @@ class ConnectionSupervisor:
                         self._execute_cleanup(
                             target_terminal=ConnectionState.FAILED,
                             reason=TerminalReason.STARTUP_FAILED,
-                            error_summary="Worker factory failed during invocation",
+                            error_summary=None,
                         ),
-                        name=f"cleanup-{self._context.connection_id}",
+                        name="gw-cleanup",
                     )
                     self._cleanup_task.add_done_callback(self._on_cleanup_task_done)
                     await asyncio.shield(self._cleanup_task)
@@ -539,9 +452,9 @@ class ConnectionSupervisor:
                         self._execute_cleanup(
                             target_terminal=ConnectionState.FAILED,
                             reason=TerminalReason.STARTUP_FAILED,
-                            error_summary=f"Worker factory at index {idx} must return a coroutine, got {type(coro_obj).__name__}",
+                            error_summary=None,
                         ),
-                        name=f"cleanup-{self._context.connection_id}",
+                        name="gw-cleanup",
                     )
                     self._cleanup_task.add_done_callback(self._on_cleanup_task_done)
                     await asyncio.shield(self._cleanup_task)
@@ -552,13 +465,19 @@ class ConnectionSupervisor:
 
             self._transition_to(ConnectionState.ACTIVE)
 
-            # Spawn supervised workers
+            # Spawn supervised workers with synthetic task names and exception observation
             for idx, coro in enumerate(coros):
                 task = asyncio.create_task(
                     self._run_worker(idx, coro),
-                    name=f"worker-{idx}-{self._context.connection_id}",
+                    name=f"gw-worker-{idx}",
                 )
+                task.add_done_callback(self._on_worker_task_done)
                 self._worker_tasks.append(task)
+
+    def _on_worker_task_done(self, task: asyncio.Task[None]) -> None:
+        """Observe task completion to prevent unobserved task exception warnings."""
+        if not task.cancelled():
+            task.exception()
 
     async def _run_worker(
         self,
@@ -582,7 +501,6 @@ class ConnectionSupervisor:
                 trigger_task = asyncio.create_task(
                     self.close(
                         reason=TerminalReason.WORKER_FAILED,
-                        error_summary="Worker coroutine raised unhandled exception",
                     )
                 )
                 self._trigger_close_tasks.add(trigger_task)
@@ -600,15 +518,17 @@ class ConnectionSupervisor:
         if not task.cancelled():
             exc = task.exception()
             if exc is not None:
-                # The auto-close task itself failed with an unhandled exception
+                # The auto-close task failed with an unhandled exception.
+                # If a cleanup task is not already active, trigger fallback teardown so resources are not orphaned.
                 if not self._state.is_terminal:
-                    self._state = ConnectionState.FAILED
-                    self._outcome = ConnectionOutcome(
-                        state=ConnectionState.FAILED,
-                        reason=TerminalReason.CLEANUP_FAILED,
-                        error_summary="Auto-close task failed with unhandled exception",
-                    )
-                self._closed_event.set()
+                    if self._cleanup_task is None or self._cleanup_task.done():
+                        fallback_task = asyncio.create_task(
+                            self.close(
+                                reason=TerminalReason.CLEANUP_FAILED,
+                            )
+                        )
+                        self._trigger_close_tasks.add(fallback_task)
+                        fallback_task.add_done_callback(self._on_trigger_close_done)
 
     def _on_cleanup_task_done(self, task: asyncio.Task[None]) -> None:
         """Handle completion of cleanup task, ensuring exceptions are observed."""
@@ -643,11 +563,6 @@ class ConnectionSupervisor:
                 self._outcome = ConnectionOutcome(
                     state=ConnectionState.REJECTED,
                     reason=reason if reason != TerminalReason.NORMAL else TerminalReason.CANCELLED,
-                    error_summary=_sanitize_error_summary(
-                        error_summary,
-                        TerminalReason.CANCELLED,
-                        context=self._context,
-                    ),
                 )
                 self._closed_event.set()
                 return self._outcome
@@ -666,14 +581,14 @@ class ConnectionSupervisor:
 
                 self._transition_to(ConnectionState.CLOSING)
 
-                # Spawn dedicated cleanup task to shield against outer task cancellation
+                # Spawn dedicated cleanup task with synthetic safe task name
                 self._cleanup_task = asyncio.create_task(
                     self._execute_cleanup(
                         target_terminal=target_terminal,
                         reason=reason,
                         error_summary=error_summary,
                     ),
-                    name=f"cleanup-{self._context.connection_id}",
+                    name="gw-cleanup",
                 )
                 self._cleanup_task.add_done_callback(self._on_cleanup_task_done)
                 cleanup_task = self._cleanup_task
@@ -695,7 +610,6 @@ class ConnectionSupervisor:
         deadline = loop.time() + self._policy.cleanup_timeout
         actual_terminal = target_terminal
         actual_reason = reason
-        actual_summary = error_summary
 
         try:
             # 1. Cancel all active worker tasks
@@ -712,7 +626,6 @@ class ConnectionSupervisor:
                 except TimeoutError:
                     actual_terminal = ConnectionState.FAILED
                     actual_reason = TerminalReason.TIMEOUT
-                    actual_summary = "Worker termination exceeded cleanup deadline"
 
             # 3. Close registered synthetic async resources (LIFO order)
             for resource_close in reversed(self._resources):
@@ -724,11 +637,9 @@ class ConnectionSupervisor:
                     except Exception:
                         actual_terminal = ConnectionState.FAILED
                         actual_reason = TerminalReason.CLEANUP_FAILED
-                        actual_summary = "Async resource cleanup failed or timed out"
                 else:
                     actual_terminal = ConnectionState.FAILED
                     actual_reason = TerminalReason.TIMEOUT
-                    actual_summary = "Cleanup deadline exceeded before resource teardown"
 
             # 4. Release admission lease (idempotent, retry-safe with dedicated bounded window)
             if self._lease is not None:
@@ -745,19 +656,12 @@ class ConnectionSupervisor:
                 if self._lease.is_active:
                     actual_terminal = ConnectionState.FAILED
                     actual_reason = TerminalReason.CLEANUP_FAILED
-                    actual_summary = "Failed to release admission lease"
 
             # 5. Record terminal state and outcome
             self._transition_to(actual_terminal)
-
             self._outcome = ConnectionOutcome(
                 state=self._state,
                 reason=actual_reason,
-                error_summary=_sanitize_error_summary(
-                    actual_summary,
-                    actual_reason,
-                    context=self._context,
-                ),
             )
         except (KeyboardInterrupt, SystemExit):
             raise
@@ -765,18 +669,10 @@ class ConnectionSupervisor:
             # Direct cancellation of internal cleanup task: teardown was aborted!
             # Never record a successful CLOSED outcome when cleanup was aborted mid-flight.
             self._state = ConnectionState.FAILED
-            if self._lease is not None and self._lease.is_active:
-                self._outcome = ConnectionOutcome(
-                    state=ConnectionState.FAILED,
-                    reason=TerminalReason.CLEANUP_FAILED,
-                    error_summary="Cleanup task cancelled before capacity lease was released",
-                )
-            else:
-                self._outcome = ConnectionOutcome(
-                    state=ConnectionState.FAILED,
-                    reason=TerminalReason.CLEANUP_FAILED,
-                    error_summary="Cleanup task cancelled before completing teardown",
-                )
+            self._outcome = ConnectionOutcome(
+                state=ConnectionState.FAILED,
+                reason=TerminalReason.CLEANUP_FAILED,
+            )
             raise
         except Exception:
             # Emergency fail-safe
@@ -784,11 +680,8 @@ class ConnectionSupervisor:
             self._outcome = ConnectionOutcome(
                 state=ConnectionState.FAILED,
                 reason=TerminalReason.CLEANUP_FAILED,
-                error_summary="Unexpected error in cleanup supervisor",
             )
         finally:
-            if self._lease is not None:
-                _CLAIMED_LEASES.pop(self._lease, None)
             self._closed_event.set()
 
     async def wait(self) -> ConnectionOutcome:
@@ -816,7 +709,7 @@ class ConnectionSupervisor:
                 if isinstance(exc_val, asyncio.CancelledError)
                 else TerminalReason.WORKER_FAILED
             )
-            await self.close(reason=reason, error_summary="Context manager exited with exception")
+            await self.close(reason=reason)
         else:
             await self.close(reason=TerminalReason.NORMAL)
 

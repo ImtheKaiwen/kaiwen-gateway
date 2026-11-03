@@ -146,11 +146,11 @@ def test_connection_outcome_immutability_and_slots() -> None:
     outcome = ConnectionOutcome(
         state=ConnectionState.CLOSED,
         reason=TerminalReason.NORMAL,
-        error_summary="All workers done",
+        error_summary="Ignored user input string",
     )
     assert outcome.state == ConnectionState.CLOSED
     assert outcome.reason == TerminalReason.NORMAL
-    assert outcome.error_summary == "All workers done"
+    assert outcome.error_summary == "Normal connection closure"
 
     with pytest.raises(FrozenInstanceError):
         outcome.state = ConnectionState.FAILED  # type: ignore[misc]
@@ -232,174 +232,86 @@ def test_supervisor_initialization_type_validation() -> None:
     with pytest.raises(TypeError, match="controller must be an AdmissionController"):
         ConnectionSupervisor(context=ctx, controller="invalid")  # type: ignore[arg-type]
 
-    with pytest.raises(TypeError, match="lease must be an AdmissionLease instance"):
-        ConnectionSupervisor(context=ctx, controller=controller, lease="invalid")  # type: ignore[arg-type]
+    # Passing obsolete lease keyword argument is rejected
+    with pytest.raises(TypeError):
+        ConnectionSupervisor(context=ctx, controller=controller, lease="invalid")  # type: ignore[call-arg]
 
 
-def test_supervisor_initialization_with_mismatched_lease() -> None:
-    """Item 7: Verify supervisor constructor rejects invalid or mismatched leases."""
-
-    async def _run() -> None:
-        ctx1 = _make_context(connection_id="conn_01")
-        ctx2 = _make_context(connection_id="conn_02")
-        controller1 = _make_controller()
-        controller2 = _make_controller()
-
-        lease1 = await controller1.acquire(ctx1)
-
-        # Lease from different controller
-        with pytest.raises(ConnectionLifecycleError, match="different AdmissionController"):
-            ConnectionSupervisor(context=ctx1, controller=controller2, lease=lease1)
-
-        # Lease with mismatched connection_id
-        with pytest.raises(ConnectionLifecycleError, match="connection_id does not match"):
-            ConnectionSupervisor(context=ctx2, controller=controller1, lease=lease1)
-
-        # Inactive / released lease
-        await lease1.release()
-        with pytest.raises(ConnectionLifecycleError, match="inactive or already released"):
-            ConnectionSupervisor(context=ctx1, controller=controller1, lease=lease1)
-
-    asyncio.run(_run())
-
-
-def test_supervisor_from_lease_factory() -> None:
-    """Item 8: Verify from_lease class method constructs supervisor in ADMITTED state."""
+def test_supervisor_single_ownership_by_construction() -> None:
+    """Item 7: Verify single lease ownership by construction without external handover."""
 
     async def _run() -> None:
-        ctx = _make_context()
+        ctx = _make_context(connection_id="conn_single_owner")
         controller = _make_controller()
-        lease = await controller.acquire(ctx)
 
-        supervisor = ConnectionSupervisor.from_lease(lease)
-        assert _get_state(supervisor) == ConnectionState.ADMITTED
-        assert supervisor.connection_id == "conn_01"
-        assert supervisor.lease is lease
-        assert supervisor.is_closed is False
+        # from_lease classmethod is removed
+        assert not hasattr(ConnectionSupervisor, "from_lease")
 
-        with pytest.raises(TypeError, match="lease must be an AdmissionLease instance"):
-            ConnectionSupervisor.from_lease("not_a_lease")  # type: ignore[arg-type]
-
-        await supervisor.close()
-
-    asyncio.run(_run())
-
-
-def test_supervisor_trust_boundary_and_ownership_invariants() -> None:
-    """Item 8b (Blocker B): Verify strict lease-context binding and dual supervisor ownership rejection."""
-
-    async def _run() -> None:
-        ctx_base = _make_context(
-            connection_id="conn_base",
-            tenant_id="tenant_base",
-            provider_id="provider_base",
-            call_id="call_base",
-            scopes=("voice.stream",),
-            provider_call_ref="ref_base",
-        )
-        controller = _make_controller()
-        lease = await controller.acquire(ctx_base)
-
-        # 1. Same connection ID, different tenant_id
-        ctx_diff_tenant = _make_context(
-            connection_id="conn_base",
-            tenant_id="tenant_foreign",
-            provider_id="provider_base",
-            call_id="call_base",
-            scopes=("voice.stream",),
-            provider_call_ref="ref_base",
-        )
-        with pytest.raises(
-            ConnectionLifecycleError, match="VerifiedConnectionContext does not match"
-        ):
-            ConnectionSupervisor(context=ctx_diff_tenant, controller=controller, lease=lease)
-
-        # 2. Same connection ID, different provider_id
-        ctx_diff_provider = _make_context(
-            connection_id="conn_base",
-            tenant_id="tenant_base",
-            provider_id="provider_foreign",
-            call_id="call_base",
-            scopes=("voice.stream",),
-            provider_call_ref="ref_base",
-        )
-        with pytest.raises(
-            ConnectionLifecycleError, match="VerifiedConnectionContext does not match"
-        ):
-            ConnectionSupervisor(context=ctx_diff_provider, controller=controller, lease=lease)
-
-        # 3. Same connection ID, different call_id
-        ctx_diff_call = _make_context(
-            connection_id="conn_base",
-            tenant_id="tenant_base",
-            provider_id="provider_base",
-            call_id="call_foreign",
-            scopes=("voice.stream",),
-            provider_call_ref="ref_base",
-        )
-        with pytest.raises(
-            ConnectionLifecycleError, match="VerifiedConnectionContext does not match"
-        ):
-            ConnectionSupervisor(context=ctx_diff_call, controller=controller, lease=lease)
-
-        # 4. Same connection ID, different scopes
-        ctx_diff_scopes = _make_context(
-            connection_id="conn_base",
-            tenant_id="tenant_base",
-            provider_id="provider_base",
-            call_id="call_base",
-            scopes=("voice.stream", "admin"),
-            provider_call_ref="ref_base",
-        )
-        with pytest.raises(
-            ConnectionLifecycleError, match="VerifiedConnectionContext does not match"
-        ):
-            ConnectionSupervisor(context=ctx_diff_scopes, controller=controller, lease=lease)
-
-        # 5. Same connection ID, different provider_call_ref
-        ctx_diff_ref = _make_context(
-            connection_id="conn_base",
-            tenant_id="tenant_base",
-            provider_id="provider_base",
-            call_id="call_base",
-            scopes=("voice.stream",),
-            provider_call_ref="ref_different",
-        )
-        with pytest.raises(
-            ConnectionLifecycleError, match="VerifiedConnectionContext does not match"
-        ):
-            ConnectionSupervisor(context=ctx_diff_ref, controller=controller, lease=lease)
-
-        # 6. Same lease, two supervisors (dual ownership rejected)
-        supervisor_a = ConnectionSupervisor.from_lease(lease)
-        with pytest.raises(
-            ConnectionLifecycleError,
-            match="AdmissionLease is already owned by an active ConnectionSupervisor",
-        ):
-            ConnectionSupervisor.from_lease(lease)
-
-        # 7. Foreign controller rejected
-        controller_foreign = _make_controller()
-        with pytest.raises(ConnectionLifecycleError, match="different AdmissionController"):
-            ConnectionSupervisor(context=ctx_base, controller=controller_foreign, lease=lease)
-
-        # 8. Close first supervisor releases lease
-        await supervisor_a.close()
-        assert supervisor_a.state == ConnectionState.CLOSED
-        assert lease.is_active is False
-
-        # 9. Stale released lease rejected
-        with pytest.raises(ConnectionLifecycleError, match="inactive or already released"):
-            ConnectionSupervisor.from_lease(lease)
-
-        # 10. New connection admission isolated from old closed supervisor
-        supervisor_b = ConnectionSupervisor(context=ctx_base, controller=controller)
-        admitted = await supervisor_b.admit()
-        assert admitted is True
-        assert supervisor_b.state == ConnectionState.ADMITTED
+        # Supervisor 1 acquires exclusive lease via admit()
+        s1 = ConnectionSupervisor(context=ctx, controller=controller)
+        admitted1 = await s1.admit()
+        assert admitted1 is True
+        assert _get_state(s1) == ConnectionState.ADMITTED
+        assert s1.lease is not None
+        assert s1.lease.is_active is True
         assert controller.snapshot().active_connections == 1
-        await supervisor_b.close()
+
+        # Supervisor 2 attempting to admit same connection context is rejected by controller
+        s2 = ConnectionSupervisor(context=ctx, controller=controller)
+        admitted2 = await s2.admit()
+        assert admitted2 is False
+        assert _get_state(s2) == ConnectionState.REJECTED
+        assert s2.outcome is not None
+        assert s2.outcome.reason == TerminalReason.ADMISSION_REJECTED
+        assert s2.lease is None
+        assert controller.snapshot().active_connections == 1
+
+        # Closing s1 releases the lease cleanly
+        await s1.close()
+        assert _get_state(s1) == ConnectionState.CLOSED
+        assert not _is_lease_active(s1.lease)
         assert controller.snapshot().active_connections == 0
+
+        # Now a new supervisor can admit this connection ID
+        s3 = ConnectionSupervisor(context=ctx, controller=controller)
+        admitted3 = await s3.admit()
+        assert admitted3 is True
+        assert _get_state(s3) == ConnectionState.ADMITTED
+        assert controller.snapshot().active_connections == 1
+        await s3.close()
+        assert controller.snapshot().active_connections == 0
+
+    asyncio.run(_run())
+
+
+def test_supervisor_module_and_instance_isolation_no_global_registry() -> None:
+    """Item 8: Verify no module-level global shared lease registry exists and instances are isolated."""
+    import kaiwen_gateway.core.lifecycle as lc
+
+    # No shared module-level registry
+    assert not hasattr(lc, "_CLAIMED_LEASES")
+
+    async def _run() -> None:
+        c1 = _make_controller()
+        c2 = _make_controller()
+        ctx1 = _make_context(connection_id="conn_iso_1")
+        ctx2 = _make_context(connection_id="conn_iso_2")
+
+        s1 = ConnectionSupervisor(context=ctx1, controller=c1)
+        s2 = ConnectionSupervisor(context=ctx2, controller=c2)
+
+        assert await s1.admit() is True
+        assert await s2.admit() is True
+
+        assert c1.snapshot().active_connections == 1
+        assert c2.snapshot().active_connections == 1
+
+        await s1.close()
+        assert c1.snapshot().active_connections == 0
+        assert c2.snapshot().active_connections == 1
+
+        await s2.close()
+        assert c2.snapshot().active_connections == 0
 
     asyncio.run(_run())
 
@@ -543,14 +455,15 @@ def test_cannot_call_admit_twice_or_from_non_new() -> None:
     asyncio.run(_run())
 
 
-def test_cannot_call_admit_when_constructed_from_lease() -> None:
-    """Item 15: Supervisor constructed from_lease starts in ADMITTED, cannot call admit()."""
+def test_cannot_call_admit_when_already_admitted() -> None:
+    """Item 15: Supervisor cannot call admit() once already in ADMITTED state."""
 
     async def _run() -> None:
         ctx = _make_context()
         controller = _make_controller()
-        lease = await controller.acquire(ctx)
-        supervisor = ConnectionSupervisor.from_lease(lease)
+        assert not hasattr(ConnectionSupervisor, "from_lease")
+        supervisor = ConnectionSupervisor(context=ctx, controller=controller)
+        assert await supervisor.admit() is True
 
         with pytest.raises(
             InvalidConnectionTransitionError, match=r"admit\(\) can only be called from NEW"
@@ -720,7 +633,7 @@ def test_worker_unhandled_exception_cancels_siblings() -> None:
 
         assert outcome.state == ConnectionState.FAILED
         assert outcome.reason == TerminalReason.WORKER_FAILED
-        assert outcome.error_summary == "Worker coroutine raised unhandled exception"
+        assert outcome.error_summary == "Worker task execution failed"
         assert sibling_cancelled is True
         assert _get_state(supervisor) == ConnectionState.FAILED
         assert controller.snapshot().active_connections == 0
@@ -1094,8 +1007,11 @@ def test_supervisor_and_outcome_privacy() -> None:
         error_summary="Sanitized error description",
     )
     out_rep = repr(outcome)
+    out_str = str(outcome)
     assert "conn_sensitive" not in out_rep
-    assert "Sanitized error description" in out_rep
+    assert out_rep == "ConnectionOutcome(state='FAILED', reason='worker_failed')"
+    assert out_str == out_rep
+    assert outcome.error_summary == "Worker task execution failed"
 
 
 def test_core_package_exports_all_lifecycle_symbols() -> None:
@@ -1149,7 +1065,7 @@ def test_admit_startup_timeout_rejection() -> None:
         assert supervisor.outcome is not None
         assert supervisor.outcome.state == ConnectionState.REJECTED
         assert supervisor.outcome.reason == TerminalReason.TIMEOUT
-        assert supervisor.outcome.error_summary == "Admission acquisition timed out"
+        assert supervisor.outcome.error_summary == "Lifecycle deadline expired"
 
     asyncio.run(_run())
 
@@ -1176,7 +1092,7 @@ def test_worker_termination_exceeds_cleanup_timeout() -> None:
 
         assert outcome.state == ConnectionState.FAILED
         assert outcome.reason == TerminalReason.TIMEOUT
-        assert outcome.error_summary == "Worker termination exceeded cleanup deadline"
+        assert outcome.error_summary == "Lifecycle deadline expired"
 
     asyncio.run(_run())
 
@@ -1282,7 +1198,7 @@ def test_close_when_lease_release_fails_all_retries() -> None:
         outcome = await supervisor.close()
         assert outcome.state == ConnectionState.FAILED
         assert outcome.reason == TerminalReason.CLEANUP_FAILED
-        assert outcome.error_summary == "Failed to release admission lease"
+        assert outcome.error_summary == "Teardown cleanup failed"
 
     asyncio.run(_run())
 
@@ -1457,7 +1373,7 @@ def test_execute_cleanup_catastrophic_exception_fail_safe(monkeypatch: pytest.Mo
         assert supervisor.outcome is not None
         assert supervisor.outcome.state == ConnectionState.FAILED
         assert supervisor.outcome.reason == TerminalReason.CLEANUP_FAILED
-        assert supervisor.outcome.error_summary == "Unexpected error in cleanup supervisor"
+        assert supervisor.outcome.error_summary == "Teardown cleanup failed"
 
     asyncio.run(_run())
 
@@ -1565,41 +1481,67 @@ def test_cleanup_deadline_exceeded_skips_further_resources() -> None:
 
 
 def test_error_summary_redaction_and_privacy_boundaries() -> None:
-    """Item 53 (Blocker C): Verify error_summary redacts synthetic secret markers, tenant, and connection IDs."""
+    """Item 53 (Blocker C): Verify diagnostic privacy: fixed safe reason summaries, safe task names, zero leakage."""
 
     async def _run() -> None:
-        secret_marker = "SECRET_MARKER_123"
-        tenant_secret = "tenant_SECRET"
-        conn_secret = "conn_SECRET"
+        unknown_secret = "UNKNOWN_SECRET_TOKEN_XYZ_99"
+        phone_number = "+905551234567"
+        email_addr = "user@sensitive-domain.com"
+        tenant_secret = "tenant_secret_corp"
+        conn_secret = "conn_secret_device_88"
+        call_secret = "call_secret_pstn_77"
 
         ctx = _make_context(
             connection_id=conn_secret,
             tenant_id=tenant_secret,
+            call_id=call_secret,
         )
         controller = _make_controller()
         supervisor = ConnectionSupervisor(context=ctx, controller=controller)
         await supervisor.admit()
 
+        # Start a worker and check synthetic task names
+        async def dummy_worker() -> None:
+            await asyncio.sleep(0.01)
+
+        await supervisor.start(dummy_worker)
+        assert len(supervisor._worker_tasks) == 1
+        worker_task_name = supervisor._worker_tasks[0].get_name()
+        # Verify task name does NOT contain raw connection ID or tenant ID
+        assert worker_task_name == "gw-worker-0"
+        assert conn_secret not in worker_task_name
+        assert tenant_secret not in worker_task_name
+
+        untrusted_text = (
+            f"Failure with {unknown_secret}, {phone_number}, {email_addr}, "
+            f"{tenant_secret}, {conn_secret}, {call_secret}"
+        )
         outcome = await supervisor.close(
             reason=TerminalReason.WORKER_FAILED,
-            error_summary=f"Failure with {secret_marker} in {tenant_secret} on {conn_secret}",
+            error_summary=untrusted_text,
         )
 
-        # 1. close(error_summary=...) redacts sensitive markers
-        assert secret_marker not in (outcome.error_summary or "")
-        assert tenant_secret not in (outcome.error_summary or "")
-        assert conn_secret not in (outcome.error_summary or "")
-        assert "[REDACTED]" in (outcome.error_summary or "")
-
-        # 2. repr(outcome) and str(outcome) do not leak secrets
+        # 1. repr(outcome) and str(outcome) contain ONLY state and reason
         rep = repr(outcome)
         out_str = str(outcome)
-        assert secret_marker not in rep
-        assert tenant_secret not in rep
-        assert conn_secret not in rep
-        assert secret_marker not in out_str
-        assert tenant_secret not in out_str
-        assert conn_secret not in out_str
+        assert rep == "ConnectionOutcome(state='FAILED', reason='worker_failed')"
+        assert out_str == rep
+
+        # None of the sensitive values appear in representations
+        for sensitive in (
+            unknown_secret,
+            phone_number,
+            email_addr,
+            tenant_secret,
+            conn_secret,
+            call_secret,
+        ):
+            assert sensitive not in rep
+            assert sensitive not in out_str
+            assert sensitive not in (outcome.error_summary or "")
+
+        # 2. outcome.error_summary is strictly the safe fixed canonical summary
+        assert outcome.error_summary == "Worker task execution failed"
 
         # 3. Worker factory failure does not leak raw exception text
         ctx2 = _make_context()
@@ -1607,14 +1549,15 @@ def test_error_summary_redaction_and_privacy_boundaries() -> None:
         await supervisor2.admit()
 
         def secret_leaking_factory() -> Any:
-            raise RuntimeError(f"Leaking {secret_marker}")
+            raise RuntimeError(f"Leaking {unknown_secret} and {phone_number}")
 
         with pytest.raises(ConnectionLifecycleError):
             await supervisor2.start(secret_leaking_factory)
 
         outcome2 = await supervisor2.wait_closed()
-        assert secret_marker not in (outcome2.error_summary or "")
-        assert secret_marker not in repr(outcome2)
+        assert unknown_secret not in (outcome2.error_summary or "")
+        assert phone_number not in (outcome2.error_summary or "")
+        assert repr(outcome2) == "ConnectionOutcome(state='FAILED', reason='startup_failed')"
 
         # 4. Resource cleanup failure does not leak raw exception text
         ctx3 = _make_context()
@@ -1622,34 +1565,78 @@ def test_error_summary_redaction_and_privacy_boundaries() -> None:
         await supervisor3.admit()
 
         async def secret_leaking_resource() -> None:
-            raise RuntimeError(f"Resource leaking {secret_marker}")
+            raise RuntimeError(f"Resource leaking {unknown_secret}")
 
         supervisor3.register_resource(secret_leaking_resource)
         outcome3 = await supervisor3.close()
-        assert secret_marker not in (outcome3.error_summary or "")
-        assert secret_marker not in repr(outcome3)
+        assert unknown_secret not in (outcome3.error_summary or "")
+        assert repr(outcome3) == "ConnectionOutcome(state='FAILED', reason='cleanup_failed')"
 
     asyncio.run(_run())
 
 
 def test_fatal_signal_keyboard_interrupt_in_worker_propagates() -> None:
-    """Item 54 (Blocker D): Verify KeyboardInterrupt in a worker propagates and is not converted to worker failure."""
+    """Item 54 (Blocker D): Verify KeyboardInterrupt in worker propagates with zero unobserved task exceptions."""
+    import subprocess
+    import sys
 
-    async def _run() -> None:
-        ctx = _make_context()
-        controller = _make_controller()
-        supervisor = ConnectionSupervisor(context=ctx, controller=controller)
-        await supervisor.admit()
+    # Execute fatal worker in an isolated subprocess to verify signal propagation and stderr cleanliness
+    script = """
+import asyncio, sys
+from kaiwen_gateway.core import (
+    ConnectionSupervisor,
+    CoreConfig,
+    AdmissionController,
+    VerifiedConnectionContext,
+)
+
+async def main():
+    ctx = VerifiedConnectionContext(
+        provider_id="prov_test",
+        tenant_id="tenant_test",
+        connection_id="conn_fatal",
+        call_id="call_fatal",
+        allowed_scopes=("voice.stream",),
+    )
+    ctrl = AdmissionController(CoreConfig())
+    sup = ConnectionSupervisor(context=ctx, controller=ctrl)
+    await sup.admit()
+
+    async def fatal():
+        raise KeyboardInterrupt()
+
+    await sup.start(fatal)
+    await asyncio.sleep(0.05)
+
+asyncio.run(main())
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+    )
+
+    # Subprocess must have failed with KeyboardInterrupt
+    assert result.returncode != 0
+    # Must NOT emit 'Task exception was never retrieved'
+    assert "Task exception was never retrieved" not in result.stderr
+
+    # In-process test to ensure line coverage and direct signal propagation
+    async def _in_process() -> None:
+        ctx = _make_context(connection_id="conn_fatal_in_proc")
+        ctrl = _make_controller()
+        sup = ConnectionSupervisor(context=ctx, controller=ctrl)
+        await sup.admit()
 
         async def fatal_worker() -> None:
-            raise KeyboardInterrupt()
+            raise SystemExit(42)
 
-        await supervisor.start(fatal_worker)
-        # Give worker a chance to run
+        await sup.start(fatal_worker)
         await asyncio.sleep(0.01)
 
-    with pytest.raises(KeyboardInterrupt):
-        asyncio.run(_run())
+    with pytest.raises(SystemExit) as exc_info:
+        asyncio.run(_in_process())
+    assert exc_info.value.code == 42
 
 
 def test_cannot_register_resource_in_new_or_authenticating_state() -> None:
@@ -1669,57 +1656,59 @@ def test_cannot_register_resource_in_new_or_authenticating_state() -> None:
 
 
 def test_worker_auto_close_task_exception_observed() -> None:
-    """Item 56 (Blocker F): Verify worker auto-close task unhandled exceptions are observed and mark FAILED."""
+    """Item 56 (Blocker B / Blocker F Regression): 10-step verification of auto-close failure and fallback teardown."""
 
     async def _run() -> None:
-        ctx = _make_context()
+        # 1. Admit
+        ctx = _make_context(connection_id="conn_autoclose_fallback")
         controller = _make_controller()
         supervisor = ConnectionSupervisor(context=ctx, controller=controller)
-        await supervisor.admit()
+        admitted = await supervisor.admit()
+        assert admitted is True
+        assert controller.snapshot().active_connections == 1
+        assert supervisor.state == ConnectionState.ADMITTED
 
-        # Simulate auto close task failure directly via callback
+        # 2. Test cancelled auto-close task callback (branch coverage for task.cancelled())
         loop = asyncio.get_running_loop()
+        cancelled_task = loop.create_future()
+        cancelled_task.cancel()
+        supervisor._on_trigger_close_done(cancelled_task)  # type: ignore[arg-type]
+        assert supervisor.state == ConnectionState.ADMITTED
+
+        # 3. Simulate fault injection in an auto-close task while supervisor is not terminal
         failing_task = loop.create_future()
         failing_task.set_exception(RuntimeError("Simulated auto-close crash"))
 
-        # Adapt future to task-like done callback
+        # 4 & 5. Trigger callback to initiate fallback teardown
         supervisor._on_trigger_close_done(failing_task)  # type: ignore[arg-type]
 
+        # 6. Wait for fallback teardown to execute and complete
         outcome = await supervisor.wait_closed()
+
+        # 7. Check active admission snapshot (must be 0, no leaked capacity!)
+        assert controller.snapshot().active_connections == 0
+
+        # 8. Check terminal outcome
         assert outcome.state == ConnectionState.FAILED
         assert outcome.reason == TerminalReason.CLEANUP_FAILED
-        assert supervisor._closed_event.is_set()
+        assert outcome.error_summary == "Teardown cleanup failed"
 
-        # Call again when supervisor is already in terminal state
+        # 9. Call again when supervisor is already in terminal state (idempotent done callback)
         failing_task2 = loop.create_future()
         failing_task2.set_exception(RuntimeError("Second simulated crash"))
         supervisor._on_trigger_close_done(failing_task2)  # type: ignore[arg-type]
 
-    asyncio.run(_run())
-
-
-def test_sanitize_error_summary_comprehensive() -> None:
-    """Item 57: Verify _sanitize_error_summary redacts call_id, provider_call_ref, and handles None."""
-
-    async def _run() -> None:
-        ctx = _make_context(call_id="call_999", provider_call_ref="ref_888")
-        controller = _make_controller()
-        supervisor = ConnectionSupervisor(context=ctx, controller=controller)
-        await supervisor.admit()
-
-        outcome = await supervisor.close(
-            reason=TerminalReason.WORKER_FAILED,
-            error_summary="Error on call_999 with ref_888",
-        )
-        assert "call_999" not in (outcome.error_summary or "")
-        assert "ref_888" not in (outcome.error_summary or "")
-        assert "[REDACTED_CALL]" in (outcome.error_summary or "")
-        assert "[REDACTED_REF]" in (outcome.error_summary or "")
-
-        # None error summary
-        outcome_none = ConnectionOutcome(state=ConnectionState.CLOSED, reason=TerminalReason.NORMAL)
-        assert outcome_none.error_summary is None
-        assert "error_summary" not in repr(outcome_none)
+        # 10. Call when cleanup task is already active to verify guard (line 524 branch)
+        failing_task3 = loop.create_future()
+        failing_task3.set_exception(RuntimeError("Third crash with active cleanup"))
+        supervisor._state = ConnectionState.CLOSING  # temporarily simulate active closing
+        # cleanup_task is not done
+        dummy_cleanup = asyncio.create_task(asyncio.sleep(1.0))
+        supervisor._cleanup_task = dummy_cleanup
+        supervisor._on_trigger_close_done(failing_task3)  # type: ignore[arg-type]
+        dummy_cleanup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await dummy_cleanup
 
     asyncio.run(_run())
 
@@ -1851,8 +1840,6 @@ def test_close_retry_lease_release_exception_and_cleanup_without_lease() -> None
             await close_task
         assert s2.state == ConnectionState.FAILED
         assert s2.outcome is not None
-        assert "Cleanup task cancelled before completing teardown" in (
-            s2.outcome.error_summary or ""
-        )
+        assert s2.outcome.error_summary == "Teardown cleanup failed"
 
     asyncio.run(_run())
