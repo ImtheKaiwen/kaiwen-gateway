@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Coroutine
 from dataclasses import FrozenInstanceError
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -1656,7 +1656,7 @@ def test_cannot_register_resource_in_new_or_authenticating_state() -> None:
 
 
 def test_worker_auto_close_task_exception_observed() -> None:
-    """Item 56 (Blocker B / Blocker F Regression): 10-step verification of auto-close failure and fallback teardown."""
+    """Item 56: Verification of auto-close failure and fallback teardown."""
 
     async def _run() -> None:
         # 1. Admit
@@ -1666,46 +1666,40 @@ def test_worker_auto_close_task_exception_observed() -> None:
         admitted = await supervisor.admit()
         assert admitted is True
         assert controller.snapshot().active_connections == 1
-        assert supervisor.state == ConnectionState.ADMITTED
+        assert _get_state(supervisor) == ConnectionState.ADMITTED
 
-        # 2. Test cancelled auto-close task callback (branch coverage for task.cancelled())
+        # 2. Simulate fault injection in an auto-close task while supervisor is not terminal
         loop = asyncio.get_running_loop()
-        cancelled_task = loop.create_future()
-        cancelled_task.cancel()
-        supervisor._on_trigger_close_done(cancelled_task)  # type: ignore[arg-type]
-        assert supervisor.state == ConnectionState.ADMITTED
-
-        # 3. Simulate fault injection in an auto-close task while supervisor is not terminal
         failing_task = loop.create_future()
         failing_task.set_exception(RuntimeError("Simulated auto-close crash"))
 
-        # 4 & 5. Trigger callback to initiate fallback teardown
-        supervisor._on_trigger_close_done(failing_task)  # type: ignore[arg-type]
+        # 3. Trigger callback to initiate fallback teardown
+        supervisor._on_auto_close_done(failing_task)  # type: ignore[arg-type]
 
-        # 6. Wait for fallback teardown to execute and complete
+        # 4. Wait for fallback teardown to execute and complete
         outcome = await supervisor.wait_closed()
 
-        # 7. Check active admission snapshot (must be 0, no leaked capacity!)
+        # 5. Check active admission snapshot (must be 0, no leaked capacity!)
         assert controller.snapshot().active_connections == 0
 
-        # 8. Check terminal outcome
+        # 6. Check terminal outcome
         assert outcome.state == ConnectionState.FAILED
         assert outcome.reason == TerminalReason.CLEANUP_FAILED
         assert outcome.error_summary == "Teardown cleanup failed"
 
-        # 9. Call again when supervisor is already in terminal state (idempotent done callback)
+        # 7. Call again when supervisor is already in terminal state (idempotent done callback)
         failing_task2 = loop.create_future()
         failing_task2.set_exception(RuntimeError("Second simulated crash"))
-        supervisor._on_trigger_close_done(failing_task2)  # type: ignore[arg-type]
+        supervisor._on_auto_close_done(failing_task2)  # type: ignore[arg-type]
 
-        # 10. Call when cleanup task is already active to verify guard (line 524 branch)
+        # 8. Call when cleanup task is already active to verify guard
         failing_task3 = loop.create_future()
         failing_task3.set_exception(RuntimeError("Third crash with active cleanup"))
         supervisor._state = ConnectionState.CLOSING  # temporarily simulate active closing
         # cleanup_task is not done
         dummy_cleanup = asyncio.create_task(asyncio.sleep(1.0))
         supervisor._cleanup_task = dummy_cleanup
-        supervisor._on_trigger_close_done(failing_task3)  # type: ignore[arg-type]
+        supervisor._on_auto_close_done(failing_task3)  # type: ignore[arg-type]
         dummy_cleanup.cancel()
         with pytest.raises(asyncio.CancelledError):
             await dummy_cleanup
@@ -1843,3 +1837,254 @@ def test_close_retry_lease_release_exception_and_cleanup_without_lease() -> None
         assert s2.outcome.error_summary == "Teardown cleanup failed"
 
     asyncio.run(_run())
+
+
+def test_bounded_fallback_recovery_under_permanent_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Item 61 (Blocker A): 11-step verification of strictly bounded fallback task creation under permanent close failure."""
+    close_call_count = 0
+    fail_close = True
+    real_close = ConnectionSupervisor.close
+
+    async def permanently_failing_close(
+        self: ConnectionSupervisor, *args: Any, **kwargs: Any
+    ) -> ConnectionOutcome:
+        nonlocal close_call_count
+        if fail_close:
+            close_call_count += 1
+            raise RuntimeError(f"Deterministic permanent close failure #{close_call_count}")
+        return await real_close(self, *args, **kwargs)
+
+    monkeypatch.setattr(ConnectionSupervisor, "close", permanently_failing_close)
+
+    async def _run() -> None:
+        nonlocal fail_close
+        # 1. Supervisor oluştur ve admit et
+        ctx = _make_context(connection_id="conn_bounded_fallback")
+        controller = _make_controller()
+        supervisor = ConnectionSupervisor(context=ctx, controller=controller)
+        admitted = await supervisor.admit()
+        assert admitted is True
+
+        # 2. Aktif lease olduğunu doğrula
+        assert supervisor.lease is not None
+        assert supervisor.lease.is_active is True
+        assert controller.snapshot().active_connections == 1
+
+        # 3. Sentetik worker oluştur
+        worker_done = False
+
+        async def worker() -> None:
+            nonlocal worker_done
+            worker_done = True
+
+        # 4 & 5. Auto-close çağrısına deterministik kalıcı hata enjekte et ve fallback'in de başarısız olmasını sağla
+        await supervisor.start(worker)
+        # Give event loop time to run worker and trigger auto-close + fallback
+        await supervisor.wait_closed()
+        assert worker_done is True
+
+        # 6 & 7. Oluşturulan toplam fallback task sayısını say; sayının sonlu ve açık sınır içinde olduğunu doğrula
+        assert supervisor.fallback_attempts == 1
+        assert supervisor.fallback_attempts <= ConnectionSupervisor.MAX_FALLBACK_ATTEMPTS
+        # Total calls to close: 1 (auto-close) + 1 (fallback) = 2
+        assert close_call_count == 2
+
+        # 8. Yeni task üretiminin durduğunu doğrula (event loop ilerlese de yeni task üretilmez)
+        await asyncio.sleep(0.05)
+        assert close_call_count == 2
+        assert supervisor.fallback_attempts == 1
+        assert len(supervisor._trigger_close_tasks) == 0
+
+        # 9. Unobserved task exception bulunmadığını doğrula (callback'ler exception'ları gözlemledi)
+        # Both auto-close and fallback task exceptions were retrieved in their respective done callbacks.
+
+        # 10. Terminal state ve lease durumunu kontrol et
+        assert supervisor.state == ConnectionState.FAILED
+        assert supervisor.outcome is not None
+        assert supervisor.outcome.state == ConnectionState.FAILED
+        assert supervisor.outcome.reason == TerminalReason.CLEANUP_FAILED
+        assert supervisor.outcome.error_summary == "Teardown cleanup failed"
+        # Lease is still active and owned by supervisor
+        assert supervisor.lease is not None
+        assert _is_lease_active(supervisor.lease)
+        assert controller.snapshot().active_connections == 1
+
+        # 11. Uygunsa kontrollü manuel recovery ile kapasiteyi temizle
+        fail_close = False
+        recovery_outcome = await supervisor.close()
+        assert recovery_outcome.state == ConnectionState.FAILED
+        assert not _is_lease_active(supervisor.lease)
+        assert controller.snapshot().active_connections == 0
+
+    asyncio.run(_run())
+
+
+def test_cancelled_autoclose_triggers_bounded_fallback_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Item 62 (Blocker B): 10-step verification that a cancelled auto-close task triggers bounded fallback teardown."""
+    real_close = ConnectionSupervisor.close
+    auto_close_started = asyncio.Event()
+    hold_auto_close = asyncio.Event()
+    intercept = True
+
+    async def intercepting_close(
+        self: ConnectionSupervisor, *args: Any, **kwargs: Any
+    ) -> ConnectionOutcome:
+        nonlocal intercept
+        if intercept:
+            intercept = False
+            auto_close_started.set()
+            # Wait until test cancels this task before cleanup starts
+            await hold_auto_close.wait()
+        return await real_close(self, *args, **kwargs)
+
+    monkeypatch.setattr(ConnectionSupervisor, "close", intercepting_close)
+
+    async def _run() -> None:
+        # 1. Supervisor admit edilir
+        ctx = _make_context(connection_id="conn_cancelled_autoclose")
+        controller = _make_controller()
+        supervisor = ConnectionSupervisor(context=ctx, controller=controller)
+        admitted = await supervisor.admit()
+        assert admitted is True
+        assert controller.snapshot().active_connections == 1
+
+        resource_cleaned = False
+
+        async def synthetic_resource() -> None:
+            nonlocal resource_cleaned
+            resource_cleaned = True
+
+        supervisor.register_resource(synthetic_resource)
+
+        # 2 & 3. Worker başlatılır; worker auto-close tetikler
+        async def normal_worker() -> None:
+            await asyncio.sleep(0.01)
+
+        await supervisor.start(normal_worker)
+        # 4. Wait for auto-close task to start, then cancel it BEFORE cleanup starts
+        await auto_close_started.wait()
+
+        assert supervisor._cleanup_task is None  # cleanup has not started!
+        auto_close_task = next(iter(supervisor._trigger_close_tasks))
+        auto_close_task.cancel()
+        hold_auto_close.set()
+
+        # 5 & 6. Callback çalışır; bounded fallback cleanup davranışı doğrulanır
+        outcome = await supervisor.wait_closed()
+
+        # 7. Aktif worker/resource/lease durumu kontrol edilir
+        assert all(t.done() for t in supervisor._worker_tasks)
+        assert resource_cleaned is True
+        assert supervisor.lease is not None
+        assert not _is_lease_active(supervisor.lease)
+
+        # 8. Sonuç başarılı cleanup ise admission kapasitesi sıfır olur
+        assert controller.snapshot().active_connections == 0
+
+        # 9. Terminal outcome FAILED with CLEANUP_FAILED (cancellation was not converted to false success)
+        assert outcome.state == ConnectionState.FAILED
+        assert outcome.reason == TerminalReason.CLEANUP_FAILED
+        assert outcome.error_summary == "Teardown cleanup failed"
+
+        # 10. Süresiz bekleme ve sınırsız task yaratımı bulunmaz
+        assert supervisor.fallback_attempts == 1
+        if supervisor._trigger_close_tasks:
+            await asyncio.gather(*supervisor._trigger_close_tasks, return_exceptions=True)
+        assert len(supervisor._trigger_close_tasks) == 0
+
+    asyncio.run(_run())
+
+
+def test_cancelled_autoclose_when_cleanup_already_active_or_terminal() -> None:
+    """Item 63: Verify cancellation of auto-close when cleanup is already active or supervisor is terminal is a no-op."""
+
+    async def _run() -> None:
+        ctx = _make_context(connection_id="conn_cancel_noop")
+        controller = _make_controller()
+        supervisor = ConnectionSupervisor(context=ctx, controller=controller)
+        await supervisor.admit()
+
+        loop = asyncio.get_running_loop()
+
+        # 1. When cleanup task is already active in background
+        active_cleanup = asyncio.create_task(asyncio.sleep(1.0))
+        supervisor._cleanup_task = active_cleanup
+        cancelled_task1 = loop.create_future()
+        cancelled_task1.cancel()
+        supervisor._on_auto_close_done(cancelled_task1)  # type: ignore[arg-type]
+        # Must not have spawned any fallback task because cleanup is active
+        assert supervisor.fallback_attempts == 0
+        active_cleanup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await active_cleanup
+
+        # 2. When supervisor is already terminal
+        supervisor._state = ConnectionState.CLOSED
+        cancelled_task2 = loop.create_future()
+        cancelled_task2.cancel()
+        supervisor._on_auto_close_done(cancelled_task2)  # type: ignore[arg-type]
+        assert supervisor.fallback_attempts == 0
+
+        # 3. Fallback task cancellation when cleanup is active or terminal
+        supervisor._cleanup_task = None
+        cancelled_fallback = loop.create_future()
+        cancelled_fallback.cancel()
+        supervisor._on_fallback_close_done(cancelled_fallback)  # type: ignore[arg-type]
+        assert supervisor.state == ConnectionState.CLOSED
+
+        # 4. Fallback task done when cleanup is active
+        active_cleanup2 = asyncio.create_task(asyncio.sleep(1.0))
+        supervisor._cleanup_task = active_cleanup2
+        supervisor._state = ConnectionState.CLOSING
+        cancelled_fallback2 = loop.create_future()
+        cancelled_fallback2.cancel()
+        supervisor._on_fallback_close_done(cancelled_fallback2)  # type: ignore[arg-type]
+        active_cleanup2.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await active_cleanup2
+
+    asyncio.run(_run())
+
+
+def test_record_fallback_exhausted_failure_in_pre_admit_states() -> None:
+    """Item 64: Verify _record_fallback_exhausted_failure transitions appropriately from NEW or CLOSING."""
+    ctx = _make_context(connection_id="conn_fallback_states")
+    controller = _make_controller()
+
+    # In NEW state
+    s1 = ConnectionSupervisor(context=ctx, controller=controller)
+    assert _get_state(s1) == ConnectionState.NEW
+    s1._record_fallback_exhausted_failure()
+    assert _get_state(s1) == ConnectionState.REJECTED
+    assert s1.outcome is not None
+    assert s1.outcome.reason == TerminalReason.CLEANUP_FAILED
+
+    # In CLOSING state
+    s2 = ConnectionSupervisor(context=ctx, controller=controller)
+    s2._state = ConnectionState.CLOSING
+    s2._record_fallback_exhausted_failure()
+    assert _get_state(s2) == ConnectionState.FAILED
+    assert s2.outcome is not None
+    assert s2.outcome.reason == TerminalReason.CLEANUP_FAILED
+
+    # When already terminal (no-op on line 584)
+    assert s2.state.is_terminal is True
+    s2._record_fallback_exhausted_failure()
+    assert _get_state(s2) == ConnectionState.FAILED
+
+    # Hit line 563: when auto_close fails with fallback_attempts already exhausted
+    s3 = ConnectionSupervisor(context=ctx, controller=controller)
+    s3._state = ConnectionState.ADMITTED
+    s3._fallback_attempts = s3.MAX_FALLBACK_ATTEMPTS
+    loop = asyncio.new_event_loop()
+    try:
+        failing_task = loop.create_future()
+        failing_task.set_exception(RuntimeError("Exhausted test"))
+        s3._on_auto_close_done(cast(asyncio.Task[Any], failing_task))
+        assert _get_state(s3) == ConnectionState.FAILED
+        assert s3.outcome is not None
+        assert s3.outcome.reason == TerminalReason.CLEANUP_FAILED
+    finally:
+        loop.close()

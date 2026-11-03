@@ -206,6 +206,8 @@ class ConnectionSupervisor:
       not affect subsequent supervisors even if the same connection ID is re-admitted.
     """
 
+    MAX_FALLBACK_ATTEMPTS: Final[int] = 1
+
     __slots__ = (
         "_context",
         "_controller",
@@ -220,6 +222,7 @@ class ConnectionSupervisor:
         "_cleanup_task",
         "_trigger_close_tasks",
         "_closed_event",
+        "_fallback_attempts",
     )
 
     def __init__(
@@ -251,6 +254,7 @@ class ConnectionSupervisor:
         self._cleanup_task: asyncio.Task[None] | None = None
         self._trigger_close_tasks: set[asyncio.Task[Any]] = set()
         self._closed_event: asyncio.Event = asyncio.Event()
+        self._fallback_attempts: int = 0
 
     @property
     def connection_id(self) -> str:
@@ -296,6 +300,11 @@ class ConnectionSupervisor:
     def is_closed(self) -> bool:
         """Return True if connection has reached a terminal lifecycle state."""
         return self._state.is_terminal
+
+    @property
+    def fallback_attempts(self) -> int:
+        """Return the number of fallback close attempts executed by this supervisor."""
+        return self._fallback_attempts
 
     def _transition_to(self, target: ConnectionState) -> None:
         """Atomically transition state or raise InvalidConnectionTransitionError."""
@@ -501,34 +510,93 @@ class ConnectionSupervisor:
                 trigger_task = asyncio.create_task(
                     self.close(
                         reason=TerminalReason.WORKER_FAILED,
-                    )
+                    ),
+                    name="gw-autoclose",
                 )
                 self._trigger_close_tasks.add(trigger_task)
-                trigger_task.add_done_callback(self._on_trigger_close_done)
+                trigger_task.add_done_callback(self._on_auto_close_done)
             elif all(t.done() for t in self._worker_tasks if t is not asyncio.current_task()):
                 # All workers completed without error
                 if self._state == ConnectionState.ACTIVE:
-                    trigger_task = asyncio.create_task(self.close(reason=TerminalReason.NORMAL))
+                    trigger_task = asyncio.create_task(
+                        self.close(reason=TerminalReason.NORMAL),
+                        name="gw-autoclose",
+                    )
                     self._trigger_close_tasks.add(trigger_task)
-                    trigger_task.add_done_callback(self._on_trigger_close_done)
+                    trigger_task.add_done_callback(self._on_auto_close_done)
 
-    def _on_trigger_close_done(self, task: asyncio.Task[Any]) -> None:
-        """Handle completion of auto-close tasks, observing unhandled exceptions."""
+    def _on_auto_close_done(self, task: asyncio.Task[Any]) -> None:
+        """Handle completion of auto-close tasks, observing cancellations and failures."""
         self._trigger_close_tasks.discard(task)
-        if not task.cancelled():
+
+        is_failed = False
+        if task.cancelled():
+            is_failed = True
+        else:
             exc = task.exception()
             if exc is not None:
-                # The auto-close task failed with an unhandled exception.
-                # If a cleanup task is not already active, trigger fallback teardown so resources are not orphaned.
-                if not self._state.is_terminal:
-                    if self._cleanup_task is None or self._cleanup_task.done():
-                        fallback_task = asyncio.create_task(
-                            self.close(
-                                reason=TerminalReason.CLEANUP_FAILED,
-                            )
-                        )
-                        self._trigger_close_tasks.add(fallback_task)
-                        fallback_task.add_done_callback(self._on_trigger_close_done)
+                is_failed = True
+
+        if not is_failed:
+            return
+
+        # If supervisor is already in a terminal state, no further action is needed
+        if self._state.is_terminal:
+            return
+
+        # If an internal cleanup task is already active, let it supervise teardown
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            return
+
+        # Cleanup has not started and supervisor is not terminal: execute bounded fallback
+        if self._fallback_attempts < self.MAX_FALLBACK_ATTEMPTS:
+            self._fallback_attempts += 1
+            fallback_task = asyncio.create_task(
+                self.close(
+                    reason=TerminalReason.CLEANUP_FAILED,
+                ),
+                name="gw-fallback",
+            )
+            self._trigger_close_tasks.add(fallback_task)
+            fallback_task.add_done_callback(self._on_fallback_close_done)
+        else:
+            self._record_fallback_exhausted_failure()
+
+    _on_trigger_close_done = _on_auto_close_done
+
+    def _on_fallback_close_done(self, task: asyncio.Task[Any]) -> None:
+        """Handle completion of bounded fallback close task, ensuring termination."""
+        self._trigger_close_tasks.discard(task)
+
+        if not task.cancelled():
+            task.exception()
+
+        if self._state.is_terminal:
+            return
+
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            return
+
+        self._record_fallback_exhausted_failure()
+
+    def _record_fallback_exhausted_failure(self) -> None:
+        """Record terminal FAILED state when all fallback close attempts are exhausted."""
+        if not self._state.is_terminal:
+            if self._state in (ConnectionState.NEW, ConnectionState.AUTHENTICATING):
+                self._transition_to(ConnectionState.REJECTED)
+                self._outcome = ConnectionOutcome(
+                    state=ConnectionState.REJECTED,
+                    reason=TerminalReason.CLEANUP_FAILED,
+                )
+            else:
+                if self._state != ConnectionState.CLOSING:
+                    self._transition_to(ConnectionState.CLOSING)
+                self._transition_to(ConnectionState.FAILED)
+                self._outcome = ConnectionOutcome(
+                    state=ConnectionState.FAILED,
+                    reason=TerminalReason.CLEANUP_FAILED,
+                )
+            self._closed_event.set()
 
     def _on_cleanup_task_done(self, task: asyncio.Task[None]) -> None:
         """Handle completion of cleanup task, ensuring exceptions are observed."""
