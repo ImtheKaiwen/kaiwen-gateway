@@ -102,6 +102,7 @@ jobs:
               assert "kaiwen_gateway/__init__.py" in wheel_names
               assert "kaiwen_gateway/py.typed" in wheel_names
               assert "kaiwen_gateway/core/__init__.py" in wheel_names
+              assert "kaiwen_gateway/core/admission.py" in wheel_names
               assert "kaiwen_gateway/core/composition.py" in wheel_names
               assert "kaiwen_gateway/core/config.py" in wheel_names
               assert "kaiwen_gateway/core/contracts.py" in wheel_names
@@ -122,6 +123,7 @@ jobs:
               assert any(name.endswith("/src/kaiwen_gateway/py.typed") for name in sdist_names)
               assert any(name.endswith("/tests/test_package.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/__init__.py") for name in sdist_names)
+              assert any(name.endswith("/src/kaiwen_gateway/core/admission.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/composition.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/config.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/core/contracts.py") for name in sdist_names)
@@ -131,6 +133,7 @@ jobs:
               assert any(name.endswith("/tests/test_core_registry.py") for name in sdist_names)
               assert any(name.endswith("/tests/test_core_composition.py") for name in sdist_names)
               assert any(name.endswith("/tests/test_core_identity.py") for name in sdist_names)
+              assert any(name.endswith("/tests/test_core_admission.py") for name in sdist_names)
           PY
 
       - name: Install wheel into isolated virtualenv and verify side-effect-free import outside repo
@@ -181,16 +184,26 @@ jobs:
           assert threads_before == threads_after == 1
           assert new_modules == ["kaiwen_gateway"]
 
+          import asyncio
           from kaiwen_gateway.core import (
               CORE_CONTRACT_VERSION,
+              AdmissionCapacityExceededError,
+              AdmissionController,
+              AdmissionError,
+              AdmissionLease,
+              AdmissionSnapshot,
               CoreConfig,
               CoreConfigurationError,
+              DuplicateConnectionAdmissionError,
+              GlobalCapacityExceededError,
               IdentityAuthorizationError,
               InvalidIdentityError,
+              InvalidLeaseError,
               ModuleDescriptor,
               ModuleRegistry,
               ProviderPrincipal,
               TenantCallBinding,
+              TenantCapacityExceededError,
               UntrustedConnectionClaims,
               VerifiedConnectionContext,
               bind_verified_connection_context,
@@ -275,7 +288,94 @@ jobs:
           else:
               raise AssertionError("Expected InvalidIdentityError when passing UntrustedConnectionClaims as principal")
 
+          # M2.3 Admission Controller Smoke Verification
+          async def _run_admission_smoke() -> None:
+              controller = AdmissionController(max_concurrent_connections=2, max_connections_per_tenant=1)
+              ctx_a1 = bind_verified_connection_context(
+                  principal=principal,
+                  binding=binding,
+                  connection_id="conn_smoke_a1",
+              )
+              # 2. Acquire first lease
+              lease_a1 = await controller.acquire(ctx_a1)
+              assert isinstance(lease_a1, AdmissionLease)
+              assert lease_a1.is_active is True
+
+              # 4. Tenant capacity limit rejection
+              ctx_a2 = bind_verified_connection_context(
+                  principal=principal,
+                  binding=binding,
+                  connection_id="conn_smoke_a2",
+              )
+              try:
+                  await controller.acquire(ctx_a2)
+              except TenantCapacityExceededError:
+                  pass
+              else:
+                  raise AssertionError("Expected TenantCapacityExceededError")
+
+              # 5. Duplicate connection rejection
+              try:
+                  await controller.acquire(ctx_a1)
+              except DuplicateConnectionAdmissionError:
+                  pass
+              else:
+                  raise AssertionError("Expected DuplicateConnectionAdmissionError")
+
+              # Tenant B context
+              binding_b = TenantCallBinding(
+                  authorized_provider_id="synthetic_provider",
+                  tenant_id="tenant_bravo",
+                  call_id="call_bravo_01",
+                  allowed_scopes=["voice.stream"],
+              )
+              ctx_b1 = bind_verified_connection_context(
+                  principal=principal,
+                  binding=binding_b,
+                  connection_id="conn_smoke_b1",
+              )
+              lease_b1 = await controller.acquire(ctx_b1)
+              assert lease_b1.is_active is True
+
+              # 3. Global capacity limit rejection (2/2 active)
+              ctx_c1 = bind_verified_connection_context(
+                  principal=principal,
+                  binding=TenantCallBinding(
+                      authorized_provider_id="synthetic_provider",
+                      tenant_id="tenant_charlie",
+                      call_id="call_charlie_01",
+                      allowed_scopes=["voice.stream"],
+                  ),
+                  connection_id="conn_smoke_c1",
+              )
+              try:
+                  await controller.acquire(ctx_c1)
+              except GlobalCapacityExceededError:
+                  pass
+              else:
+                  raise AssertionError("Expected GlobalCapacityExceededError")
+
+              # 6. Successful lease release
+              assert await lease_a1.release() is True
+              assert lease_a1.is_active is False
+              assert controller.active_connections_for_tenant("tenant_alpha") == 0
+
+              # 7. Double release idempotence (counter unchanged)
+              assert await lease_a1.release() is False
+
+              # Release remaining
+              assert await lease_b1.release() is True
+
+              # 8. Final snapshot active_connections == 0
+              snap = controller.snapshot()
+              assert isinstance(snap, AdmissionSnapshot)
+              assert snap.active_connections == 0
+              assert snap.active_tenants == 0
+              assert snap.available_capacity == 2
+
+          asyncio.run(_run_admission_smoke())
+
           assert cwd_before == set(os.listdir("."))
           assert threads_before == threading.active_count() == 1
-          print("Clean wheel smoke test passed (M1 + M2.1 + M2.2A + M2.2B).")
+          print("Clean wheel smoke test passed (M1 + M2.1 + M2.2A + M2.2B + M2.3).")
           PY

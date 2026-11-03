@@ -109,17 +109,86 @@ class IdentityAuthorizationError(IdentityError, PermissionError):
         super().__init__(f"Identity authorization failed: {reason}")
 
 
+class AdmissionError(CoreError):
+    """Base exception for all admission control, lease, and capacity errors."""
+
+
+class AdmissionCapacityExceededError(AdmissionError):
+    """Raised when an inbound connection cannot be admitted because capacity is exhausted."""
+
+    def __init__(self, message: str, *, limit: int, current: int) -> None:
+        self.limit: int = limit
+        self.current: int = current
+        super().__init__(message)
+
+
+class GlobalCapacityExceededError(AdmissionCapacityExceededError):
+    """Raised when the process-local global concurrent connection limit is reached."""
+
+    def __init__(self, *, limit: int, current: int) -> None:
+        super().__init__(
+            f"Global connection capacity exhausted: {current}/{limit} active",
+            limit=limit,
+            current=current,
+        )
+
+
+class TenantCapacityExceededError(AdmissionCapacityExceededError):
+    """Raised when a specific tenant's concurrent connection limit is reached.
+
+    Note: The error message does not include the raw tenant_id to avoid leaking
+    identifiers into unredacted application logs. The identifier remains accessible
+    programmatically via the ``tenant_id`` attribute.
+    """
+
+    def __init__(self, *, tenant_id: str, limit: int, current: int) -> None:
+        self.tenant_id: str = tenant_id
+        super().__init__(
+            f"Tenant connection capacity exhausted: {current}/{limit} active",
+            limit=limit,
+            current=current,
+        )
+
+
+class DuplicateConnectionAdmissionError(AdmissionError):
+    """Raised when an admission attempt is made for a connection_id that already holds an active lease.
+
+    Note: The error message does not include the raw connection_id to avoid leaking
+    identifiers into unredacted application logs. The identifier remains accessible
+    programmatically via the ``connection_id`` attribute.
+    """
+
+    def __init__(self, connection_id: str) -> None:
+        self.connection_id: str = connection_id
+        super().__init__(
+            "Inbound connection already holds an active capacity lease in this AdmissionController"
+        )
+
+
+class InvalidLeaseError(AdmissionError, ValueError):
+    """Raised when a lease operation is invalid, malformed, or targets a foreign controller."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 __all__ = [
+    "AdmissionCapacityExceededError",
+    "AdmissionError",
     "CoreConfigurationError",
     "CoreError",
+    "DuplicateConnectionAdmissionError",
     "DuplicateModuleError",
+    "GlobalCapacityExceededError",
     "IdentityAuthorizationError",
     "IdentityError",
     "InvalidIdentityError",
+    "InvalidLeaseError",
     "InvalidModuleDescriptorError",
     "InvalidModuleIdError",
     "InvalidScopeError",
     "ModuleNotRegisteredError",
     "ModuleRegistrationError",
+    "TenantCapacityExceededError",
     "UnsupportedContractVersionError",
 ]
