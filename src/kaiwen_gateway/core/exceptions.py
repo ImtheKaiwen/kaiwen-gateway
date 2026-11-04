@@ -195,18 +195,52 @@ class LifecycleTimeoutError(ConnectionLifecycleError, TimeoutError):
     """Raised when a lifecycle operation or cleanup deadline expires."""
 
 
+class DrainError(CoreError):
+    """Base exception for Gateway instance draining and shutdown coordination errors."""
+
+
+class InstanceDrainingError(DrainError):
+    """Raised when managed admission or operations are attempted on a draining or stopped instance."""
+
+    def __init__(
+        self, message: str = "Instance is draining or stopped; new connections rejected"
+    ) -> None:
+        super().__init__(message)
+
+
+class InvalidDrainTransitionError(DrainError):
+    """Raised when an invalid instance drain state machine transition is attempted."""
+
+    def __init__(
+        self,
+        current_state: str,
+        target_state: str,
+        message: str | None = None,
+    ) -> None:
+        self.current_state: str = current_state
+        self.target_state: str = target_state
+        msg = (
+            message
+            or f"Cannot transition instance drain state from {current_state} to {target_state}"
+        )
+        super().__init__(msg)
+
+
 __all__ = [
     "AdmissionCapacityExceededError",
     "AdmissionError",
     "ConnectionLifecycleError",
     "CoreConfigurationError",
     "CoreError",
+    "DrainError",
     "DuplicateConnectionAdmissionError",
     "DuplicateModuleError",
     "GlobalCapacityExceededError",
     "IdentityAuthorizationError",
     "IdentityError",
+    "InstanceDrainingError",
     "InvalidConnectionTransitionError",
+    "InvalidDrainTransitionError",
     "InvalidIdentityError",
     "InvalidLeaseError",
     "InvalidModuleDescriptorError",

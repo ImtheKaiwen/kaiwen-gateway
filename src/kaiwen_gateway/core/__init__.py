@@ -1,4 +1,4 @@
-"""Framework-independent Kaiwen Gateway Core contracts, configuration, composition, identity, admission, and lifecycle.
+"""Framework-independent Kaiwen Gateway Core contracts, configuration, composition, identity, admission, lifecycle, and draining.
 
 Importing :mod:`kaiwen_gateway.core` has no runtime side effects and depends only
 on the Python standard library.
@@ -40,18 +40,27 @@ from kaiwen_gateway.core.contracts import (
     validate_module_descriptor,
     validate_module_id,
 )
+from kaiwen_gateway.core.draining import (
+    DrainPolicy,
+    DrainReport,
+    InstanceDrainCoordinator,
+    InstanceDrainState,
+)
 from kaiwen_gateway.core.exceptions import (
     AdmissionCapacityExceededError,
     AdmissionError,
     ConnectionLifecycleError,
     CoreConfigurationError,
     CoreError,
+    DrainError,
     DuplicateConnectionAdmissionError,
     DuplicateModuleError,
     GlobalCapacityExceededError,
     IdentityAuthorizationError,
     IdentityError,
+    InstanceDrainingError,
     InvalidConnectionTransitionError,
+    InvalidDrainTransitionError,
     InvalidIdentityError,
     InvalidLeaseError,
     InvalidModuleDescriptorError,
@@ -121,6 +130,9 @@ __all__ = [
     "DEFAULT_INSTANCE_NAME",
     "DEFAULT_MAX_CONCURRENT_CONNECTIONS",
     "DEFAULT_MAX_CONNECTIONS_PER_TENANT",
+    "DrainError",
+    "DrainPolicy",
+    "DrainReport",
     "DuplicateConnectionAdmissionError",
     "DuplicateModuleError",
     "GatewayCore",
@@ -131,7 +143,11 @@ __all__ = [
     "INSTANCE_NAME_PATTERN",
     "IdentityAuthorizationError",
     "IdentityError",
+    "InstanceDrainCoordinator",
+    "InstanceDrainState",
+    "InstanceDrainingError",
     "InvalidConnectionTransitionError",
+    "InvalidDrainTransitionError",
     "InvalidIdentityError",
     "InvalidLeaseError",
     "InvalidModuleDescriptorError",

@@ -109,6 +109,7 @@ jobs:
               assert "kaiwen_gateway/core/exceptions.py" in wheel_names
               assert "kaiwen_gateway/core/identity.py" in wheel_names
               assert "kaiwen_gateway/core/lifecycle.py" in wheel_names
+              assert "kaiwen_gateway/core/draining.py" in wheel_names
               assert "kaiwen_gateway/core/registry.py" in wheel_names
               assert not any(name.startswith("tests/") for name in wheel_names), "tests/ leaked into wheel"
               meta_files = [name for name in wheel_names if name.endswith(".dist-info/METADATA")]
@@ -137,6 +138,8 @@ jobs:
               assert any(name.endswith("/tests/test_core_identity.py") for name in sdist_names)
               assert any(name.endswith("/tests/test_core_admission.py") for name in sdist_names)
               assert any(name.endswith("/tests/test_core_lifecycle.py") for name in sdist_names)
+              assert any(name.endswith("/src/kaiwen_gateway/core/draining.py") for name in sdist_names)
+              assert any(name.endswith("/tests/test_core_draining.py") for name in sdist_names)
           PY
 
       - name: Install wheel into isolated virtualenv and verify side-effect-free import outside repo
@@ -200,6 +203,13 @@ jobs:
               ConnectionState,
               ConnectionSupervisor,
               CoreConfig,
+              DrainError,
+              DrainPolicy,
+              DrainReport,
+              InstanceDrainCoordinator,
+              InstanceDrainState,
+              InstanceDrainingError,
+              InvalidDrainTransitionError,
               CoreConfigurationError,
               DuplicateConnectionAdmissionError,
               GlobalCapacityExceededError,
@@ -439,7 +449,63 @@ jobs:
 
           asyncio.run(_run_lifecycle_smoke())
 
+          # M2.4B Instance Draining Smoke Verification
+          async def _run_draining_smoke() -> None:
+              drain_ctrl = AdmissionController(max_concurrent_connections=2, max_connections_per_tenant=2)
+              coord = InstanceDrainCoordinator(
+                  controller=drain_ctrl,
+                  policy=DrainPolicy(grace_period=0.1, force_close_timeout=0.1),
+              )
+              assert coord.state == InstanceDrainState.ACCEPTING
+              assert coord.is_accepting is True
+
+              ctx_drain = bind_verified_connection_context(
+                  principal=principal,
+                  binding=binding,
+                  connection_id="conn_smoke_drain_01",
+              )
+              sup_drain = await coord.admit_connection(ctx_drain)
+              assert sup_drain.state == ConnectionState.ADMITTED
+              assert coord.active_connections_count == 1
+              assert drain_ctrl.snapshot().active_connections == 1
+
+              drain_worker_done = False
+
+              async def drain_worker() -> None:
+                  nonlocal drain_worker_done
+                  drain_worker_done = True
+                  await asyncio.sleep(0.01)
+
+              await sup_drain.start(drain_worker)
+
+              report = await coord.drain()
+              assert isinstance(report, DrainReport)
+              assert report.final_state == InstanceDrainState.STOPPED
+              assert report.initial_connections == 1
+              assert report.graceful_completions == 1
+              assert report.force_closed == 0
+              assert report.unresolved_connections == 0
+              assert report.active_leases_remaining == 0
+              assert drain_ctrl.snapshot().active_connections == 0
+              assert drain_worker_done is True
+
+              # Rejection of new admission in STOPPED state
+              try:
+                  await coord.admit_connection(
+                      bind_verified_connection_context(
+                          principal=principal,
+                          binding=binding,
+                          connection_id="conn_smoke_drain_02",
+                      )
+                  )
+              except InstanceDrainingError:
+                  pass
+              else:
+                  raise AssertionError("Expected InstanceDrainingError in STOPPED state")
+
+          asyncio.run(_run_draining_smoke())
+
           assert cwd_before == set(os.listdir("."))
           assert threads_before == threading.active_count() == 1
-          print("Clean wheel smoke test passed (M1 + M2.1 + M2.2A + M2.2B + M2.3 + M2.4A).")
+          print("Clean wheel smoke test passed (M1 + M2.1 + M2.2A + M2.2B + M2.3 + M2.4A + M2.4B).")
           PY
