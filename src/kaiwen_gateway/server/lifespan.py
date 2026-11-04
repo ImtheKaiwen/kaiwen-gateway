@@ -33,14 +33,16 @@ async def gateway_lifespan(app: Any) -> AsyncIterator[None]:
     if coordinator is None or not isinstance(coordinator, InstanceDrainCoordinator):
         raise ServerLifecycleError("Application state missing valid InstanceDrainCoordinator")
 
-    # Prevent restarting an already-terminated instance
+    # Prevent restarting an already-terminated, draining, or terminating instance
+    initial_state = coordinator.state
     if (
-        coordinator.is_stopped
+        initial_state != InstanceDrainState.ACCEPTING
+        or coordinator.is_stopped
         or getattr(state, "stopped", False)
         or getattr(state, "shutting_down", False)
     ):
         raise ServerLifecycleError(
-            "Cannot start lifespan on a stopped or terminating Gateway instance"
+            "Cannot start lifespan on a stopped, draining, or terminating Gateway instance"
         )
 
     state.started = True
@@ -53,13 +55,18 @@ async def gateway_lifespan(app: Any) -> AsyncIterator[None]:
     finally:
         # Shutdown phase initiated
         state.shutting_down = True
-        shutdown_success = False
         try:
             if coordinator.state == InstanceDrainState.ACCEPTING:
                 await coordinator.drain()
             elif not coordinator.is_stopped:
                 await coordinator.wait_stopped()
-            shutdown_success = True
+
+            if coordinator.drain_error is not None:
+                raise ServerLifecycleError(
+                    "Gateway shutdown failed due to drain error"
+                ) from coordinator.drain_error
+
+            state.stopped = True
         except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
             state.shutdown_failed = True
             raise
@@ -67,6 +74,3 @@ async def gateway_lifespan(app: Any) -> AsyncIterator[None]:
             state.shutdown_failed = True
             cause = coordinator.drain_error if coordinator.drain_error is not None else exc
             raise ServerLifecycleError("Gateway shutdown failed due to drain error") from cause
-        finally:
-            if shutdown_success:
-                state.stopped = True

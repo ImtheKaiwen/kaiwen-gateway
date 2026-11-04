@@ -292,7 +292,7 @@ def test_09_repeated_shutdown() -> None:
     async def _attempt_restart() -> None:
         with pytest.raises(
             ServerLifecycleError,
-            match="Cannot start lifespan on a stopped or terminating Gateway instance",
+            match="Cannot start lifespan on a stopped, draining, or terminating Gateway instance",
         ):
             async with gateway_lifespan(app):
                 pass
@@ -520,30 +520,20 @@ def test_20_local_asgi_host_smoke() -> None:
 
 
 def test_21_lifespan_shutdown_when_already_draining() -> None:
-    """Verify lifespan shutdown correctly awaits wait_stopped when coordinator is already draining."""
-    from kaiwen_gateway.core.draining import DrainReport
-
+    """Verify lifespan shutdown correctly awaits wait_stopped when coordinator transitions to draining."""
     app = create_gateway_app()
     coord: InstanceDrainCoordinator = app.state.drain_coordinator
-    coord._state = InstanceDrainState.DRAINING
-    coord._report = DrainReport(
-        initial_connections=0,
-        graceful_completions=0,
-        force_closed=0,
-        failed_outcomes=0,
-        unresolved_connections=0,
-        active_leases_remaining=0,
-        deadline_exceeded=False,
-        final_state=InstanceDrainState.STOPPED,
-        duration_seconds=0.0,
-    )
-    coord._stopped_event.set()
 
     async def _run() -> None:
         async with gateway_lifespan(app):
-            pass
+            # Initiate background drain while lifespan is active
+            asyncio.create_task(coord.drain())
+            await asyncio.sleep(0.01)
+            assert coord.state in (InstanceDrainState.DRAINING, InstanceDrainState.STOPPED)
 
     asyncio.run(_run())
+    assert _is_stopped(app)
+    assert coord.state == InstanceDrainState.STOPPED
 
 
 def test_22_main_entrypoint() -> None:
@@ -600,14 +590,13 @@ def test_24_shutdown_cancellation_during_wait_stopped() -> None:
     async def _run() -> None:
         app = create_gateway_app()
         coord: InstanceDrainCoordinator = app.state.drain_coordinator
-        coord._state = InstanceDrainState.DRAINING
 
         async def mock_wait_stopped(*args: Any, **kwargs: Any) -> None:
             await asyncio.sleep(10.0)
 
         async def run_lifespan() -> None:
             async with gateway_lifespan(app):
-                pass
+                coord._state = InstanceDrainState.DRAINING
 
         with patch.object(InstanceDrainCoordinator, "wait_stopped", side_effect=mock_wait_stopped):
             task = asyncio.create_task(run_lifespan())
@@ -748,7 +737,7 @@ def test_27_real_loopback_uvicorn_server_smoke() -> None:
 
 
 def test_28_real_loopback_websocket_handshake_refusal() -> None:
-    """Verify that a real Uvicorn server refuses WebSocket upgrade requests with HTTP 403 Forbidden."""
+    """Verify that a real Uvicorn server refuses HTTP upgrade-like requests with HTTP 403 Forbidden."""
 
     async def _run() -> None:
         port = _get_free_port()
@@ -796,42 +785,115 @@ def test_28_real_loopback_websocket_handshake_refusal() -> None:
 
 def test_29_external_coordinator_capacity_consistency() -> None:
     """Verify consistent controller binding and readiness capacity accounting with external coordinator."""
-    cfg = CoreConfig(max_concurrent_connections=1, max_connections_per_tenant=1)
-    ctrl = AdmissionController(cfg)
-    coord = InstanceDrainCoordinator(controller=ctrl)
-    app = create_gateway_app(config=cfg, drain_coordinator=coord)
 
-    # Controller ownership is strictly consistent
-    assert app.state.admission_controller is coord.controller
-    assert app.state.drain_coordinator is coord
+    async def _run() -> None:
+        cfg = CoreConfig(max_concurrent_connections=1, max_connections_per_tenant=1)
+        ctrl = AdmissionController(cfg)
+        coord = InstanceDrainCoordinator(controller=ctrl)
+        app = create_gateway_app(config=cfg, drain_coordinator=coord)
 
-    principal = ProviderPrincipal("synthetic_provider")
-    binding = TenantCallBinding(
-        authorized_provider_id="synthetic_provider",
-        tenant_id="tenant_alpha",
-        call_id="call_01",
-        allowed_scopes=["voice.stream"],
-    )
-    ctx = bind_verified_connection_context(
-        principal=principal,
-        binding=binding,
-        connection_id="conn_ext_01",
-    )
+        # Controller ownership is strictly consistent
+        assert app.state.admission_controller is coord.controller
+        assert app.state.drain_coordinator is coord
 
-    with TestClient(app) as client:
-        # Before acquiring lease: capacity is available, but ingress_mode is disabled -> 503 ingress_disabled
-        resp1 = client.get("/ready")
-        assert resp1.status_code == 503
-        assert resp1.json()["reason"] == "ingress_disabled"
+        principal = ProviderPrincipal("synthetic_provider")
+        binding = TenantCallBinding(
+            authorized_provider_id="synthetic_provider",
+            tenant_id="tenant_alpha",
+            call_id="call_01",
+            allowed_scopes=["voice.stream"],
+        )
+        ctx = bind_verified_connection_context(
+            principal=principal,
+            binding=binding,
+            connection_id="conn_ext_01",
+        )
 
-        # Acquire the sole capacity lease on the coordinator
-        async def _admit() -> None:
-            await coord.admit_connection(ctx)
+        async with gateway_lifespan(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                # Before acquiring lease: capacity is available, but ingress_mode is disabled -> 503 ingress_disabled
+                resp1 = await client.get("/ready")
+                assert resp1.status_code == 503
+                assert resp1.json()["reason"] == "ingress_disabled"
 
-        asyncio.run(_admit())
-        assert ctrl.snapshot().available_capacity == 0
+                # Acquire the sole capacity lease on the coordinator within the same event loop
+                supervisor = await coord.admit_connection(ctx)
+                assert ctrl.snapshot().available_capacity == 0
 
-        # Now capacity is exceeded
-        resp2 = client.get("/ready")
-        assert resp2.status_code == 503
-        assert resp2.json()["reason"] == "capacity_exceeded"
+                # Now capacity is exceeded -> 503 capacity_exceeded
+                resp2 = await client.get("/ready")
+                assert resp2.status_code == 503
+                assert resp2.json()["reason"] == "capacity_exceeded"
+
+                # Cleanly close connection to release lease
+                await supervisor.close()
+                assert ctrl.snapshot().active_connections == 0
+
+        assert _is_stopped(app)
+        assert coord.state == InstanceDrainState.STOPPED
+        assert ctrl.snapshot().active_connections == 0
+
+    asyncio.run(_run())
+
+
+def test_30_startup_with_already_draining_coordinator_fails() -> None:
+    """Verify that starting lifespan with an already DRAINING coordinator fails closed."""
+    app = create_gateway_app()
+    app.state.drain_coordinator._state = InstanceDrainState.DRAINING
+
+    async def _run() -> None:
+        with pytest.raises(
+            ServerLifecycleError,
+            match="Cannot start lifespan on a stopped, draining, or terminating Gateway instance",
+        ):
+            async with gateway_lifespan(app):
+                pass
+
+    asyncio.run(_run())
+
+
+def test_31_previously_failed_drain_triggers_lifecycle_error_on_shutdown() -> None:
+    """Verify that a drain failure occurring before lifespan shutdown triggers ServerLifecycleError on exit."""
+
+    async def _run() -> None:
+        app = create_gateway_app()
+        coord: InstanceDrainCoordinator = app.state.drain_coordinator
+
+        principal = ProviderPrincipal("synthetic_provider")
+        binding = TenantCallBinding(
+            authorized_provider_id="synthetic_provider",
+            tenant_id="tenant_gamma",
+            call_id="call_gamma_01",
+            allowed_scopes=["voice.stream"],
+        )
+        ctx = bind_verified_connection_context(
+            principal=principal,
+            binding=binding,
+            connection_id="conn_gamma_01",
+        )
+
+        simulated_drain_err = RuntimeError("Pre-shutdown drain failure")
+
+        with pytest.raises(
+            ServerLifecycleError, match="Gateway shutdown failed due to drain error"
+        ) as exc_info:
+            async with gateway_lifespan(app):
+                supervisor = await coord.admit_connection(ctx)
+                assert supervisor is not None
+                assert coord.active_connections_count == 1
+
+                # Simulate coordinator drain failing prior to lifespan exit
+                coord._state = InstanceDrainState.STOPPED
+                coord._stopped_event.set()
+                coord._drain_error = simulated_drain_err
+
+        assert exc_info.value.__cause__ is simulated_drain_err
+        assert not _is_stopped(app)
+        assert _has_shutdown_failed(app)
+        assert _is_shutting_down(app)
+        # Connection inventory is preserved
+        assert coord.active_connections_count == 1
+
+    asyncio.run(_run())

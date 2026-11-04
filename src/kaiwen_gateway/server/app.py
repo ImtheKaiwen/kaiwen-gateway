@@ -36,7 +36,20 @@ except ImportError:  # pragma: no cover
 
 
 class UpgradeRejectionMiddleware:
-    """ASGI middleware ensuring unaccepted WebSocket upgrade attempts are refused with HTTP 403."""
+    """HTTP pre-upgrade safety middleware refusing WebSocket upgrade attempts with HTTP 403.
+
+    Note on ASGI Handshake vs HTTP Scope:
+        In ASGI specifications, an HTTP request carrying `Upgrade: websocket` headers
+        remains an `http` scope unless an installed protocol engine (such as `wsproto`
+        or `websockets`) translates it to a `websocket` scope. This middleware ensures
+        that any HTTP upgrade-like request is rejected early with HTTP 403 Forbidden,
+        preventing fallback to standard 404 routing. Actual WebSocket connections
+        (`websocket` scope) are handled separately by :func:`reject_websocket_endpoint`
+        via `WebSocketRoute`.
+
+        Configuring a concrete WebSocket protocol backend (`websockets` or `wsproto`)
+        is a prerequisite for the M3.2 authenticated transport milestone.
+    """
 
     def __init__(self, app: Any) -> None:
         self.app = app
@@ -116,12 +129,13 @@ async def reject_websocket_endpoint(websocket: WebSocket) -> None:
 
     In the ASGI / Starlette protocol contract, closing an unaccepted WebSocket
     connection (sending `websocket.close` without a preceding `websocket.accept`)
-    signals the ASGI server (such as Uvicorn) to refuse the HTTP upgrade handshake
-    with an HTTP 403 Forbidden response. In-process test clients observe the internal
-    ASGI close code 1008.
+    signals the ASGI server (such as Uvicorn) to refuse the WebSocket handshake.
+    In-process test clients observe the internal ASGI close code 1008.
 
     No WebSocket frame is exchanged, no connection is accepted, and no upstream
-    AI session or voice pipeline resource is allocated.
+    AI session or voice pipeline resource is allocated. Real network wire testing
+    with an ASGI server requires a WebSocket protocol engine (wsproto or websockets),
+    which is an M3.2 milestone prerequisite.
     """
     await websocket.close(code=1008, reason="WebSocket ingress not enabled")
 
