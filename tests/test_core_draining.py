@@ -1419,32 +1419,68 @@ def test_drain_fatal_interpreter_exit_semantics(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_drain_task_cancellation_done_callback() -> None:
-    """Verify _on_drain_task_done safely handles cancelled internal drain task."""
+    """Verify internal drain task cancellation transitions to STOPPED, unblocks wait_stopped, and retains leases."""
 
     async def _run() -> None:
         ctrl = _make_controller()
         coord = InstanceDrainCoordinator(controller=ctrl)
 
-        sup = await coord.admit_connection(_make_context(connection_id="conn_cancel_drain_task"))
+        ctx = _make_context(connection_id="conn_cancel_drain_task")
+        sup = await coord.admit_connection(ctx)
+
+        worker_started = asyncio.Event()
 
         async def worker() -> None:
+            worker_started.set()
             await asyncio.sleep(10.0)
 
         await sup.start(worker)
 
-        # Start drain task and explicitly cancel the underlying internal task
+        # 3. Start drain in a separate task
         drain_coro_task = asyncio.create_task(coord.drain())
+
+        # 4. Confirm internal drain task is active and running
+        await worker_started.wait()
         await asyncio.sleep(0.01)
         assert coord._drain_task is not None
+        assert coord.is_draining is True
+
+        # 5. Cancel the internal drain task directly
         coord._drain_task.cancel()
 
+        # 6. Observe caller cancellation
         with pytest.raises(asyncio.CancelledError):
             await drain_coro_task
 
         assert coord._drain_task.cancelled() is True
-        # Explicitly verify done callback did not crash on cancelled task
+        # Explicitly verify done callback handled cancelled task safely
         coord._on_drain_task_done(coord._drain_task)
 
+        # 7. Verify coordinator reaches STOPPED state and records CancelledError
+        assert coord.state == InstanceDrainState.STOPPED
+        assert coord.is_stopped is True
+        assert coord.drain_error is not None
+        assert isinstance(coord.drain_error, asyncio.CancelledError)
+
+        # 8-9. Verify wait_stopped does not hang and produces DrainError chained to CancelledError
+        async with asyncio.timeout(1.0):
+            with pytest.raises(
+                DrainError, match="Instance drain failed due to internal error"
+            ) as exc_info:
+                await coord.wait_stopped()
+        assert isinstance(exc_info.value.__cause__, asyncio.CancelledError)
+
+        # Verify new admissions are fail-closed rejected
+        with pytest.raises(InstanceDrainingError, match="instance is in STOPPED state"):
+            await coord.admit_connection(_make_context(connection_id="conn_after_cancel"))
+
+        # 10. Verify supervisor and active capacity lease are retained in inventory (not orphaned)
+        assert "conn_cancel_drain_task" in coord._supervisors
+        assert sup.lease is not None and sup.lease.is_active is True
+        assert ctrl.snapshot().active_connections == 1
+
+        # 11. Controlled test cleanup
         await sup.close()
+        assert ctrl.snapshot().active_connections == 0
 
     asyncio.run(_run())
