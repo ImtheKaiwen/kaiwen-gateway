@@ -1265,3 +1265,186 @@ def test_failed_supervisor_with_released_lease_is_unresolved_not_graceful() -> N
         )
 
     asyncio.run(_run())
+
+
+def test_cancelled_drain_caller_with_internal_failure_no_unretrieved_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify cancelled drain caller followed by internal drain failure is observed without runtime warnings."""
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        unhandled_exceptions: list[dict[str, Any]] = []
+
+        def _custom_handler(
+            current_loop: asyncio.AbstractEventLoop, context: dict[str, Any]
+        ) -> None:
+            unhandled_exceptions.append(context)
+
+        loop.set_exception_handler(_custom_handler)
+
+        ctrl = _make_controller()
+        coord = InstanceDrainCoordinator(controller=ctrl)
+
+        drain_started = asyncio.Event()
+        caller_cancelled = asyncio.Event()
+
+        sup = await coord.admit_connection(_make_context(connection_id="conn_unobserved"))
+
+        async def worker() -> None:
+            drain_started.set()
+            await caller_cancelled.wait()
+
+        await sup.start(worker)
+
+        def _failing_drain_report(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("Injected internal drain failure after caller cancel")
+
+        monkeypatch.setattr("kaiwen_gateway.core.draining.DrainReport", _failing_drain_report)
+
+        # 3. Drain caller in a separate task
+        caller_task = asyncio.create_task(coord.drain())
+
+        # 4. Wait until internal drain starts
+        await drain_started.wait()
+
+        # 5. Cancel external caller task
+        caller_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller_task
+        caller_cancelled.set()
+
+        # Wait for internal drain task to finish executing without direct await on result
+        assert coord._drain_task is not None
+        drain_task = coord._drain_task
+        while not drain_task.done():
+            await asyncio.sleep(0.01)
+
+        # 8. Coordinator reaches STOPPED state
+        assert coord.state == InstanceDrainState.STOPPED
+        assert coord.is_stopped is True
+
+        # 10. Error is visible on coordinator
+        assert coord.drain_error is not None
+        assert isinstance(coord.drain_error, RuntimeError)
+        assert str(coord.drain_error) == "Injected internal drain failure after caller cancel"
+
+        # 9. wait_stopped() produces DrainError
+        with pytest.raises(
+            DrainError, match="Instance drain failed due to internal error"
+        ) as exc_info:
+            await coord.wait_stopped()
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+        # 11-13. Verify zero unhandled/unretrieved task exception warnings after garbage collection
+        del caller_task
+        del drain_task
+        import gc
+
+        gc.collect()
+
+        assert len(unhandled_exceptions) == 0
+
+        # Reset exception handler
+        loop.set_exception_handler(None)
+        await sup.close()
+
+    asyncio.run(_run())
+
+
+def test_drain_with_non_cooperative_observer_task_bounded_by_force_close_timeout() -> None:
+    """Verify non-cooperative observer task is bounded by force_close_timeout and sets deadline_exceeded."""
+
+    async def _run() -> None:
+        ctrl = _make_controller()
+        policy = DrainPolicy(grace_period=0.01, force_close_timeout=0.05)
+        coord = InstanceDrainCoordinator(controller=ctrl, policy=policy)
+
+        sup = await coord.admit_connection(_make_context(connection_id="conn_stubborn_observer"))
+
+        stop_stubborn = asyncio.Event()
+
+        # Create a stubborn observer task that ignores cancellation
+        async def _stubborn_tracker() -> None:
+            while not stop_stubborn.is_set():
+                try:
+                    await asyncio.sleep(0.01)
+                except asyncio.CancelledError:
+                    # Non-cooperative observer refuses to exit immediately
+                    await asyncio.sleep(2.0)
+                    break
+
+        stubborn_task = asyncio.create_task(_stubborn_tracker(), name="gw-drain-track-stubborn")
+        coord._tracker_tasks.add(stubborn_task)
+        stubborn_task.add_done_callback(coord._on_tracker_done)
+
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        report = await coord.drain()
+        elapsed = loop.time() - start
+
+        # Must be bounded by force_close_timeout (~0.05s) rather than sleeping 2.0s
+        assert elapsed < 0.5
+        assert report.deadline_exceeded is True
+        assert report.final_state == InstanceDrainState.STOPPED
+        assert coord.is_stopped is True
+
+        # Cleanup stubborn task
+        stop_stubborn.set()
+        await sup.close()
+        await stubborn_task
+
+    asyncio.run(_run())
+
+
+def test_drain_fatal_interpreter_exit_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify fatal SystemExit in _execute_drain is re-raised directly without normal drain_error."""
+    ctrl = _make_controller()
+    coord = InstanceDrainCoordinator(controller=ctrl)
+
+    def _fatal_drain_report(*args: Any, **kwargs: Any) -> Any:
+        raise SystemExit(2)
+
+    monkeypatch.setattr("kaiwen_gateway.core.draining.DrainReport", _fatal_drain_report)
+
+    async def _run() -> None:
+        await coord.drain()
+
+    with pytest.raises(SystemExit) as exc_info:
+        asyncio.run(_run())
+
+    assert exc_info.value.code == 2
+    # Fatal exit is not converted to normal drain error
+    assert coord.drain_error is None
+
+
+def test_drain_task_cancellation_done_callback() -> None:
+    """Verify _on_drain_task_done safely handles cancelled internal drain task."""
+
+    async def _run() -> None:
+        ctrl = _make_controller()
+        coord = InstanceDrainCoordinator(controller=ctrl)
+
+        sup = await coord.admit_connection(_make_context(connection_id="conn_cancel_drain_task"))
+
+        async def worker() -> None:
+            await asyncio.sleep(10.0)
+
+        await sup.start(worker)
+
+        # Start drain task and explicitly cancel the underlying internal task
+        drain_coro_task = asyncio.create_task(coord.drain())
+        await asyncio.sleep(0.01)
+        assert coord._drain_task is not None
+        coord._drain_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await drain_coro_task
+
+        assert coord._drain_task.cancelled() is True
+        # Explicitly verify done callback did not crash on cancelled task
+        coord._on_drain_task_done(coord._drain_task)
+
+        await sup.close()
+
+    asyncio.run(_run())

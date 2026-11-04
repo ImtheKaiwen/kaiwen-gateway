@@ -33,9 +33,11 @@ Architecture and Concurrency Invariants:
 - Fail-Closed Drain Handling: Drain policy type validation occurs upfront prior to state change;
   internal errors during drain supervisor execution fail closed to ``STOPPED``, release observers,
   and unblock waiters with typed ``DrainError`` exceptions without orphan background tasks.
-- Clean Task Lifecycle & Ordering: Lingering observer tracker tasks are cancelled and awaited
-  prior to declaring ``STOPPED`` state and signaling completion, preventing orphan background tasks
-  or race conditions with ``wait_stopped()`` callers.
+- Clean Task Lifecycle & Ordering: Background observer tracker tasks are cancelled and awaited
+  under a bounded deadline (`force_close_timeout`) prior to declaring ``STOPPED`` state and signaling
+  completion, preventing indefinite hangs on shutdown. The internal ``_drain_task`` is strongly
+  referenced by the coordinator with an explicit done callback observing task exceptions, guaranteeing
+  zero unretrieved task exception warnings even when all external drain callers are cancelled.
 - Diagnostic Privacy: String representations of policies, coordinators, and reports expose only
   safe aggregate metrics, never raw connection, tenant, or call identifiers.
 """
@@ -390,6 +392,11 @@ class InstanceDrainCoordinator:
         if not task.cancelled():
             task.exception()
 
+    def _on_drain_task_done(self, task: asyncio.Task[DrainReport]) -> None:
+        """Handle completion of the internal drain task, ensuring exceptions are observed."""
+        if not task.cancelled():
+            task.exception()
+
     async def _track_supervisor_completion(self, supervisor: ConnectionSupervisor) -> None:
         """Background tracker observing supervisor termination to prune cleanly closed connections."""
         try:
@@ -433,6 +440,7 @@ class InstanceDrainCoordinator:
                     self._execute_drain(active_policy),
                     name="gw-instance-drain",
                 )
+                self._drain_task.add_done_callback(self._on_drain_task_done)
                 drain_task = self._drain_task
 
         assert drain_task is not None
@@ -530,6 +538,19 @@ class InstanceDrainCoordinator:
                 else:
                     unresolved += 1
 
+            # Phase 4: Bounded finalization of background observer tracker tasks
+            async with self._lock:
+                trackers_to_cancel = list(self._tracker_tasks)
+                for tracker in trackers_to_cancel:
+                    tracker.cancel()
+
+            if trackers_to_cancel:
+                done, pending = await asyncio.wait(
+                    trackers_to_cancel, timeout=policy.force_close_timeout
+                )
+                if pending:
+                    deadline_exceeded = True
+
             end_time = loop.time()
             duration = max(0.0, end_time - start_time)
 
@@ -545,17 +566,7 @@ class InstanceDrainCoordinator:
                 duration_seconds=duration,
             )
 
-            # 1. Snapshot and cancel all observer tracker tasks
-            async with self._lock:
-                trackers_to_cancel = list(self._tracker_tasks)
-                for tracker in trackers_to_cancel:
-                    tracker.cancel()
-
-            # 2. Await completion of all cancelled observer tasks so zero pending tasks outlive drain
-            if trackers_to_cancel:
-                await asyncio.gather(*trackers_to_cancel, return_exceptions=True)
-
-            # 3. Transition to STOPPED, store report, and signal stopped event
+            # Transition to STOPPED, store report, and signal stopped event
             async with self._lock:
                 self._transition_to(InstanceDrainState.STOPPED)
                 self._report = report
@@ -563,6 +574,8 @@ class InstanceDrainCoordinator:
 
             return report
 
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except BaseException as exc:
             async with self._lock:
                 self._drain_error = exc
@@ -570,7 +583,7 @@ class InstanceDrainCoordinator:
                 for tracker in trackers_to_cancel:
                     tracker.cancel()
             if trackers_to_cancel:
-                await asyncio.gather(*trackers_to_cancel, return_exceptions=True)
+                await asyncio.wait(trackers_to_cancel, timeout=policy.force_close_timeout)
             async with self._lock:
                 self._state = InstanceDrainState.STOPPED
                 self._stopped_event.set()
