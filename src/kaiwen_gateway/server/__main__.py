@@ -3,6 +3,8 @@
 Binds exclusively to the loopback interface (127.0.0.1:8000).
 """
 
+from __future__ import annotations
+
 import sys
 
 
@@ -13,7 +15,8 @@ def main() -> None:
     except ImportError:  # pragma: no cover
         sys.stderr.write(
             "Error: 'uvicorn' is required to run the local development server.\n"
-            "Install development dependencies with: uv sync --group dev\n"
+            "Developer installation: uv sync --locked --group dev --extra server\n"
+            "Consumer installation: pip install 'kaiwen-gateway[server]'\n"
         )
         sys.exit(1)
 
