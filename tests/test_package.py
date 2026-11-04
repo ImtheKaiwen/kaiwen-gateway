@@ -31,7 +31,7 @@ def test_public_api_surface_is_minimal() -> None:
     unexported_public_objects = [
         name
         for name in dir(kaiwen_gateway)
-        if not name.startswith("_") and name not in {"Final", "core", "server"}
+        if not name.startswith("_") and name not in {"Final", "core", "server", "transports"}
     ]
     assert unexported_public_objects == []
 
@@ -64,7 +64,7 @@ def test_runtime_dependencies_remain_empty() -> None:
     mandatory_reqs = [r for r in (reqs or []) if "extra ==" not in r]
     assert mandatory_reqs == []
     optional_reqs = [r for r in (reqs or []) if "extra ==" in r]
-    assert len(optional_reqs) == 2
+    assert len(optional_reqs) == 3
     for r in optional_reqs:
         assert "server" in r and "extra ==" in r
 

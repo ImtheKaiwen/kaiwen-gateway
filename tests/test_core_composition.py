@@ -225,7 +225,7 @@ def test_core_config_rejects_per_tenant_exceeding_total_limit() -> None:
 )
 def test_core_config_fails_closed_on_unverified_ingress_mode(bad_ingress_mode: object) -> None:
     """Any attempt to enable external/public ingress in CoreConfig fails closed."""
-    assert SUPPORTED_INGRESS_MODES == frozenset({"disabled"})
+    assert SUPPORTED_INGRESS_MODES == frozenset({"disabled", "synthetic"})
     with pytest.raises(CoreConfigurationError) as exc_info:
         CoreConfig(ingress_mode=bad_ingress_mode)  # type: ignore[arg-type]
     assert exc_info.value.field_name == "ingress_mode"

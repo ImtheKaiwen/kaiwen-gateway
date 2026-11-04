@@ -16,7 +16,10 @@ MAX_CONFIGURED_CONNECTIONS: Final[int] = 10_000
 MAX_INSTANCE_NAME_LENGTH: Final[int] = 64
 INSTANCE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 INGRESS_MODE_DISABLED: Final[str] = "disabled"
-SUPPORTED_INGRESS_MODES: Final[frozenset[str]] = frozenset({INGRESS_MODE_DISABLED})
+INGRESS_MODE_SYNTHETIC: Final[str] = "synthetic"
+SUPPORTED_INGRESS_MODES: Final[frozenset[str]] = frozenset(
+    {INGRESS_MODE_DISABLED, INGRESS_MODE_SYNTHETIC}
+)
 
 _ALLOWED_CONFIG_KEYS: Final[frozenset[str]] = frozenset(
     {
@@ -184,6 +187,7 @@ __all__ = [
     "DEFAULT_MAX_CONCURRENT_CONNECTIONS",
     "DEFAULT_MAX_CONNECTIONS_PER_TENANT",
     "INGRESS_MODE_DISABLED",
+    "INGRESS_MODE_SYNTHETIC",
     "INSTANCE_NAME_PATTERN",
     "MAX_CONFIGURED_CONNECTIONS",
     "MAX_INSTANCE_NAME_LENGTH",

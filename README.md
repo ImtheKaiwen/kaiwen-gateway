@@ -162,7 +162,7 @@ A passing unit suite does **not** prove real telephony interoperability, securit
 
 ## Getting started
 
-**The package is not yet released on PyPI. While the Core layer (M1, M2) and runnable ASGI runtime foundation (M3.1) are implemented, the synthetic WSS ingress (M3.2), CLI commands (M3.3), and Voice audio runtime (M4) are not yet implemented.** Public endpoint paths, server commands, and configuration examples will be published after they are implemented and covered by tests. Please do not assume an example endpoint or command from design discussions is available today.
+**The package is not yet released on PyPI. While the Core layer (M1, M2) and runnable ASGI runtime foundation (M3.1, merged in PR #15 / `224284f`) are implemented, and the authenticated synthetic WebSocket ingress vertical slice (M3.2A) is implemented locally with 100% test coverage, CLI commands (M3.3), the Voice audio runtime (M4), and real provider adapters remain pre-alpha and unimplemented.** Public endpoint paths, server commands, and configuration examples will be published after they are merged and released. Please do not assume an example endpoint or command from design discussions is available today.
 
 ### Verified local package, quality, and CI foundation (M1)
 
@@ -178,12 +178,12 @@ uv run --locked --group dev --extra server pytest -q --cov=kaiwen_gateway --cov-
 uv build
 ```
 
-### Local development ASGI host runtime (M3.1)
+### Local development ASGI host runtime (M3.1 & M3.2A)
 
 With optional server dependencies installed (`uv sync --locked --group dev --extra server`), the instance-scoped ASGI server foundation can be run locally on the loopback interface:
 
 ```bash
-# Run local development ASGI server on 127.0.0.1:8000
+# Run local development ASGI server on 127.0.0.1:8000 (ingress_mode="disabled" by default)
 uv run --locked --group dev --extra server python -m kaiwen_gateway.server
 
 # Alternatively, using uvicorn factory invocation:
@@ -193,8 +193,14 @@ uv run --locked --group dev --extra server uvicorn kaiwen_gateway.server:create_
 **Operational and security boundaries:**
 - **Loopback binding only:** Binds strictly to `127.0.0.1:8000`; never bind to public `0.0.0.0` or deploy without a production reverse proxy and TLS boundary.
 - **Liveness (`GET /health`):** Returns `200 OK` (`{"status": "ok", "instance": "<name>"}`) when the ASGI host process is viable; returns `503 Service Unavailable` if queried before lifespan startup completes.
-- **Readiness (`GET /ready`):** Returns `503 Service Unavailable` (`{"status": "unavailable", "reason": "ingress_disabled"}`) because external media ingress remains disabled fail-closed by default in `CoreConfig` (`ingress_mode="disabled"`). Returns `503` with `reason="draining"` during instance draining, and `reason="stopped"` once stopped.
-- **WebSocket upgrade refusal:** Connection attempts to WebSocket routes are immediately closed prior to upgrade acceptance (`code 1008` in-process ASGI close; HTTP 403 Forbidden via `UpgradeRejectionMiddleware` on HTTP pre-upgrade requests). No WebSocket connection is accepted, and no upstream AI session or media pipeline is allocated. Live ASGI server WebSocket wire testing requires an installed WebSocket protocol engine (`wsproto` or `websockets`), which is a defined prerequisite for the M3.2 authenticated transport milestone. Concrete synthetic telephony ingress is deferred to M3.2+.
+- **Readiness (`GET /ready`):** In default disabled mode (`ingress_mode="disabled"`), returns `503 Service Unavailable` (`{"status": "unavailable", "reason": "ingress_disabled"}`). When configured with `ingress_mode="synthetic"` and active admission capacity, returns `200 OK` (`{"status": "ready", "ingress_mode": "synthetic", "instance": "<name>"}`). Returns `503` with `reason="draining"` during instance draining, and `reason="stopped"` once stopped.
+- **Authenticated synthetic WebSocket ingress (`/ws/synthetic/v1` - M3.2A):**
+  - Explicit activation via `CoreConfig(ingress_mode="synthetic")` paired with a server-configured `SyntheticAuthBridge` (or matching authenticator and authorizer ports).
+  - Inbound connections require an HTTP `Authorization: Bearer <token>` header verified cryptographically (HMAC-SHA256 signature, expiry, and canonical claims) before upgrade acceptance.
+  - Handshakes lacking valid credentials, forged tokens, or exceeding admission capacity are closed prior to acceptance (`code 1008`), allocating zero capacity leases and zero upstream sessions.
+  - Established connections exchange structured text JSON control frames: `session.ready` (server -> client), `session.ping` / `session.pong`, and `session.end` (graceful termination).
+  - Binary frames are strictly rejected (`code 1003`) in M3.2A; voice audio streaming pipelines remain deferred to M4.
+  - Frames exceeding 64 KiB are rejected with `code 1009`; malformed JSON frames are rejected with `code 1007`.
 
 For architecture and milestone tracking:
 
