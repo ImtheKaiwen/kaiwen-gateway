@@ -64,7 +64,7 @@ def test_runtime_dependencies_remain_empty() -> None:
     mandatory_reqs = [r for r in (reqs or []) if "extra ==" not in r]
     assert mandatory_reqs == []
     optional_reqs = [r for r in (reqs or []) if "extra ==" in r]
-    assert len(optional_reqs) == 3
+    assert len(optional_reqs) == 2
     for r in optional_reqs:
         assert "server" in r and "extra ==" in r
 
