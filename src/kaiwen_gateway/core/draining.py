@@ -23,10 +23,19 @@ Architecture and Concurrency Invariants:
 - Bounded Execution: All phases operate under monotonic deadlines (`grace_period` and
   `force_close_timeout`). Non-cooperative worker tasks or unreleased leases are bounded and
   reported as unresolved rather than causing indefinite hangs.
-- Exact Mathematical Accounting: DrainReport guarantees that
+- Conservative Cohort Accounting: DrainReport guarantees that
   ``initial_connections == graceful_completions + force_closed + unresolved_connections``.
-- Clean Task Lifecycle: Lingering observer tracker tasks are cancelled and awaited upon shutdown,
-  preventing orphan background tasks or unretrieved exception warnings.
+  Only supervisors reaching ``ConnectionState.CLOSED`` without active capacity leases are counted
+  as graceful or force-closed; any supervisor in ``ConnectionState.FAILED``, non-terminal state,
+  or retaining an active lease is classified strictly as unresolved.
+- Cooperative Force-Close: Phase 2 requests cancellation using ``TerminalReason.CANCELLED``;
+  cooperative terminations that finalize resources cleanly resolve to ``ConnectionState.CLOSED``.
+- Fail-Closed Drain Handling: Drain policy type validation occurs upfront prior to state change;
+  internal errors during drain supervisor execution fail closed to ``STOPPED``, release observers,
+  and unblock waiters with typed ``DrainError`` exceptions without orphan background tasks.
+- Clean Task Lifecycle & Ordering: Lingering observer tracker tasks are cancelled and awaited
+  prior to declaring ``STOPPED`` state and signaling completion, preventing orphan background tasks
+  or race conditions with ``wait_stopped()`` callers.
 - Diagnostic Privacy: String representations of policies, coordinators, and reports expose only
   safe aggregate metrics, never raw connection, tenant, or call identifiers.
 """
@@ -42,6 +51,7 @@ from typing import Final
 from kaiwen_gateway.core.admission import AdmissionController
 from kaiwen_gateway.core.exceptions import (
     CoreConfigurationError,
+    DrainError,
     DuplicateConnectionAdmissionError,
     InstanceDrainingError,
     InvalidDrainTransitionError,
@@ -153,6 +163,10 @@ class DrainReport:
     - Mathematical consistency:
       ``initial_connections == graceful_completions + force_closed + unresolved_connections``
       where each initial connection belongs to exactly one mutually exclusive outcome cohort.
+    - Conservative resolution: Only connections that reached ``ConnectionState.CLOSED`` without
+      an active capacity lease are counted in ``graceful_completions`` or ``force_closed``.
+      Connections in ``ConnectionState.FAILED``, non-terminal state, or with an active lease
+      are classified as ``unresolved_connections``.
     - ``failed_outcomes`` is an orthogonal quality metric counting connections that reached
       the terminal FAILED state.
     - Diagnostic privacy: String representations expose only safe aggregated numeric counts,
@@ -194,6 +208,7 @@ class InstanceDrainCoordinator:
     - Linearized admission gate: Once `drain()` begins, no new connections are admitted.
     - Idempotent and single-flight: Multiple concurrent `drain()` calls await the same task.
     - Monotonically bounded: Closes unclosed connections if grace period expires.
+    - Fail-closed exception handling: Internal failures transition instance to STOPPED and reject admissions.
     """
 
     __slots__ = (
@@ -204,6 +219,7 @@ class InstanceDrainCoordinator:
         "_lock",
         "_supervisors",
         "_drain_task",
+        "_drain_error",
         "_report",
         "_stopped_event",
         "_tracker_tasks",
@@ -236,6 +252,7 @@ class InstanceDrainCoordinator:
         self._lock: asyncio.Lock = asyncio.Lock()
         self._supervisors: dict[str, ConnectionSupervisor] = {}
         self._drain_task: asyncio.Task[DrainReport] | None = None
+        self._drain_error: BaseException | None = None
         self._report: DrainReport | None = None
         self._stopped_event: asyncio.Event = asyncio.Event()
         self._tracker_tasks: set[asyncio.Task[None]] = set()
@@ -284,6 +301,11 @@ class InstanceDrainCoordinator:
     def report(self) -> DrainReport | None:
         """Return final DrainReport if stopped, or None."""
         return self._report
+
+    @property
+    def drain_error(self) -> BaseException | None:
+        """Return the exception that terminated draining, or None if successful or in-progress."""
+        return self._drain_error
 
     def _transition_to(self, target: InstanceDrainState) -> None:
         """Atomically transition state or raise InvalidDrainTransitionError."""
@@ -344,7 +366,8 @@ class InstanceDrainCoordinator:
                 tracker.add_done_callback(self._on_tracker_done)
                 return supervisor
             except (KeyboardInterrupt, SystemExit):
-                self._supervisors.pop(context.connection_id, None)
+                if supervisor.lease is None or not supervisor.lease.is_active:
+                    self._supervisors.pop(context.connection_id, None)
                 raise
             except BaseException:
                 # Admission cancelled or failed: shield rollback and wait for completion
@@ -389,9 +412,14 @@ class InstanceDrainCoordinator:
         Idempotent and single-flight: concurrent or repeated calls share the same underlying
         drain supervisor task and return the identical DrainReport upon conclusion.
         """
+        if policy is not None and not isinstance(policy, DrainPolicy):
+            raise TypeError(f"policy must be a DrainPolicy instance, got {type(policy).__name__}")
+
         drain_task: asyncio.Task[DrainReport] | None = None
         async with self._lock:
             if self._state == InstanceDrainState.STOPPED:
+                if self._drain_error is not None:
+                    raise DrainError("Instance drain previously failed") from self._drain_error
                 assert self._report is not None
                 return self._report
 
@@ -415,124 +443,144 @@ class InstanceDrainCoordinator:
         loop = asyncio.get_running_loop()
         start_time = loop.time()
 
-        # 1. Snapshot initial managed supervisors
-        async with self._lock:
-            initial_supervisors = list(self._supervisors.values())
+        try:
+            # 1. Snapshot initial managed supervisors
+            async with self._lock:
+                initial_supervisors = list(self._supervisors.values())
 
-        initial_count = len(initial_supervisors)
-        deadline_exceeded = False
+            initial_count = len(initial_supervisors)
+            deadline_exceeded = False
 
-        # Phase 1: Graceful completion wait for currently unclosed supervisors
-        pending_supervisors = [s for s in initial_supervisors if not s.is_closed]
-        graceful_supervisors: set[str] = {
-            s.connection_id
-            for s in initial_supervisors
-            if s.is_closed and (s.lease is None or not s.lease.is_active)
-        }
+            # Phase 1: Graceful completion wait for currently unclosed supervisors
+            pending_supervisors = [s for s in initial_supervisors if not s.is_closed]
+            graceful_supervisors: set[str] = {
+                s.connection_id
+                for s in initial_supervisors
+                if s.state == ConnectionState.CLOSED and (s.lease is None or not s.lease.is_active)
+            }
 
-        if pending_supervisors and policy.grace_period > 0:
-            grace_deadline = start_time + policy.grace_period
-            wait_tasks = [
-                asyncio.create_task(s.wait_closed(), name="gw-drain-wait")
-                for s in pending_supervisors
-            ]
-            try:
-                remaining_grace = max(0.0, grace_deadline - loop.time())
-                async with asyncio.timeout(remaining_grace):
-                    await asyncio.gather(*wait_tasks, return_exceptions=True)
-            except TimeoutError:
-                deadline_exceeded = True
-            finally:
-                for wt in wait_tasks:
-                    wt.cancel()
-
-        # Connections that completed closed during Phase 1 without active lease
-        for s in pending_supervisors:
-            if s.is_closed and (s.lease is None or not s.lease.is_active):
-                graceful_supervisors.add(s.connection_id)
-
-        graceful_completions = len(graceful_supervisors)
-        unclosed_candidates = [
-            s for s in initial_supervisors if s.connection_id not in graceful_supervisors
-        ]
-
-        # Phase 2: Force-close phase for remaining unfinalized supervisors
-        if unclosed_candidates:
-            force_close_deadline = loop.time() + policy.force_close_timeout
-            close_tasks = [
-                asyncio.create_task(
-                    s.close(reason=TerminalReason.CLEANUP_FAILED), name="gw-drain-forceclose"
-                )
-                for s in unclosed_candidates
-                if not s.is_closed
-            ]
-            if close_tasks:
+            if pending_supervisors and policy.grace_period > 0:
+                grace_deadline = start_time + policy.grace_period
+                wait_tasks = [
+                    asyncio.create_task(s.wait_closed(), name="gw-drain-wait")
+                    for s in pending_supervisors
+                ]
                 try:
-                    remaining_force = max(0.0, force_close_deadline - loop.time())
-                    async with asyncio.timeout(remaining_force):
-                        await asyncio.gather(*close_tasks, return_exceptions=True)
+                    remaining_grace = max(0.0, grace_deadline - loop.time())
+                    async with asyncio.timeout(remaining_grace):
+                        await asyncio.gather(*wait_tasks, return_exceptions=True)
                 except TimeoutError:
                     deadline_exceeded = True
                 finally:
-                    for ct in close_tasks:
-                        ct.cancel()
+                    for wt in wait_tasks:
+                        wt.cancel()
 
-        # Phase 3: Final evaluation ensuring exact mathematical partition:
-        # initial_connections == graceful_completions + force_closed + unresolved_connections
-        force_closed = 0
-        unresolved = 0
-        failed_outcomes = 0
-        active_leases_remaining = 0
+            # Connections that reached CLOSED during Phase 1 without active lease
+            for s in pending_supervisors:
+                if s.state == ConnectionState.CLOSED and (s.lease is None or not s.lease.is_active):
+                    graceful_supervisors.add(s.connection_id)
 
-        for s in initial_supervisors:
-            if s.state == ConnectionState.FAILED:
-                failed_outcomes += 1
+            graceful_completions = len(graceful_supervisors)
+            unclosed_candidates = [
+                s for s in initial_supervisors if s.connection_id not in graceful_supervisors
+            ]
 
-            if s.lease is not None and s.lease.is_active:
-                active_leases_remaining += 1
+            # Phase 2: Force-close phase for remaining unfinalized supervisors
+            if unclosed_candidates:
+                force_close_deadline = loop.time() + policy.force_close_timeout
+                close_tasks = [
+                    asyncio.create_task(
+                        s.close(reason=TerminalReason.CANCELLED), name="gw-drain-forceclose"
+                    )
+                    for s in unclosed_candidates
+                    if not s.is_closed
+                ]
+                if close_tasks:
+                    try:
+                        remaining_force = max(0.0, force_close_deadline - loop.time())
+                        async with asyncio.timeout(remaining_force):
+                            await asyncio.gather(*close_tasks, return_exceptions=True)
+                    except TimeoutError:
+                        deadline_exceeded = True
+                    finally:
+                        for ct in close_tasks:
+                            ct.cancel()
 
-            if s.connection_id in graceful_supervisors:
-                continue
+            # Phase 3: Final evaluation ensuring exact mathematical partition:
+            # initial_connections == graceful_completions + force_closed + unresolved_connections
+            force_closed = 0
+            unresolved = 0
+            failed_outcomes = 0
+            active_leases_remaining = 0
 
-            # Candidate must either be successfully force-closed (closed and no active lease)
-            # or counted as unresolved (not closed or lease still active).
-            if s.is_closed and (s.lease is None or not s.lease.is_active):
-                force_closed += 1
-            else:
-                unresolved += 1
+            for s in initial_supervisors:
+                if s.state == ConnectionState.FAILED:
+                    failed_outcomes += 1
 
-        end_time = loop.time()
-        duration = max(0.0, end_time - start_time)
+                if s.lease is not None and s.lease.is_active:
+                    active_leases_remaining += 1
 
-        report = DrainReport(
-            initial_connections=initial_count,
-            graceful_completions=graceful_completions,
-            force_closed=force_closed,
-            failed_outcomes=failed_outcomes,
-            unresolved_connections=unresolved,
-            active_leases_remaining=active_leases_remaining,
-            deadline_exceeded=deadline_exceeded,
-            final_state=InstanceDrainState.STOPPED,
-            duration_seconds=duration,
-        )
+                if s.connection_id in graceful_supervisors:
+                    continue
 
-        async with self._lock:
-            self._transition_to(InstanceDrainState.STOPPED)
-            self._report = report
-            self._stopped_event.set()
-            trackers_to_cancel = list(self._tracker_tasks)
-            for tracker in trackers_to_cancel:
-                tracker.cancel()
+                # Candidate must either be successfully force-closed (CLOSED and no active lease)
+                # or counted as unresolved (FAILED, non-terminal, or lease still active).
+                if s.state == ConnectionState.CLOSED and (s.lease is None or not s.lease.is_active):
+                    force_closed += 1
+                else:
+                    unresolved += 1
 
-        # Await completion of all cancelled observer tasks so zero pending tasks outlive drain
-        if trackers_to_cancel:
-            await asyncio.gather(*trackers_to_cancel, return_exceptions=True)
+            end_time = loop.time()
+            duration = max(0.0, end_time - start_time)
 
-        return report
+            report = DrainReport(
+                initial_connections=initial_count,
+                graceful_completions=graceful_completions,
+                force_closed=force_closed,
+                failed_outcomes=failed_outcomes,
+                unresolved_connections=unresolved,
+                active_leases_remaining=active_leases_remaining,
+                deadline_exceeded=deadline_exceeded,
+                final_state=InstanceDrainState.STOPPED,
+                duration_seconds=duration,
+            )
+
+            # 1. Snapshot and cancel all observer tracker tasks
+            async with self._lock:
+                trackers_to_cancel = list(self._tracker_tasks)
+                for tracker in trackers_to_cancel:
+                    tracker.cancel()
+
+            # 2. Await completion of all cancelled observer tasks so zero pending tasks outlive drain
+            if trackers_to_cancel:
+                await asyncio.gather(*trackers_to_cancel, return_exceptions=True)
+
+            # 3. Transition to STOPPED, store report, and signal stopped event
+            async with self._lock:
+                self._transition_to(InstanceDrainState.STOPPED)
+                self._report = report
+                self._stopped_event.set()
+
+            return report
+
+        except BaseException as exc:
+            async with self._lock:
+                self._drain_error = exc
+                trackers_to_cancel = list(self._tracker_tasks)
+                for tracker in trackers_to_cancel:
+                    tracker.cancel()
+            if trackers_to_cancel:
+                await asyncio.gather(*trackers_to_cancel, return_exceptions=True)
+            async with self._lock:
+                self._state = InstanceDrainState.STOPPED
+                self._stopped_event.set()
+            raise
 
     async def wait_stopped(self) -> DrainReport:
         """Wait until this instance drain coordinator reaches the STOPPED state."""
         await self._stopped_event.wait()
+        if self._drain_error is not None:
+            raise DrainError("Instance drain failed due to internal error") from self._drain_error
         assert self._report is not None
         return self._report
 

@@ -23,6 +23,7 @@ from kaiwen_gateway.core import (
     ConnectionSupervisor,
     CoreConfig,
     CoreConfigurationError,
+    DrainError,
     DrainPolicy,
     DrainReport,
     DuplicateConnectionAdmissionError,
@@ -447,7 +448,7 @@ def test_drain_grace_deadline_exceeded_triggers_force_close() -> None:
         assert report.initial_connections == 1
         assert report.graceful_completions == 0
         assert report.force_closed == 1
-        assert report.failed_outcomes == 1  # close(reason=CLEANUP_FAILED) marks FAILED
+        assert report.failed_outcomes == 0  # cancelled cleanly without failure
         assert report.unresolved_connections == 0
         assert report.active_leases_remaining == 0
         assert report.deadline_exceeded is True
@@ -557,8 +558,10 @@ def test_drain_with_worker_failure_outcome() -> None:
 
         report = await coord.drain()
         assert report.initial_connections == 1
+        assert report.graceful_completions == 0
+        assert report.force_closed == 0
         assert report.failed_outcomes == 1
-        assert report.unresolved_connections == 0
+        assert report.unresolved_connections == 1
         assert report.active_leases_remaining == 0
         assert ctrl.snapshot().active_connections == 0
 
@@ -585,8 +588,10 @@ def test_drain_with_resource_cleanup_failure() -> None:
 
         report = await coord.drain()
         assert report.initial_connections == 1
+        assert report.graceful_completions == 0
+        assert report.force_closed == 0
         assert report.failed_outcomes == 1
-        assert report.unresolved_connections == 0
+        assert report.unresolved_connections == 1
         assert report.active_leases_remaining == 0
         assert ctrl.snapshot().active_connections == 0
 
@@ -1046,5 +1051,217 @@ def test_admission_rollback_exception_paths(monkeypatch: pytest.MonkeyPatch) -> 
         # Cleanup monkeypatches
         monkeypatch.setattr(ConnectionSupervisor, "admit", orig_admit)
         monkeypatch.setattr(ConnectionSupervisor, "close", orig_close)
+
+    asyncio.run(_run())
+
+
+# =============================================================================
+# 9. Drain Policy Validation, Internal Failure & Fatal Error Tests
+# =============================================================================
+
+
+def test_drain_runtime_policy_type_validation_upfront() -> None:
+    """Verify runtime type validation for policy passed to drain() occurs upfront without state mutation."""
+
+    async def _run() -> None:
+        ctrl = _make_controller()
+        coord = InstanceDrainCoordinator(controller=ctrl)
+        assert coord.state == InstanceDrainState.ACCEPTING
+
+        # Pass invalid types to drain()
+        with pytest.raises(TypeError, match="policy must be a DrainPolicy instance"):
+            await coord.drain(policy="invalid")  # type: ignore[arg-type]
+
+        # Coordinator must remain in ACCEPTING state!
+        assert coord.state == InstanceDrainState.ACCEPTING
+        assert coord.is_accepting is True
+
+        with pytest.raises(TypeError, match="policy must be a DrainPolicy instance"):
+            await coord.drain(policy=123)  # type: ignore[arg-type]
+
+        assert coord.state == InstanceDrainState.ACCEPTING
+        assert coord.is_accepting is True
+
+    asyncio.run(_run())
+
+
+def test_drain_internal_task_failure_transitions_to_stopped_and_unblocks_waiters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify internal drain task failure fails closed to STOPPED, records error, and unblocks waiters."""
+
+    async def _run() -> None:
+        ctrl = _make_controller()
+        coord = InstanceDrainCoordinator(controller=ctrl)
+
+        def _failing_timeout(delay: float) -> Any:
+            raise RuntimeError("Simulated internal drain supervisor failure")
+
+        sup = await coord.admit_connection(_make_context(connection_id="conn_drain_fault"))
+        assert len(coord._tracker_tasks) == 1
+        monkeypatch.setattr(asyncio, "timeout", _failing_timeout)
+
+        waiter_task = asyncio.create_task(coord.wait_stopped())
+
+        # Calling drain() raises the underlying exception
+        with pytest.raises(RuntimeError, match="Simulated internal drain supervisor failure"):
+            await coord.drain()
+
+        # Coordinator is in STOPPED state (fail-closed)
+        assert coord.state == InstanceDrainState.STOPPED
+        assert coord.drain_error is not None
+        assert isinstance(coord.drain_error, RuntimeError)
+        assert len(coord._tracker_tasks) == 0
+
+        # Waiter is unblocked and raises DrainError chained from the underlying fault
+        with pytest.raises(
+            DrainError, match="Instance drain failed due to internal error"
+        ) as exc_info:
+            await waiter_task
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+        # Subsequent drain() calls raise DrainError without hanging
+        with pytest.raises(DrainError, match="Instance drain previously failed"):
+            await coord.drain()
+
+        # Subsequent admissions are rejected immediately
+        with pytest.raises(InstanceDrainingError, match="instance is in STOPPED state"):
+            await coord.admit_connection(_make_context(connection_id="conn_after_stop"))
+
+        await sup.close()
+
+    asyncio.run(_run())
+
+
+def test_drain_internal_task_failure_with_zero_connections_transitions_to_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify internal failure during zero-connection drain triggers exception path without trackers."""
+
+    async def _run() -> None:
+        ctrl = _make_controller()
+        coord = InstanceDrainCoordinator(controller=ctrl)
+
+        def _failing_drain_report(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("Simulated failure with zero connections")
+
+        monkeypatch.setattr("kaiwen_gateway.core.draining.DrainReport", _failing_drain_report)
+
+        with pytest.raises(RuntimeError, match="Simulated failure with zero connections"):
+            await coord.drain()
+
+        assert coord.state == InstanceDrainState.STOPPED
+        assert coord.drain_error is not None
+        assert isinstance(coord.drain_error, RuntimeError)
+
+    asyncio.run(_run())
+
+
+def test_observer_cleanup_order_before_wait_stopped_returns() -> None:
+    """Verify observer tracker tasks are cancelled and awaited before wait_stopped returns."""
+
+    async def _run() -> None:
+        ctrl = _make_controller()
+        coord = InstanceDrainCoordinator(controller=ctrl)
+
+        sup = await coord.admit_connection(_make_context(connection_id="conn_order"))
+        assert len(coord._tracker_tasks) == 1
+
+        waiter_done = asyncio.Event()
+        observer_count_at_waiter_done = -1
+
+        async def waiter() -> None:
+            await coord.wait_stopped()
+            nonlocal observer_count_at_waiter_done
+            observer_count_at_waiter_done = len(coord._tracker_tasks)
+            waiter_done.set()
+
+        wait_task = asyncio.create_task(waiter())
+
+        async def worker() -> None:
+            await asyncio.sleep(0.01)
+
+        await sup.start(worker)
+
+        report = await coord.drain()
+        await waiter_done.wait()
+        await wait_task
+
+        assert report.final_state == InstanceDrainState.STOPPED
+        assert observer_count_at_waiter_done == 0
+        assert len(coord._tracker_tasks) == 0
+
+    asyncio.run(_run())
+
+
+def test_admission_fatal_exception_with_active_lease_retains_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify fatal KeyboardInterrupt during admission retains supervisor if capacity lease is active."""
+
+    async def _run() -> None:
+        ctrl = _make_controller()
+        coord = InstanceDrainCoordinator(controller=ctrl)
+
+        orig_admit = ConnectionSupervisor.admit
+
+        async def _admit_then_sigint(self: ConnectionSupervisor) -> bool:
+            # Call actual admit() so supervisor enters ADMITTED state and lease is active
+            res = await orig_admit(self)
+            assert res is True
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(ConnectionSupervisor, "admit", _admit_then_sigint)
+
+        with pytest.raises(KeyboardInterrupt):
+            await coord.admit_connection(_make_context(connection_id="conn_fatal_sigint"))
+
+        # Supervisor must be RETAINED in coordinator inventory so ownership is not lost!
+        assert "conn_fatal_sigint" in coord._supervisors
+        retained_sup = coord._supervisors["conn_fatal_sigint"]
+        assert retained_sup.lease is not None and retained_sup.lease.is_active is True
+
+        # When draining, this retained supervisor is accounted for (and force closed)
+        report = await coord.drain()
+        assert report.initial_connections == 1
+        assert report.force_closed == 1
+        assert report.active_leases_remaining == 0
+        assert ctrl.snapshot().active_connections == 0
+
+        monkeypatch.setattr(ConnectionSupervisor, "admit", orig_admit)
+
+    asyncio.run(_run())
+
+
+def test_failed_supervisor_with_released_lease_is_unresolved_not_graceful() -> None:
+    """Verify a supervisor in FAILED state with released lease is accounted as unresolved and failed."""
+
+    async def _run() -> None:
+        ctrl = _make_controller()
+        coord = InstanceDrainCoordinator(controller=ctrl, policy=DrainPolicy(grace_period=0.1))
+
+        sup = await coord.admit_connection(_make_context(connection_id="conn_failed_released"))
+
+        async def crash_worker() -> None:
+            raise RuntimeError("Worker exploded immediately")
+
+        await sup.start(crash_worker)
+        # Wait for supervisor to finish terminating and reach FAILED state
+        await sup.wait_closed()
+        assert sup.state == ConnectionState.FAILED
+        assert sup.lease is not None and sup.lease.is_active is False
+
+        # Drain the instance
+        report = await coord.drain()
+        assert report.initial_connections == 1
+        assert report.graceful_completions == 0
+        assert report.force_closed == 0
+        assert report.unresolved_connections == 1
+        assert report.failed_outcomes == 1
+        assert report.active_leases_remaining == 0
+        assert (
+            report.initial_connections
+            == report.graceful_completions + report.force_closed + report.unresolved_connections
+        )
 
     asyncio.run(_run())
