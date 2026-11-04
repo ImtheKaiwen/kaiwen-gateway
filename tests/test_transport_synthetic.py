@@ -357,13 +357,14 @@ def test_in_process_auth_rejections() -> None:
             pass
     assert exc4.value.code == 1008
 
-    # Expired token
+    # Expired token (issued in past, expired at current time)
     expired_token = verifier.issue_token(
         provider_id="pvd",
         tenant_id="tnt",
         call_id="cll",
         allowed_scopes=["voice.stream"],
-        ttl_seconds=-10.0,
+        ttl_seconds=10.0,
+        clock=time.time() - 100.0,
     )
     with pytest.raises(WebSocketDisconnect) as exc5:
         with client.websocket_connect(
@@ -818,14 +819,14 @@ def test_token_verifier_malformed_variations() -> None:
     # Non-numeric exp
     claims_bad_exp = dict(base_claims, exp="tomorrow")
     with pytest.raises(
-        IdentityAuthorizationError, match="Synthetic token 'exp' must be a numeric timestamp"
+        IdentityAuthorizationError, match="Synthetic token 'exp' must be a.*numeric timestamp"
     ):
         verifier.verify_token(_make_token(claims_bad_exp), clock=1500.0)
 
     # Non-numeric iat
     claims_bad_iat = dict(base_claims, iat="yesterday")
     with pytest.raises(
-        IdentityAuthorizationError, match="Synthetic token 'iat' must be a numeric timestamp"
+        IdentityAuthorizationError, match="Synthetic token 'iat' must be a.*numeric timestamp"
     ):
         verifier.verify_token(_make_token(claims_bad_iat), clock=1500.0)
 
@@ -931,7 +932,7 @@ def test_create_gateway_app_synthetic_composition_branches() -> None:
     )
     assert app_with_ports.state.synthetic_auth_bridge is bridge
 
-    # 5. synthetic mode without bridge, providing separate custom ports
+    # 5. synthetic mode without bridge: mismatched bridges rejected, matching bridge accepted
     class CustomAuth(SyntheticProviderAuthenticator):
         pass
 
@@ -939,18 +940,30 @@ def test_create_gateway_app_synthetic_composition_branches() -> None:
         pass
 
     c_auth = CustomAuth(bridge)
-    c_authz = CustomAuthorizer(other_bridge)
+    c_authz_diff = CustomAuthorizer(other_bridge)
+    with pytest.raises(
+        CoreConfigurationError,
+        match="Synthetic ingress requires authenticator and authorizer belonging to the same",
+    ):
+        create_gateway_app(
+            config=cfg_synthetic,
+            authenticator=c_auth,
+            authorizer=c_authz_diff,
+        )
+
+    c_authz_same = CustomAuthorizer(bridge)
     app_custom = create_gateway_app(
         config=cfg_synthetic,
         authenticator=c_auth,
-        authorizer=c_authz,
+        authorizer=c_authz_same,
     )
     assert app_custom.state.authenticator is c_auth
-    assert app_custom.state.authorizer is c_authz
+    assert app_custom.state.authorizer is c_authz_same
+    assert app_custom.state.synthetic_auth_bridge is bridge
 
     # 6. synthetic mode with invalid types for authenticator / authorizer
     with pytest.raises(TypeError, match="authenticator must satisfy ProviderAuthenticatorPort"):
-        create_gateway_app(config=cfg_synthetic, authenticator="invalid", authorizer=c_authz)  # type: ignore[arg-type]
+        create_gateway_app(config=cfg_synthetic, authenticator="invalid", authorizer=c_authz_same)  # type: ignore[arg-type]
 
     with pytest.raises(TypeError, match="authorizer must satisfy CallAuthorizationPort"):
         create_gateway_app(config=cfg_synthetic, authenticator=c_auth, authorizer="invalid")  # type: ignore[arg-type]
@@ -1250,27 +1263,68 @@ async def test_token_replay_protection_and_lifespan_bounds() -> None:
     with pytest.raises(IdentityAuthorizationError, match="Synthetic token length"):
         verifier.verify_token("A" * 4097)
 
-    # 3. Temporal bounds: iat > exp
-    token_iat_gt_exp = verifier.issue_token(
-        provider_id="synthetic_provider",
-        tenant_id="tenant_x",
-        call_id="call_x",
-        allowed_scopes=["voice.stream"],
-        ttl_seconds=-1.0,
+    # 3. Temporal bounds in issue_token: reject invalid ttl_seconds
+    with pytest.raises(ValueError, match="ttl_seconds must be a positive finite number"):
+        verifier.issue_token(
+            provider_id="synthetic_provider",
+            tenant_id="tenant_x",
+            call_id="call_x",
+            allowed_scopes=["voice.stream"],
+            ttl_seconds=-1.0,
+        )
+    with pytest.raises(ValueError, match="ttl_seconds must be a positive finite number"):
+        verifier.issue_token(
+            provider_id="synthetic_provider",
+            tenant_id="tenant_x",
+            call_id="call_x",
+            allowed_scopes=["voice.stream"],
+            ttl_seconds=3601.0,
+        )
+
+    # Helper to craft signed tokens with custom claims
+    import base64
+    import hashlib
+    import hmac
+
+    def _craft_token(custom_claims: dict[str, Any]) -> str:
+        b64_payload = (
+            base64.urlsafe_b64encode(
+                json.dumps(custom_claims, separators=(",", ":")).encode("utf-8")
+            )
+            .decode("ascii")
+            .rstrip("=")
+        )
+        sig = hmac.new(TEST_SECRET_KEY, b64_payload.encode("ascii"), hashlib.sha256).digest()
+        b64_sig = base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
+        return f"{b64_payload}.{b64_sig}"
+
+    # Verify iat > exp rejection in verify_token
+    token_iat_gt_exp = _craft_token(
+        {
+            "pvd": "synthetic_provider",
+            "tnt": "tenant_x",
+            "cll": "call_x",
+            "scp": ["voice.stream"],
+            "iat": 2000.0,
+            "exp": 1000.0,
+        }
     )
     with pytest.raises(IdentityAuthorizationError, match="cannot be after 'exp'"):
-        verifier.verify_token(token_iat_gt_exp, clock=time.time() - 100.0)
+        verifier.verify_token(token_iat_gt_exp, clock=500.0)
 
-    # 4. Temporal bounds: lifespan > 3600.0s
-    token_long_ttl = verifier.issue_token(
-        provider_id="synthetic_provider",
-        tenant_id="tenant_x",
-        call_id="call_x",
-        allowed_scopes=["voice.stream"],
-        ttl_seconds=3601.0,
+    # Verify lifespan > 3600.0s rejection in verify_token
+    token_long_ttl = _craft_token(
+        {
+            "pvd": "synthetic_provider",
+            "tnt": "tenant_x",
+            "cll": "call_x",
+            "scp": ["voice.stream"],
+            "iat": 1000.0,
+            "exp": 5000.0,
+        }
     )
     with pytest.raises(IdentityAuthorizationError, match="exceeds maximum allowed duration"):
-        verifier.verify_token(token_long_ttl)
+        verifier.verify_token(token_long_ttl, clock=1500.0)
 
     # 5. Temporal bounds: future issuance
     token_future = verifier.issue_token(
@@ -1645,5 +1699,623 @@ def test_tokens_and_auth_bridge_optional_features() -> None:
         assert ("tnt", "call") in bridge_excl._active_calls
         await bridge_excl.unregister_active_call("conn_1", "tnt", "call")
         assert ("tnt", "call") not in bridge_excl._active_calls
+        # Test resolve_context when existing_conn == canonical_conn_id (covers auth.py:181->187 branch)
+        tok_same_conn = verifier.issue_token(
+            provider_id="synthetic_provider",
+            tenant_id="tnt",
+            call_id="call",
+            allowed_scopes=["voice.stream"],
+        )
+        await bridge_excl.register_active_call("conn_same", "tnt", "call")
+        resolved_same = await bridge_excl.resolve_context(
+            connection_id="conn_same", raw_token=tok_same_conn
+        )
+        assert resolved_same.call_id == "call"
+        await bridge_excl.unregister_active_call("conn_same", "tnt", "call")
+        assert ("tnt", "call") not in bridge_excl._active_calls
 
     asyncio.run(_test_excl())
+
+
+# ==============================================================================
+# M3.2A Security & Lifecycle Hardening Tests (PR #16 Gates)
+# ==============================================================================
+
+
+@pytest.mark.anyio
+async def test_deterministic_active_call_race_releases_lease() -> None:
+    """BLOCKER A: Two connections race for same call; loser must be rejected and release lease immediately."""
+    verifier = SyntheticTokenVerifier(TEST_SECRET_KEY)
+    bridge = SyntheticAuthBridge(verifier, enforce_call_exclusivity=True)
+    ctrl = AdmissionController(max_concurrent_connections=10, max_connections_per_tenant=5)
+    coord = InstanceDrainCoordinator(controller=ctrl)
+    cfg = CoreConfig(
+        ingress_mode=INGRESS_MODE_SYNTHETIC,
+        max_concurrent_connections=10,
+        max_connections_per_tenant=5,
+    )
+    app = create_gateway_app(
+        config=cfg,
+        drain_coordinator=coord,
+        synthetic_auth_bridge=bridge,
+    )
+
+    token1 = verifier.issue_token(
+        provider_id="synthetic_provider",
+        tenant_id="tenant_race",
+        call_id="call_race_01",
+        allowed_scopes=["voice.stream"],
+    )
+    token2 = verifier.issue_token(
+        provider_id="synthetic_provider",
+        tenant_id="tenant_race",
+        call_id="call_race_01",
+        allowed_scopes=["voice.stream"],
+    )
+
+    task2_reached_register = asyncio.Event()
+    task1_registered = asyncio.Event()
+
+    original_register = bridge.register_active_call
+    reg_calls = 0
+
+    async def _instrumented_register(conn_id: str, tenant_id: str, call_id: str) -> None:
+        nonlocal reg_calls
+        reg_calls += 1
+        if reg_calls == 1:
+            # Wait until task2 has also resolved context and passed admission
+            await task2_reached_register.wait()
+            await original_register(conn_id, tenant_id, call_id)
+            task1_registered.set()
+        else:
+            # Signal that task2 has reached registration (both admitted)
+            task2_reached_register.set()
+            await task1_registered.wait()
+            await original_register(conn_id, tenant_id, call_id)
+
+    bridge.register_active_call = _instrumented_register  # type: ignore[assignment,method-assign]
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from kaiwen_gateway.transports.synthetic.endpoint import synthetic_websocket_endpoint
+
+    ws1 = MagicMock()
+    ws1.app = app
+    ws1.headers = {"authorization": f"Bearer {token1}"}
+    ws1.accept = AsyncMock()
+    ws1.send_text = AsyncMock()
+    ws1.close = AsyncMock()
+
+    ws1_disconnect = asyncio.Event()
+
+    async def _ws1_recv() -> dict[str, Any]:
+        await ws1_disconnect.wait()
+        return {"type": "websocket.disconnect"}
+
+    ws1.receive = _ws1_recv
+
+    ws2 = MagicMock()
+    ws2.app = app
+    ws2.headers = {"authorization": f"Bearer {token2}"}
+    ws2.accept = AsyncMock()
+    ws2.send_text = AsyncMock()
+    ws2.close = AsyncMock()
+
+    task1 = asyncio.create_task(synthetic_websocket_endpoint(ws1))
+    task2 = asyncio.create_task(synthetic_websocket_endpoint(ws2))
+
+    # Wait for loser ws2 to be rejected
+    await task2
+
+    # 1. Loser ws2 rejected pre-accept with code 1008
+    ws2.accept.assert_not_called()
+    ws2.close.assert_awaited_once_with(code=1008, reason="Call session already active")
+
+    # 2. Loser lease released: exactly 1 active connection remaining in controller (for winner ws1)
+    assert coord.active_connections_count == 1
+    assert ctrl.snapshot().active_connections == 1
+    assert len(bridge._active_calls) == 1
+
+    # 3. Disconnect winner ws1
+    ws1_disconnect.set()
+    await task1
+
+    # Winner was accepted
+    ws1.accept.assert_awaited_once()
+
+    # 4. Zero active leases and empty call registry
+    assert coord.active_connections_count == 0
+    assert ctrl.snapshot().active_connections == 0
+    assert len(bridge._active_calls) == 0
+
+
+@pytest.mark.anyio
+async def test_handshake_cancellation_and_failure_boundaries() -> None:
+    """BLOCKER B: Verify cancellation and failure at all handshake lifecycle phases."""
+    verifier = SyntheticTokenVerifier(TEST_SECRET_KEY)
+    bridge = SyntheticAuthBridge(verifier)
+    ctrl = AdmissionController()
+    coord = InstanceDrainCoordinator(controller=ctrl)
+    cfg = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from kaiwen_gateway.transports.synthetic.endpoint import synthetic_websocket_endpoint
+
+    def _token(call_id: str) -> str:
+        return verifier.issue_token(
+            provider_id="synthetic_provider",
+            tenant_id="tenant_b",
+            call_id=call_id,
+            allowed_scopes=["voice.stream"],
+        )
+
+    # Phase 1: Cancellation during active-call registration
+    ws1 = MagicMock()
+    ws1.app.state.config = cfg
+    ws1.app.state.drain_coordinator = coord
+    ws1.app.state.synthetic_auth_bridge = bridge
+    ws1.app.state.shutting_down = False
+    ws1.app.state.stopped = False
+    ws1.headers = {"authorization": f"Bearer {_token('call_c1')}"}
+    ws1.accept = AsyncMock()
+
+    original_reg = bridge.register_active_call
+
+    async def _cancel_reg(*args: Any, **kwargs: Any) -> None:
+        raise asyncio.CancelledError()
+
+    bridge.register_active_call = _cancel_reg  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.CancelledError):
+        await synthetic_websocket_endpoint(ws1)
+
+    bridge.register_active_call = original_reg  # type: ignore[method-assign]
+    assert coord.active_connections_count == 0
+    assert ctrl.snapshot().active_connections == 0
+    assert len(bridge._active_calls) == 0
+
+    # Phase 2: Cancellation during websocket.accept()
+    ws2 = MagicMock()
+    ws2.app.state.config = cfg
+    ws2.app.state.drain_coordinator = coord
+    ws2.app.state.synthetic_auth_bridge = bridge
+    ws2.app.state.shutting_down = False
+    ws2.app.state.stopped = False
+    ws2.headers = {"authorization": f"Bearer {_token('call_c2')}"}
+    ws2.accept = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await synthetic_websocket_endpoint(ws2)
+
+    assert coord.active_connections_count == 0
+    assert ctrl.snapshot().active_connections == 0
+    assert len(bridge._active_calls) == 0
+
+    # Phase 3: Cancellation after accept but before worker start
+    class _WrappedSupervisor:
+        def __init__(self, real: Any) -> None:
+            self._real = real
+
+        @property
+        def state(self) -> Any:
+            return self._real.state
+
+        def register_resource(self, fn: Any) -> None:
+            self._real.register_resource(fn)
+
+        async def close(self, reason: Any = None) -> None:
+            await self._real.close(reason=reason)
+
+        async def wait_closed(self) -> None:
+            await self._real.wait_closed()
+
+        async def start(self, *factories: Any) -> None:
+            raise asyncio.CancelledError()
+
+    class _WrappedCoord:
+        def __init__(self, real: InstanceDrainCoordinator) -> None:
+            self._real = real
+            self.state = real.state
+            self.is_stopped = real.is_stopped
+
+        async def admit_connection(self, ctx: Any) -> Any:
+            sup = await self._real.admit_connection(ctx)
+            return _WrappedSupervisor(sup)
+
+    ws3 = MagicMock()
+    ws3.app.state.config = cfg
+    ws3.app.state.drain_coordinator = _WrappedCoord(coord)
+    ws3.app.state.synthetic_auth_bridge = bridge
+    ws3.app.state.shutting_down = False
+    ws3.app.state.stopped = False
+    ws3.headers = {"authorization": f"Bearer {_token('call_c3')}"}
+    ws3.accept = AsyncMock()
+    ws3.close = AsyncMock()
+
+    with pytest.raises(asyncio.CancelledError):
+        await synthetic_websocket_endpoint(ws3)
+
+    assert coord.active_connections_count == 0
+    assert ctrl.snapshot().active_connections == 0
+    assert len(bridge._active_calls) == 0
+
+    # Phase 4: Normal disconnect during receive
+    ws4 = MagicMock()
+    ws4.app.state.config = cfg
+    ws4.app.state.drain_coordinator = coord
+    ws4.app.state.synthetic_auth_bridge = bridge
+    ws4.app.state.shutting_down = False
+    ws4.app.state.stopped = False
+    ws4.headers = {"authorization": f"Bearer {_token('call_c4')}"}
+    ws4.accept = AsyncMock()
+    ws4.send_text = AsyncMock()
+    ws4.receive = AsyncMock(return_value={"type": "websocket.disconnect"})
+
+    await synthetic_websocket_endpoint(ws4)
+    assert coord.active_connections_count == 0
+    assert ctrl.snapshot().active_connections == 0
+    assert len(bridge._active_calls) == 0
+
+
+@pytest.mark.anyio
+async def test_permission_scope_voice_stream_enforcement() -> None:
+    """BLOCKER C: Explicit scope check: voice.stream required prior to admission."""
+    verifier = SyntheticTokenVerifier(TEST_SECRET_KEY)
+    bridge = SyntheticAuthBridge(verifier)
+    ctrl = AdmissionController()
+    coord = InstanceDrainCoordinator(controller=ctrl)
+    cfg = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
+    app = create_gateway_app(config=cfg, drain_coordinator=coord, synthetic_auth_bridge=bridge)
+    client = TestClient(app)
+
+    # 1. Allowed scope has voice.stream -> accepted
+    tok_valid = verifier.issue_token(
+        provider_id="pvd",
+        tenant_id="tnt",
+        call_id="call_valid_scope",
+        allowed_scopes=["voice.stream"],
+    )
+    with client.websocket_connect(
+        SYNTHETIC_WS_ENDPOINT_PATH, headers={"Authorization": f"Bearer {tok_valid}"}
+    ) as ws:
+        ready = json.loads(ws.receive_text())
+        assert ready["allowed_scopes"] == ["voice.stream"]
+        ws.send_text(json.dumps({"event": EVENT_SESSION_END}))
+
+    # 2. Token with empty scopes -> rejected pre-accept, zero leases
+    import base64
+    import hashlib
+    import hmac
+
+    def _craft(scopes: list[str], call_id: str) -> str:
+        payload = {
+            "pvd": "pvd",
+            "tnt": "tnt",
+            "cll": call_id,
+            "scp": scopes,
+            "iat": time.time(),
+            "exp": time.time() + 300.0,
+        }
+        b64_p = (
+            base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8"))
+            .decode("ascii")
+            .rstrip("=")
+        )
+        sig = hmac.new(TEST_SECRET_KEY, b64_p.encode("ascii"), hashlib.sha256).digest()
+        b64_s = base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
+        return f"{b64_p}.{b64_s}"
+
+    tok_empty_scopes = _craft([], "call_empty_scopes")
+    with pytest.raises(WebSocketDisconnect) as exc1:
+        with client.websocket_connect(
+            SYNTHETIC_WS_ENDPOINT_PATH, headers={"Authorization": f"Bearer {tok_empty_scopes}"}
+        ):
+            pass
+    assert exc1.value.code == 1008
+    assert ctrl.snapshot().active_connections == 0
+    assert coord.active_connections_count == 0
+
+    # 3. Token with unrelated scope -> rejected pre-accept, zero leases
+    tok_unrelated = _craft(["unrelated.read"], "call_unrelated_scope")
+    with pytest.raises(WebSocketDisconnect) as exc2:
+        with client.websocket_connect(
+            SYNTHETIC_WS_ENDPOINT_PATH, headers={"Authorization": f"Bearer {tok_unrelated}"}
+        ):
+            pass
+    assert exc2.value.code == 1008
+    assert ctrl.snapshot().active_connections == 0
+    assert coord.active_connections_count == 0
+
+
+@pytest.mark.anyio
+async def test_token_temporal_bounds_nan_inf_and_replay_cache_preservation() -> None:
+    """Section 8: NaN/Inf validation, constructor constraints, and replay cache preservation."""
+    # 1. Constructor constraints on max_replay_entries
+    with pytest.raises(ValueError, match="max_replay_entries must be an int"):
+        SyntheticTokenVerifier(TEST_SECRET_KEY, max_replay_entries="100")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="max_replay_entries must be an int"):
+        SyntheticTokenVerifier(TEST_SECRET_KEY, max_replay_entries=True)
+    with pytest.raises(ValueError, match="max_replay_entries must be between 1 and 1,000,000"):
+        SyntheticTokenVerifier(TEST_SECRET_KEY, max_replay_entries=0)
+    with pytest.raises(ValueError, match="max_replay_entries must be between 1 and 1,000,000"):
+        SyntheticTokenVerifier(TEST_SECRET_KEY, max_replay_entries=1_000_001)
+
+    verifier = SyntheticTokenVerifier(TEST_SECRET_KEY)
+
+    # 2. issue_token constraints on ttl_seconds
+    with pytest.raises(ValueError, match="ttl_seconds must be a float or int"):
+        verifier.issue_token(
+            provider_id="pvd",
+            tenant_id="tnt",
+            call_id="call",
+            allowed_scopes=["voice.stream"],
+            ttl_seconds="300",  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="ttl_seconds must be a float or int"):
+        verifier.issue_token(
+            provider_id="pvd",
+            tenant_id="tnt",
+            call_id="call",
+            allowed_scopes=["voice.stream"],
+            ttl_seconds=False,
+        )
+    with pytest.raises(ValueError, match="ttl_seconds must be a positive finite number"):
+        verifier.issue_token(
+            provider_id="pvd",
+            tenant_id="tnt",
+            call_id="call",
+            allowed_scopes=["voice.stream"],
+            ttl_seconds=float("nan"),
+        )
+    with pytest.raises(ValueError, match="ttl_seconds must be a positive finite number"):
+        verifier.issue_token(
+            provider_id="pvd",
+            tenant_id="tnt",
+            call_id="call",
+            allowed_scopes=["voice.stream"],
+            ttl_seconds=float("inf"),
+        )
+
+    # 3. verify_token rejects NaN, Infinity, -Infinity in iat/exp
+    import base64
+    import hashlib
+    import hmac
+
+    raw_nan_exp = (
+        '{"pvd":"pvd","tnt":"tnt","cll":"call","scp":["voice.stream"],"iat":1000.0,"exp":NaN}'
+    )
+    b64_nan_exp = base64.urlsafe_b64encode(raw_nan_exp.encode("utf-8")).decode("ascii").rstrip("=")
+    sig_nan = (
+        base64.urlsafe_b64encode(
+            hmac.new(TEST_SECRET_KEY, b64_nan_exp.encode("ascii"), hashlib.sha256).digest()
+        )
+        .decode("ascii")
+        .rstrip("=")
+    )
+    with pytest.raises(IdentityAuthorizationError):
+        verifier.verify_token(f"{b64_nan_exp}.{sig_nan}")
+
+    # 4. Replay cache preservation: token with invalid identity field does NOT consume replay cache
+    tampered_payload = {
+        "pvd": "pvd",
+        "tnt": "tnt",
+        "cll": "call_bad_scp",
+        "scp": ["invalid scope with spaces!"],
+        "iat": 1000.0,
+        "exp": 2000.0,
+        "jti": "fixed_jti_001",
+    }
+    b64_t = (
+        base64.urlsafe_b64encode(json.dumps(tampered_payload).encode("utf-8"))
+        .decode("ascii")
+        .rstrip("=")
+    )
+    sig_t = (
+        base64.urlsafe_b64encode(
+            hmac.new(TEST_SECRET_KEY, b64_t.encode("ascii"), hashlib.sha256).digest()
+        )
+        .decode("ascii")
+        .rstrip("=")
+    )
+    with pytest.raises(
+        IdentityAuthorizationError, match="Invalid identity field in synthetic token"
+    ):
+        verifier.verify_token(f"{b64_t}.{sig_t}", clock=1500.0)
+
+    # Replay cache must NOT contain fixed_jti_001
+    assert not verifier.is_token_consumed("fixed_jti_001")
+
+
+@pytest.mark.anyio
+async def test_idle_timeout_and_ping_keepalive() -> None:
+    """Section 9: Bounded idle timeout disconnects inactive clients; ping keeps session alive."""
+    verifier = SyntheticTokenVerifier(TEST_SECRET_KEY)
+    bridge = SyntheticAuthBridge(verifier)
+    ctrl = AdmissionController()
+    coord = InstanceDrainCoordinator(controller=ctrl)
+    cfg = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
+    app = create_gateway_app(config=cfg, drain_coordinator=coord, synthetic_auth_bridge=bridge)
+    app.state.synthetic_idle_timeout = 0.05
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from kaiwen_gateway.transports.synthetic.endpoint import synthetic_websocket_endpoint
+
+    # 1. Inactive client times out and receives close code 1000
+    tok1 = verifier.issue_token(
+        provider_id="pvd",
+        tenant_id="tnt",
+        call_id="call_idle_01",
+        allowed_scopes=["voice.stream"],
+    )
+    ws1 = MagicMock()
+    ws1.app = app
+    ws1.headers = {"authorization": f"Bearer {tok1}"}
+    ws1.accept = AsyncMock()
+    ws1.send_text = AsyncMock()
+    ws1.close = AsyncMock()
+
+    async def _hang_receive() -> dict[str, Any]:
+        await asyncio.sleep(1.0)
+        return {"type": "websocket.disconnect"}
+
+    ws1.receive = _hang_receive
+
+    await synthetic_websocket_endpoint(ws1)
+
+    # Server closed with code 1000 and reason 'Session idle timeout'
+    ws1.close.assert_awaited_with(code=1000, reason="Session idle timeout")
+    assert coord.active_connections_count == 0
+    assert ctrl.snapshot().active_connections == 0
+
+    # 2. Client sending pings stays alive
+    tok2 = verifier.issue_token(
+        provider_id="pvd",
+        tenant_id="tnt",
+        call_id="call_idle_02",
+        allowed_scopes=["voice.stream"],
+    )
+    ws2 = MagicMock()
+    ws2.app = app
+    ws2.headers = {"authorization": f"Bearer {tok2}"}
+    ws2.accept = AsyncMock()
+    ws2.send_text = AsyncMock()
+    ws2.close = AsyncMock()
+
+    ping_count = 0
+
+    async def _ping_then_end() -> dict[str, Any]:
+        nonlocal ping_count
+        await asyncio.sleep(0.02)
+        if ping_count < 3:
+            ping_count += 1
+            return {
+                "type": "websocket.receive",
+                "text": json.dumps({"event": EVENT_SESSION_PING, "seq": ping_count}),
+            }
+        return {"type": "websocket.receive", "text": json.dumps({"event": EVENT_SESSION_END})}
+
+    ws2.receive = _ping_then_end
+
+    await synthetic_websocket_endpoint(ws2)
+    ws2.close.assert_awaited_with(code=1000, reason="Session ended by client")
+    assert coord.active_connections_count == 0
+    assert ctrl.snapshot().active_connections == 0
+
+
+@pytest.mark.anyio
+async def test_endpoint_and_readiness_edge_case_branches() -> None:
+    """Cover remaining edge cases: readiness missing bridge, cleanup socket exception, and cancellation after terminal."""
+    verifier = SyntheticTokenVerifier(TEST_SECRET_KEY)
+
+    # 1. Readiness endpoint when bridge is dynamically cleared (app.py:130)
+    bridge1 = SyntheticAuthBridge(verifier)
+    ctrl1 = AdmissionController()
+    coord1 = InstanceDrainCoordinator(controller=ctrl1)
+    cfg1 = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
+    app1 = create_gateway_app(config=cfg1, drain_coordinator=coord1, synthetic_auth_bridge=bridge1)
+    client1 = TestClient(app1)
+    with client1:
+        app1.state.synthetic_auth_bridge = None
+        resp = client1.get("/ready")
+        assert resp.status_code == 503
+        assert resp.json() == {"status": "unavailable", "reason": "synthetic_ingress_misconfigured"}
+
+    # 2. Cleanup socket suppresses exception if websocket.close fails (endpoint.py:156-157)
+    from unittest.mock import AsyncMock, MagicMock
+
+    from kaiwen_gateway.core.lifecycle import TerminalReason
+    from kaiwen_gateway.transports.synthetic.endpoint import synthetic_websocket_endpoint
+
+    bridge2 = SyntheticAuthBridge(verifier)
+    ctrl2 = AdmissionController()
+    coord2 = InstanceDrainCoordinator(controller=ctrl2)
+    cfg2 = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
+    app2 = create_gateway_app(config=cfg2, drain_coordinator=coord2, synthetic_auth_bridge=bridge2)
+
+    tok2 = verifier.issue_token(
+        provider_id="pvd",
+        tenant_id="tnt",
+        call_id="call_cleanup_err",
+        allowed_scopes=["voice.stream"],
+    )
+    ws2 = MagicMock()
+    ws2.app = app2
+    ws2.headers = {"authorization": f"Bearer {tok2}"}
+    ws2.accept = AsyncMock()
+    ws2.send_text = AsyncMock()
+
+    hang_evt = asyncio.Event()
+
+    async def _hang_recv() -> dict[str, Any]:
+        await hang_evt.wait()
+        return {"type": "websocket.disconnect"}
+
+    ws2.receive = _hang_recv
+    ws2.close = AsyncMock(side_effect=RuntimeError("socket failure during close"))
+
+    # Start endpoint and trigger cancellation while socket is open to exercise _cleanup_socket exception handling
+    ep_task = asyncio.create_task(synthetic_websocket_endpoint(ws2))
+    await asyncio.sleep(0.01)
+    ep_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await ep_task
+    assert coord2.active_connections_count == 0
+
+    # 3. Cancellation when supervisor is already terminal (endpoint.py:245->248)
+    class _TerminalSupervisorOnCancel:
+        def __init__(self, real: Any) -> None:
+            self._real = real
+
+        @property
+        def state(self) -> Any:
+            return self._real.state
+
+        def register_resource(self, fn: Any) -> None:
+            self._real.register_resource(fn)
+
+        async def close(self, reason: Any = None) -> None:
+            await self._real.close(reason=reason)
+
+        async def wait_closed(self) -> None:
+            await self._real.wait_closed()
+
+        async def start(self, *factories: Any) -> None:
+            # Close supervisor first before raising CancelledError
+            await self._real.close(reason=TerminalReason.NORMAL)
+            raise asyncio.CancelledError()
+
+    ctrl3 = AdmissionController()
+    coord3 = InstanceDrainCoordinator(controller=ctrl3)
+
+    class _CoordWithTerminalSup:
+        def __init__(self, real: InstanceDrainCoordinator) -> None:
+            self._real = real
+            self.state = real.state
+            self.is_stopped = real.is_stopped
+
+        async def admit_connection(self, ctx: Any) -> Any:
+            sup = await self._real.admit_connection(ctx)
+            return _TerminalSupervisorOnCancel(sup)
+
+    bridge3 = SyntheticAuthBridge(verifier)
+    tok3 = verifier.issue_token(
+        provider_id="pvd",
+        tenant_id="tnt",
+        call_id="call_term_cancel",
+        allowed_scopes=["voice.stream"],
+    )
+    ws3 = MagicMock()
+    ws3.app.state.config = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
+    ws3.app.state.drain_coordinator = _CoordWithTerminalSup(coord3)
+    ws3.app.state.synthetic_auth_bridge = bridge3
+    ws3.app.state.shutting_down = False
+    ws3.app.state.stopped = False
+    ws3.headers = {"authorization": f"Bearer {tok3}"}
+    ws3.accept = AsyncMock()
+    ws3.close = AsyncMock()
+
+    with pytest.raises(asyncio.CancelledError):
+        await synthetic_websocket_endpoint(ws3)
+    assert coord3.active_connections_count == 0

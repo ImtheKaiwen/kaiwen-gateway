@@ -8,6 +8,7 @@ Security & Trust Boundary Notes:
 - Tokens must only be transmitted in secure headers (e.g. `Authorization: Bearer <token>`);
   they must NEVER be placed in URL query strings, application logs, or trace attributes.
 - Synthetic tokens are an internal test mechanism and do NOT represent production telephony provider authentication.
+- In-memory replay protection is process-local and bounded; it does not provide distributed replay protection across multi-instance clusters.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import time
 import uuid
 from collections.abc import Iterable
@@ -68,6 +70,12 @@ class SyntheticTokenVerifier:
             raise ValueError(
                 f"Secret key must be at least {MIN_SECRET_KEY_BYTES} bytes, got {len(key_bytes)}"
             )
+        if isinstance(max_replay_entries, bool) or not isinstance(max_replay_entries, int):
+            raise ValueError("max_replay_entries must be an int")
+        if max_replay_entries < 1 or max_replay_entries > 1_000_000:
+            raise ValueError(
+                f"max_replay_entries must be between 1 and 1,000,000, got {max_replay_entries}"
+            )
         self._key = key_bytes
         self._enable_replay_protection = enable_replay_protection
         self._max_replay_entries = max_replay_entries
@@ -113,6 +121,17 @@ class SyntheticTokenVerifier:
         ref = (
             validate_provider_call_ref(provider_call_ref) if provider_call_ref is not None else None
         )
+
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, (int, float)):
+            raise ValueError("ttl_seconds must be a float or int")
+        if (
+            not math.isfinite(ttl_seconds)
+            or ttl_seconds <= 0.0
+            or ttl_seconds > MAX_TOKEN_LIFESPAN_SECONDS
+        ):
+            raise ValueError(
+                f"ttl_seconds must be a positive finite number <= {MAX_TOKEN_LIFESPAN_SECONDS}, got {ttl_seconds}"
+            )
 
         now = clock if clock is not None else time.time()
         exp = now + ttl_seconds
@@ -206,10 +225,14 @@ class SyntheticTokenVerifier:
         exp = payload["exp"]
         iat = payload["iat"]
 
-        if isinstance(exp, bool) or not isinstance(exp, (int, float)):
-            raise IdentityAuthorizationError("Synthetic token 'exp' must be a numeric timestamp")
-        if isinstance(iat, bool) or not isinstance(iat, (int, float)):
-            raise IdentityAuthorizationError("Synthetic token 'iat' must be a numeric timestamp")
+        if isinstance(exp, bool) or not isinstance(exp, (int, float)) or not math.isfinite(exp):
+            raise IdentityAuthorizationError(
+                "Synthetic token 'exp' must be a finite numeric timestamp"
+            )
+        if isinstance(iat, bool) or not isinstance(iat, (int, float)) or not math.isfinite(iat):
+            raise IdentityAuthorizationError(
+                "Synthetic token 'iat' must be a finite numeric timestamp"
+            )
 
         # Temporal ordering and bounds
         if iat > exp:
@@ -227,21 +250,7 @@ class SyntheticTokenVerifier:
         if now > exp:
             raise IdentityAuthorizationError(f"Synthetic token expired at {exp} (current: {now})")
 
-        raw_jti = payload.get("jti")
-        token_id = str(raw_jti) if raw_jti is not None and str(raw_jti) else sig_b64
-
-        # Replay protection check
-        if self._enable_replay_protection and consume:
-            if token_id in self._consumed_tokens:
-                raise IdentityAuthorizationError(
-                    "Synthetic token has already been consumed (replay detected)"
-                )
-            if len(self._consumed_tokens) >= self._max_replay_entries:
-                self._prune_expired_tokens(now)
-                if len(self._consumed_tokens) >= self._max_replay_entries:
-                    raise IdentityAuthorizationError("Token replay cache capacity exceeded")
-            self._consumed_tokens[token_id] = float(exp)
-
+        # Validate identity fields BEFORE consuming replay token
         try:
             pvd = validate_provider_id(payload["pvd"])
             tnt = validate_tenant_id(payload["tnt"])
@@ -256,6 +265,21 @@ class SyntheticTokenVerifier:
             raise IdentityAuthorizationError(
                 f"Invalid identity field in synthetic token: {exc}"
             ) from exc
+
+        raw_jti = payload.get("jti")
+        token_id = str(raw_jti) if raw_jti is not None and str(raw_jti) else sig_b64
+
+        # Replay protection check
+        if self._enable_replay_protection and consume:
+            if token_id in self._consumed_tokens:
+                raise IdentityAuthorizationError(
+                    "Synthetic token has already been consumed (replay detected)"
+                )
+            if len(self._consumed_tokens) >= self._max_replay_entries:
+                self._prune_expired_tokens(now)
+                if len(self._consumed_tokens) >= self._max_replay_entries:
+                    raise IdentityAuthorizationError("Token replay cache capacity exceeded")
+            self._consumed_tokens[token_id] = float(exp)
 
         return SyntheticTokenClaims(
             provider_id=pvd,

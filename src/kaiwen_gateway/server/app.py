@@ -126,6 +126,11 @@ async def readiness_endpoint(request: Request) -> JSONResponse:
         )
 
     if app_state.config.ingress_mode == INGRESS_MODE_SYNTHETIC:
+        if getattr(app_state, "synthetic_auth_bridge", None) is None:
+            return JSONResponse(
+                {"status": "unavailable", "reason": "synthetic_ingress_misconfigured"},
+                status_code=503,
+            )
         return JSONResponse(
             {
                 "status": "ready",
@@ -302,6 +307,10 @@ def create_gateway_app(
                 raise CoreConfigurationError(
                     "Synthetic ingress mode requires explicit authenticator and authorizer (or synthetic_auth_bridge)"
                 )
+            if not isinstance(effective_authenticator, ProviderAuthenticatorPort):
+                raise TypeError("authenticator must satisfy ProviderAuthenticatorPort")
+            if not isinstance(effective_authorizer, CallAuthorizationPort):
+                raise TypeError("authorizer must satisfy CallAuthorizationPort")
             if (
                 isinstance(effective_authenticator, SyntheticProviderAuthenticator)
                 and isinstance(effective_authorizer, SyntheticCallAuthorizer)
@@ -309,10 +318,9 @@ def create_gateway_app(
             ):
                 effective_auth_bridge = effective_authenticator._bridge
             else:
-                if not isinstance(effective_authenticator, ProviderAuthenticatorPort):
-                    raise TypeError("authenticator must satisfy ProviderAuthenticatorPort")
-                if not isinstance(effective_authorizer, CallAuthorizationPort):
-                    raise TypeError("authorizer must satisfy CallAuthorizationPort")
+                raise CoreConfigurationError(
+                    "Synthetic ingress requires authenticator and authorizer belonging to the same SyntheticAuthBridge"
+                )
     else:
         # Disabled ingress mode
         if effective_authenticator is not None and not isinstance(
