@@ -31,7 +31,7 @@ def test_public_api_surface_is_minimal() -> None:
     unexported_public_objects = [
         name
         for name in dir(kaiwen_gateway)
-        if not name.startswith("_") and name not in {"Final", "core"}
+        if not name.startswith("_") and name not in {"Final", "core", "server"}
     ]
     assert unexported_public_objects == []
 
@@ -59,7 +59,14 @@ def test_runtime_dependencies_remain_empty() -> None:
     """Development tools must not leak into mandatory package runtime dependencies."""
     pyproject_data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert pyproject_data["project"]["dependencies"] == []
-    assert importlib.metadata.requires("kaiwen-gateway") is None
+    assert "server" in pyproject_data["project"]["optional-dependencies"]
+    reqs = importlib.metadata.requires("kaiwen-gateway")
+    mandatory_reqs = [r for r in (reqs or []) if "extra ==" not in r]
+    assert mandatory_reqs == []
+    optional_reqs = [r for r in (reqs or []) if "extra ==" in r]
+    assert len(optional_reqs) == 2
+    for r in optional_reqs:
+        assert "server" in r and "extra ==" in r
 
 
 def test_import_has_no_runtime_side_effects_in_isolated_subprocess(tmp_path: Path) -> None:
