@@ -178,6 +178,23 @@ uv run --locked --group dev pytest -q --cov=kaiwen_gateway --cov-report=term-mis
 uv build
 ```
 
+### Local development ASGI host runtime (M3.1)
+
+With development dependencies installed (`uv sync --group dev`), the instance-scoped ASGI server foundation can be run locally on the loopback interface:
+
+```bash
+# Run local development ASGI server on 127.0.0.1:8000
+uv run --group dev python -m kaiwen_gateway.server
+# Alternatively, using uvicorn factory invocation:
+uv run --group dev uvicorn kaiwen_gateway.server:create_gateway_app --factory --host 127.0.0.1 --port 8000
+```
+
+**Operational and security boundaries:**
+- **Loopback binding only:** Binds strictly to `127.0.0.1:8000`; never bind to public `0.0.0.0` or deploy without a production reverse proxy and TLS boundary.
+- **Liveness (`GET /health`):** Returns `200 OK` (`{"status": "ok", "instance": "<name>"}`) when the ASGI host process is viable.
+- **Readiness (`GET /ready`):** Returns `503 Service Unavailable` (`{"status": "unavailable", "reason": "ingress_disabled"}`) because external media ingress remains disabled fail-closed by default in `CoreConfig` (`ingress_mode="disabled"`).
+- **WebSocket ingress disabled:** Connection attempts to WebSocket routes are immediately closed without being accepted (`code 1008`). Concrete synthetic telephony ingress is deferred to M3.2+.
+
 For architecture and milestone tracking:
 
 1. Read [`ROADMAP.md`](ROADMAP.md) and [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the V1 scope, milestones, and acceptance gates.
