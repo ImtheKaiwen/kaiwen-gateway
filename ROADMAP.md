@@ -61,7 +61,7 @@ Use only these milestone status values:
 | **M0** | Documentation baseline and approval | `Complete` (closed 2026-11-01; commits `d422350`, `27ab0f9`, `4a8fe82`) | Maintainer review |
 | **M1** | Python package and CI foundation | `Complete` (M1.1 merged in `#1` / `b0a666e`; M1.2 merged in `#2` / `9c0293c`; M1.3 merged in `#3` / `1355b0c` & verified on `main` run `41263309448`; M1.4A merged in `#4` / `32111a4` & verified on `main` run `41264905664` + Dependabot runs `41264912866`, `41264912883`; M1.4B.1 `main` branch protection enabled & verified via GitHub API) | M0 |
 | **M2** | Core contracts, identity and security/admission | `In progress` (M2.1 merged in `#9` / `68030a0`; M2.2A merged in `#10` / `f65ad6d`; M2.2B merged in `#11` / `705091e`; M2.3 merged in `#12` / `192ec9b`; M2.4A merged in `#13` / `cd835bf`; M2.4B merged in `#14` / `ade73ec`; remaining M2 exit criteria under evaluation) | M1 |
-| **M3** | ASGI/WSS ingress and synthetic telephony adapter | `In progress` (M3.1 merged in `#15` / `224284f`; M3.2A local authenticated synthetic WebSocket ingress vertical slice implemented and verified in `feat/m3-synthetic-wss`; M3.2B/M3.3 pending) | M2 |
+| **M3** | ASGI/WSS ingress and synthetic telephony adapter | `In progress` (M3.1 merged in `#15` / `224284f`; M3.2A merged in `#16` / `558bd95`; M3.2B Draft PR stage in `feat/m3-synthetic-telephony`; M3.3 not started) | M2 |
 | **M4** | Voice audio bridge and Kaiwen Agent integration | `Not started` | M3 |
 | **M5** | Resilience, simulation, security and load evidence | `Not started` | M4 |
 | **M6** | Alpha packaging and release-readiness review | `Not started` | M5 |
@@ -141,13 +141,15 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 **Deliverables**
 
-- [ ] Optional ASGI host and CLI configuration/start path; CLI names selected and verified in tests (M3.1 local runnable ASGI foundation in `src/kaiwen_gateway/server/` with `create_gateway_app`, `lifespan`, `/health`, `/ready`, and local loopback entrypoint; synthetic WSS ingress and CLI commands pending in M3.2/M3.3).
-- [ ] Versioned synthetic WSS endpoint contract and telephony adapter port.
-- [ ] **Project-owned fake telephony wire protocol**, explicitly named synthetic in code, examples and tests.
-- [ ] Authenticated WSS handshake, per-connection identity binding, input schema/frame-size validation and rejection before upstream allocation.
-- [ ] Connection close/error mapping, request/resource limits, idle handling as relevant to current scope.
-- [ ] Synthetic WSS test client and basic handshake/security/integration tests.
-- [ ] Documented boundary between public WSS/TLS deployment requirements and local in-process test transport.
+- [x] Optional ASGI host and CLI configuration/start path; CLI names selected and verified in tests (M3.1 merged in `#15` / `224284f`).
+- [x] Authenticated synthetic WSS ingress vertical slice with token verification, instance-scoped admission, and active call exclusivity (M3.2A merged in `#16` / `558bd95`).
+- [x] Versioned synthetic WSS endpoint contract, provider-neutral telephony control port, and synthetic telephony adapter (M3.2B local implementation in `src/kaiwen_gateway/transports/` on `feat/m3-synthetic-telephony`).
+- [x] **Project-owned fake telephony wire protocol**, explicitly named synthetic in code, examples and tests (`call.start`, `call.started`, `call.end`, `call.ended`, ping/pong).
+- [ ] Comprehensive CLI and synthetic WSS runner / soak integration (M3.3 not started).
+- [x] Authenticated WSS handshake, per-connection identity binding, input schema/frame-size validation and rejection before upstream allocation.
+- [x] Connection close/error mapping, request/resource limits, idle handling as relevant to current scope.
+- [x] Synthetic WSS test client and basic handshake/security/integration tests.
+- [x] Documented boundary between public WSS/TLS deployment requirements and local in-process test transport.
 
 **Exit evidence:** Unauthorized handshakes fail safely; fake transport connects; malformed/oversized input is rejected; no AI provider session is created before authorization; generated/written synthetic contract matches tests; clean-wheel CLI/app smoke test.
 
