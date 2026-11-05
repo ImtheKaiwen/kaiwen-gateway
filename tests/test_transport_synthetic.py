@@ -1987,9 +1987,18 @@ async def test_handshake_cancellation_and_failure_boundaries() -> None:
     ws2e.headers = {"authorization": f"Bearer {_token('call_c2e')}"}
     ws2e.accept = AsyncMock()
     ws2e.close = AsyncMock()
+    ws2e.send_text = AsyncMock()
+
+    phase2e_started = asyncio.Event()
+
+    async def _hang_2e_recv() -> Any:
+        phase2e_started.set()
+        await asyncio.Event().wait()
+
+    ws2e.receive = AsyncMock(side_effect=_hang_2e_recv)
 
     t_rep = asyncio.create_task(synthetic_websocket_endpoint(ws2e))
-    await asyncio.sleep(0.01)
+    await phase2e_started.wait()
     t_rep.cancel()
     t_rep.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -2242,7 +2251,7 @@ async def test_idle_timeout_and_ping_keepalive() -> None:
     coord = InstanceDrainCoordinator(controller=ctrl)
     cfg = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
     app = create_gateway_app(config=cfg, drain_coordinator=coord, synthetic_auth_bridge=bridge)
-    app.state.synthetic_idle_timeout = 0.05
+    app.state.synthetic_idle_timeout = 0.20
 
     from unittest.mock import AsyncMock, MagicMock
 
@@ -2293,7 +2302,7 @@ async def test_idle_timeout_and_ping_keepalive() -> None:
 
     async def _ping_then_end() -> dict[str, Any]:
         nonlocal ping_count
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.01)
         if ping_count < 3:
             ping_count += 1
             return {
