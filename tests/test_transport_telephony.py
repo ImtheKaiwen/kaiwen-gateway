@@ -505,6 +505,29 @@ def test_protocol_framing_call_start_and_end() -> None:
         parse_and_validate_client_frame(
             json.dumps({"event": "call.start", "metadata": {"num": float("inf")}})
         )
+
+    # Numeric overflow: Rejection of non-finite float literals (1e999, -1e999)
+    with pytest.raises(InvalidJsonError, match="Non-finite numeric value"):
+        parse_and_validate_client_frame('{"event": "call.start", "metadata": {"val": 1e999}}')
+    with pytest.raises(InvalidJsonError, match="Non-finite numeric value"):
+        parse_and_validate_client_frame('{"event": "call.start", "metadata": {"val": -1e999}}')
+    with pytest.raises(InvalidJsonError, match="Non-finite numeric value"):
+        parse_and_validate_client_frame('{"event": "call.start", "metadata": {"val": 1e500}}')
+    with pytest.raises(InvalidJsonError, match="Non-finite numeric value"):
+        parse_and_validate_client_frame('{"event": "call.start", "metadata": {"val": -1e500}}')
+
+    # Valid metadata types (finite float, int, bool, str) pass validation
+    valid_frame = parse_and_validate_client_frame(
+        '{"event": "call.start", "metadata": {"int": 42, "float": 3.14, "exp": 1e-5, "neg": -10.5, "flag": true, "text": "hello"}}'
+    )
+    assert valid_frame["metadata"] == {
+        "int": 42,
+        "float": 3.14,
+        "exp": 1e-5,
+        "neg": -10.5,
+        "flag": True,
+        "text": "hello",
+    }
     with pytest.raises(InvalidMessageFormatError, match="Metadata string values must be <= 256"):
         parse_and_validate_client_frame(
             json.dumps({"event": "call.start", "metadata": {"long": "x" * 257}})
@@ -941,6 +964,59 @@ async def test_real_loopback_telephony_unsupported_event_rejection_bounded_close
             assert unknown_event not in close_reason
 
     # 4. Clean resource reclamation
+    assert ctrl.snapshot().active_connections == 0
+    assert coord.active_connections_count == 0
+    assert len(bridge._active_calls) == 0
+
+
+@pytest.mark.parametrize("overflow_literal", ["1e999", "-1e999", "1e500"])
+@pytest.mark.anyio
+async def test_real_loopback_telephony_numeric_overflow_rejected_with_1007(
+    overflow_literal: str,
+) -> None:
+    """Verify JSON numeric overflow in call metadata is rejected fail-closed with WebSocket code 1007."""
+    port = _get_free_port()
+    verifier = SyntheticTokenVerifier(TEST_SECRET_KEY)
+    bridge = SyntheticAuthBridge(verifier)
+    ctrl = AdmissionController()
+    coord = InstanceDrainCoordinator(controller=ctrl)
+    cfg = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
+    app = create_gateway_app(config=cfg, drain_coordinator=coord, synthetic_auth_bridge=bridge)
+
+    token = verifier.issue_token(
+        provider_id="carrier_overflow",
+        tenant_id="tenant_num_overflow",
+        call_id=f"call_{uuid.uuid4().hex[:8]}",
+        allowed_scopes=["voice.stream"],
+    )
+
+    async with _run_server(app, port) as ws_base_url:
+        ws_url = f"{ws_base_url}{SYNTHETIC_WS_ENDPOINT_PATH}"
+        headers = {"Authorization": f"Bearer {token}"}
+
+        async with websockets.connect(ws_url, additional_headers=headers) as ws:
+            # 1. Establish session
+            ready_raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+            ready_data = json.loads(ready_raw)
+            assert ready_data["event"] == EVENT_SESSION_READY
+            assert ctrl.snapshot().active_connections == 1
+
+            # 2. Send call.start with non-finite numeric overflow literal
+            raw_overflow_frame = (
+                f'{{"event": "call.start", "metadata": {{"overflow_key": {overflow_literal}}}}}'
+            )
+            await ws.send(raw_overflow_frame)
+
+            # 3. Connection must be closed with 1007 (Invalid Frame Payload)
+            with pytest.raises(websockets.exceptions.ConnectionClosed) as exc_info:
+                await ws.recv()
+
+            assert exc_info.value.rcvd is not None
+            assert exc_info.value.rcvd.code == 1007
+            assert "Non-finite numeric value" in exc_info.value.rcvd.reason
+            assert len(exc_info.value.rcvd.reason.encode("utf-8")) <= 123
+
+    # 4. Capacity and registry cleanly returned to zero
     assert ctrl.snapshot().active_connections == 0
     assert coord.active_connections_count == 0
     assert len(bridge._active_calls) == 0

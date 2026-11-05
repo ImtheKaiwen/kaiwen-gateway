@@ -26,7 +26,7 @@ In accordance with [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) and [`AGENTS.md`](.
 - **Frame type:** **Text frames only** (`Opcode 1`), containing UTF-8 encoded JSON.
 - **Binary frames:** Strictly forbidden; receiving a binary frame terminates the connection immediately with WebSocket close code `1003` (`Unsupported Data`).
 - **Maximum frame size:** 64 KiB (`65,536 bytes`). Frames exceeding this limit are rejected immediately with WebSocket close code `1009` (`Message Too Big`).
-- **Strict JSON conformance (RFC 8259):** Non-standard JSON constants (`NaN`, `Infinity`, `-Infinity`) are strictly forbidden and rejected with close code `1007` (`Invalid Frame Payload`).
+- **Strict JSON conformance (RFC 8259):** Non-standard JSON constants (`NaN`, `Infinity`, `-Infinity`) as well as non-finite numeric overflow literals (`1e999`, `-1e999`, or exponents exceeding finite IEEE 754 float range) are strictly forbidden and rejected with close code `1007` (`Invalid Frame Payload`).
 - **Close reason size limit (RFC 6455 §5.5):** All WebSocket close reason strings emitted by the gateway are strictly bounded to at most 123 UTF-8 bytes to guarantee compliance with the 125-byte control frame payload limit. Client-controlled event names are never reflected into close reasons.
 
 ---
@@ -57,21 +57,25 @@ The token is verified by `SyntheticTokenVerifier` using HMAC-SHA256 (`<payload_b
   - `iat` (float): Unix epoch timestamp of token issuance (wall-clock time).
   - `exp` (float): Unix epoch timestamp of token expiration (wall-clock time).
 - **Optional claims:**
-  - `tid` (str): Unique token identifier used for optional single-use replay protection cache.
+  - `jti` (str): Unique token identifier (JWT ID) used for single-use replay protection cache. If omitted or empty, the base64-encoded token signature (`sig_b64`) is used as the signature-derived token identifier fallback.
   - `ref` (str): Optional provider call reference.
 - **Temporal validation rules:**
   - Evaluated against wall-clock Unix epoch time (`time.time()`).
-  - Bounded clock skew tolerance: `MAX_CLOCK_SKEW_SECONDS = 30.0` (both `iat <= now + 30.0` and `now <= exp + 30.0`).
-  - Lifetime check: `exp >= iat` and maximum lifetime `exp - iat <= 3600.0` (1 hour).
-  - Replay cache: If enabled, unique `tid` is recorded upon admission to prevent replay.
+  - Future issuance skew tolerance: `MAX_FUTURE_SKEW_SECONDS = 30.0` (`now >= iat - 30.0`, i.e., `iat <= now + 30.0`).
+  - Strict expiration check: `now > exp` is rejected immediately (there is no post-expiration clock skew tolerance; expired tokens fail closed).
+  - Lifetime check: `exp >= iat` and maximum validity `exp - iat <= 3600.0` (1 hour).
+  - Replay protection: Single-use token tracking is strictly process-local (in-memory dictionary bounded by `max_replay_entries`) and does not provide distributed replay protection across multi-instance clusters.
   - Note: `nbf` (not-before) is not defined or required in the synthetic v1 token schema.
 
 ### 3.2 Pre-Admission Handshake Policy
-1. If the `Authorization` header is missing, malformed, or carries an expired/forged token or lacks required scopes, the handshake is rejected with WebSocket close code `1008` (`Policy Violation`).
+1. If the `Authorization` header is missing, malformed, or carries an expired/forged token or lacks required scopes, the handshake is rejected with policy violation (close code `1008`).
 2. If the token is valid, the Gateway checks `AdmissionController`:
    - If capacity is exhausted or the instance is draining, the server rejects the connection with close code `1008` (`Admission rejected`) **before** the WebSocket handshake is accepted.
 3. If admitted, the server registers `(tenant_id, call_id)` exclusivity:
    - A concurrent inbound connection with an active duplicate `(tenant_id, call_id)` is rejected with close code `1008` (`Call session already active`).
+
+> [!NOTE]
+> **Pre-Accept Handshake Wire Behavior:** In ASGI implementations, rejections occurring during the initial upgrade handshake (such as missing/invalid tokens or admission rejection prior to `websocket.accept()`) are terminated before the WebSocket connection is established. On the network wire, clients typically observe this as an HTTP 403 Forbidden handshake response failure rather than an established WebSocket 1008 close frame.
 
 ---
 

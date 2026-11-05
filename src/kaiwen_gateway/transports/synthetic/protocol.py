@@ -10,6 +10,7 @@ Invariants:
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Final
 
 SYNTHETIC_WS_ENDPOINT_PATH: Final[str] = "/ws/synthetic/v1"
@@ -81,12 +82,19 @@ def _reject_json_constant(constant: str) -> None:
     raise ValueError(f"Non-standard JSON constant {constant!r} not permitted")
 
 
+def _strict_parse_float(value_str: str) -> float:
+    val = float(value_str)
+    if not math.isfinite(val):
+        raise ValueError(f"Non-finite numeric value {value_str!r} not permitted")
+    return val
+
+
 def parse_and_validate_client_frame(raw_text: str) -> dict[str, Any]:
     """Parse and validate an inbound client control frame against v1 synthetic protocol rules.
 
     Raises:
         OversizedMessageError: If frame byte length exceeds 64 KiB.
-        InvalidJsonError: If frame cannot be parsed as valid JSON (or contains NaN/Infinity).
+        InvalidJsonError: If frame cannot be parsed as valid JSON (or contains NaN/Infinity/non-finite numbers).
         InvalidMessageFormatError: If frame is not a dictionary or lacks 'event' or contains invalid fields.
         UnsupportedEventError: If event name is not recognized in synthetic v1 protocol.
     """
@@ -95,7 +103,11 @@ def parse_and_validate_client_frame(raw_text: str) -> dict[str, Any]:
         raise OversizedMessageError(len(raw_bytes))
 
     try:
-        payload = json.loads(raw_text, parse_constant=_reject_json_constant)
+        payload = json.loads(
+            raw_text,
+            parse_constant=_reject_json_constant,
+            parse_float=_strict_parse_float,
+        )
     except Exception as exc:
         raise InvalidJsonError(str(exc)) from exc
 
