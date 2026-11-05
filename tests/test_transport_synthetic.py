@@ -1206,7 +1206,7 @@ async def test_endpoint_worker_cancellation_and_error_handling() -> None:
 
     with pytest.raises(RuntimeError, match="Start failed"):
         await synthetic_websocket_endpoint(ws_start_fail)
-    mock_sup.close.assert_awaited_once_with(reason=TerminalReason.NORMAL)
+    mock_sup.close.assert_awaited_once_with(reason=TerminalReason.STARTUP_FAILED)
 
     # Test 7: supervisor already terminal when session_worker enters finally
     ws_term = MagicMock()
@@ -2666,3 +2666,108 @@ async def test_synthetic_secure_configuration_enforcement() -> None:
     ws_bad_replay.close.assert_awaited_once_with(
         code=1008, reason="Synthetic ingress security policy misconfigured"
     )
+
+
+@pytest.mark.anyio
+async def test_supervisor_startup_failure_uses_startup_failed_and_releases_lease() -> None:
+    """Task 3: Verify supervisor.start unexpected failure sets STARTUP_FAILED and releases lease."""
+    verifier = SyntheticTokenVerifier(TEST_SECRET_KEY)
+    bridge = SyntheticAuthBridge(verifier)
+    ctrl = AdmissionController()
+    coord = InstanceDrainCoordinator(controller=ctrl)
+    cfg = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
+    app = create_gateway_app(config=cfg, drain_coordinator=coord, synthetic_auth_bridge=bridge)
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from kaiwen_gateway.core.lifecycle import ConnectionState, ConnectionSupervisor, TerminalReason
+    from kaiwen_gateway.transports.synthetic.endpoint import synthetic_websocket_endpoint
+
+    tok = verifier.issue_token(
+        provider_id="pvd",
+        tenant_id="tnt",
+        call_id="call_startup_fail_01",
+        allowed_scopes=["voice.stream"],
+    )
+
+    real_sup: ConnectionSupervisor | None = None
+
+    class _FailingStartupSupervisor:
+        def __init__(self, real: ConnectionSupervisor) -> None:
+            nonlocal real_sup
+            self._real = real
+            real_sup = real
+
+        @property
+        def state(self) -> ConnectionState:
+            return self._real.state
+
+        @property
+        def outcome(self) -> Any:
+            return self._real.outcome
+
+        def register_resource(self, fn: Any) -> None:
+            self._real.register_resource(fn)
+
+        async def start(self, *factories: Any) -> None:
+            raise RuntimeError("Simulated unexpected supervisor worker startup crash")
+
+        async def wait_closed(self) -> None:
+            await self._real.wait_closed()
+
+        async def close(self, reason: Any = None) -> Any:
+            return await self._real.close(reason=reason)
+
+    class _InterceptingCoord(InstanceDrainCoordinator):
+        def __init__(self, real: InstanceDrainCoordinator) -> None:
+            super().__init__(controller=real.controller, policy=real.policy)
+            self._real = real
+
+        async def admit_connection(
+            self,
+            context: Any,
+            *,
+            supervisor_policy: Any = None,
+        ) -> ConnectionSupervisor:
+            sup: ConnectionSupervisor = await self._real.admit_connection(
+                context, supervisor_policy=supervisor_policy
+            )
+            return _FailingStartupSupervisor(sup)  # type: ignore[return-value]
+
+    app.state.drain_coordinator = _InterceptingCoord(coord)
+
+    ws = MagicMock()
+    ws.app = app
+    ws.headers = {"authorization": f"Bearer {tok}"}
+    ws.accept = AsyncMock()
+    ws.close = AsyncMock()
+    ws.send_text = AsyncMock()
+
+    # 1. Execution must re-raise the original RuntimeError (preserving exception cause)
+    with pytest.raises(RuntimeError, match="Simulated unexpected supervisor worker startup crash"):
+        await synthetic_websocket_endpoint(ws)
+
+    # 2. Socket was closed with 1011
+    ws.close.assert_awaited_once_with(code=1011, reason="Worker startup failed")
+
+    # 3. Exactly one real Core supervisor was admitted
+    assert real_sup is not None
+    assert isinstance(real_sup, ConnectionSupervisor)
+
+    # 4. Supervisor outcome is STARTUP_FAILED (not NORMAL!)
+    assert real_sup.state.is_terminal is True
+    assert real_sup.outcome is not None
+    assert real_sup.outcome.state == ConnectionState.FAILED
+    assert real_sup.outcome.reason == TerminalReason.STARTUP_FAILED
+
+    # 5. Capacity lease was released
+    assert coord.active_connections_count == 0
+    assert ctrl.snapshot().active_connections == 0
+
+    # 6. Active call registry was cleaned up
+    assert len(bridge._active_calls) == 0
+
+    # 7. Repeated close on already terminal supervisor is idempotent
+    second_outcome = await real_sup.close()
+    assert second_outcome.state == ConnectionState.FAILED
+    assert second_outcome.reason == TerminalReason.STARTUP_FAILED

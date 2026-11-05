@@ -9,6 +9,11 @@ Provides a test-only, versioned, and authenticated WebSocket transport vertical 
 
 from __future__ import annotations
 
+from kaiwen_gateway.transports.synthetic.adapter import (
+    SUPPORTED_TELEPHONY_CAPABILITIES,
+    UNSUPPORTED_TELEPHONY_CAPABILITIES,
+    SyntheticTelephonyAdapter,
+)
 from kaiwen_gateway.transports.synthetic.auth import (
     SyntheticAuthBridge,
     SyntheticCallAuthorizer,
@@ -16,6 +21,10 @@ from kaiwen_gateway.transports.synthetic.auth import (
 )
 from kaiwen_gateway.transports.synthetic.endpoint import synthetic_websocket_endpoint
 from kaiwen_gateway.transports.synthetic.protocol import (
+    EVENT_CALL_END,
+    EVENT_CALL_ENDED,
+    EVENT_CALL_START,
+    EVENT_CALL_STARTED,
     EVENT_SESSION_END,
     EVENT_SESSION_PING,
     EVENT_SESSION_PONG,
@@ -36,6 +45,10 @@ from kaiwen_gateway.transports.synthetic.tokens import (
 )
 
 __all__ = [
+    "EVENT_CALL_END",
+    "EVENT_CALL_ENDED",
+    "EVENT_CALL_START",
+    "EVENT_CALL_STARTED",
     "EVENT_SESSION_END",
     "EVENT_SESSION_PING",
     "EVENT_SESSION_PONG",
@@ -44,14 +57,17 @@ __all__ = [
     "InvalidMessageFormatError",
     "MAX_FRAME_SIZE_BYTES",
     "OversizedMessageError",
+    "SUPPORTED_TELEPHONY_CAPABILITIES",
     "SYNTHETIC_PROTOCOL_VERSION",
     "SYNTHETIC_WS_ENDPOINT_PATH",
     "SyntheticAuthBridge",
     "SyntheticCallAuthorizer",
     "SyntheticProtocolError",
     "SyntheticProviderAuthenticator",
+    "SyntheticTelephonyAdapter",
     "SyntheticTokenClaims",
     "SyntheticTokenVerifier",
+    "UNSUPPORTED_TELEPHONY_CAPABILITIES",
     "UnsupportedEventError",
     "parse_and_validate_client_frame",
     "synthetic_websocket_endpoint",

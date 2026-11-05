@@ -15,14 +15,21 @@ from kaiwen_gateway.core.exceptions import (
     InstanceDrainingError,
 )
 from kaiwen_gateway.core.lifecycle import ConnectionState, ConnectionSupervisor, TerminalReason
+from kaiwen_gateway.transports.synthetic.adapter import SyntheticTelephonyAdapter
 from kaiwen_gateway.transports.synthetic.auth import SyntheticAuthBridge
 from kaiwen_gateway.transports.synthetic.protocol import (
+    EVENT_SESSION_END,
     EVENT_SESSION_PING,
     EVENT_SESSION_PONG,
     EVENT_SESSION_READY,
     SYNTHETIC_PROTOCOL_VERSION,
+    InvalidMessageFormatError,
     SyntheticProtocolError,
     parse_and_validate_client_frame,
+)
+from kaiwen_gateway.transports.telephony import (
+    InvalidCallStateTransitionError,
+    UnsupportedOperationError,
 )
 
 try:
@@ -192,10 +199,11 @@ async def synthetic_websocket_endpoint(websocket: WebSocket) -> None:
                 supervisor_closed = True
             return
 
-        # 9. Supervised session worker coroutine
+        # 9. Supervised session worker coroutine & instance-scoped telephony adapter
         idle_timeout = float(
             getattr(app_state, "synthetic_idle_timeout", DEFAULT_IDLE_TIMEOUT_SECONDS)
         )
+        telephony_adapter = SyntheticTelephonyAdapter(verified_context)
 
         async def _session_worker() -> None:
             nonlocal socket_disconnected
@@ -225,7 +233,7 @@ async def synthetic_websocket_endpoint(websocket: WebSocket) -> None:
                         socket_disconnected = True
                         break
 
-                    # Reject binary frames (voice audio streaming is not accepted in M3.2A)
+                    # Reject binary frames (voice audio streaming is not accepted in M3.2A/B)
                     if "bytes" in message and message["bytes"] is not None:
                         await _close_socket(code=1003, reason="Binary frames not supported")
                         break
@@ -247,10 +255,27 @@ async def synthetic_websocket_endpoint(websocket: WebSocket) -> None:
                         if "seq" in payload:
                             pong["seq"] = payload["seq"]
                         await websocket.send_text(json.dumps(pong, separators=(",", ":")))
-                    else:
+                    elif event_name == EVENT_SESSION_END:
                         # Client requested graceful termination (EVENT_SESSION_END)
+                        telephony_adapter.terminate_call_on_transport_close(reason="session_ended")
                         await _close_socket(code=1000, reason="Session ended by client")
                         break
+                    else:
+                        try:
+                            _domain_evt, response_frame = telephony_adapter.handle_wire_event(
+                                payload
+                            )
+                        except (
+                            InvalidCallStateTransitionError,
+                            UnsupportedOperationError,
+                        ) as tel_err:
+                            await _close_socket(code=1008, reason=str(tel_err))
+                            break
+                        except InvalidMessageFormatError as fmt_err:
+                            await _close_socket(code=fmt_err.close_code, reason=str(fmt_err))
+                            break
+
+                        await websocket.send_text(json.dumps(response_frame, separators=(",", ":")))
 
             except asyncio.CancelledError:
                 raise
@@ -263,9 +288,23 @@ async def synthetic_websocket_endpoint(websocket: WebSocket) -> None:
                 except Exception:
                     pass
                 raise
+            finally:
+                telephony_adapter.terminate_call_on_transport_close(reason="transport_closed")
 
         # 10. Start supervised worker and await its termination
-        await supervisor.start(_session_worker)
+        try:
+            await supervisor.start(_session_worker)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            try:
+                await _close_socket(code=1011, reason="Worker startup failed")
+            except Exception:
+                pass
+            await asyncio.shield(supervisor.close(reason=TerminalReason.STARTUP_FAILED))
+            supervisor_closed = True
+            raise
+
         await supervisor.wait_closed()
 
     except asyncio.CancelledError:
@@ -276,5 +315,5 @@ async def synthetic_websocket_endpoint(websocket: WebSocket) -> None:
         raise
     finally:
         # 11. Ensure active call unregistration and supervisor terminal closure
-        if supervisor is not None and not supervisor_closed and not supervisor.state.is_terminal:
+        if supervisor is not None and not supervisor_closed:
             await asyncio.shield(supervisor.close(reason=TerminalReason.NORMAL))
