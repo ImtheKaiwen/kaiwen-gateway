@@ -72,11 +72,9 @@ class InvalidMessageFormatError(SyntheticProtocolError):
 class UnsupportedEventError(SyntheticProtocolError):
     """Raised when an inbound message specifies an unknown or unsupported event name."""
 
-    def __init__(self, event_name: str) -> None:
-        super().__init__(
-            f"Unsupported event type {event_name!r}; allowed: {sorted(SUPPORTED_CLIENT_EVENTS)}",
-            close_code=1008,
-        )
+    def __init__(self, event_name: str | None = None) -> None:
+        super().__init__("Unsupported event type", close_code=1008)
+        self.event_name = event_name
 
 
 def _reject_json_constant(constant: str) -> None:

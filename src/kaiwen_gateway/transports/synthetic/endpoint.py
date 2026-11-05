@@ -141,7 +141,9 @@ async def synthetic_websocket_endpoint(websocket: WebSocket) -> None:
         nonlocal socket_closed
         if socket_closed or socket_disconnected:
             return
-        await websocket.close(code=code, reason=reason)
+        # RFC 6455 §5.5: WebSocket close frame reason payload must not exceed 123 UTF-8 bytes
+        safe_reason = reason.encode("utf-8")[:123].decode("utf-8", "ignore")
+        await websocket.close(code=code, reason=safe_reason)
         socket_closed = True
 
     # Register resource cleanup callback so supervisor owns socket & call cleanup

@@ -59,6 +59,7 @@ from kaiwen_gateway.transports.telephony import (
     TelephonyCallEndedEvent,
     TelephonyCallStartedEvent,
     TelephonyCallState,
+    TelephonyControlEvent,
     TelephonyControlPort,
     UnsupportedOperationError,
 )
@@ -115,6 +116,10 @@ def _make_context(
 
 def _get_call_state(adapter: SyntheticTelephonyAdapter) -> TelephonyCallState:
     return adapter.call_state
+
+
+def _get_last_event(adapter: SyntheticTelephonyAdapter) -> TelephonyControlEvent | None:
+    return adapter.last_event
 
 
 # ==============================================================================
@@ -194,6 +199,7 @@ def test_synthetic_telephony_adapter_initialization_and_capabilities() -> None:
     assert adapter.call_id == "c_100"
     assert adapter.call_state == TelephonyCallState.IDLE
     assert adapter.stream_id is None
+    assert adapter.last_event is None
 
     # Capabilities
     assert adapter.supported_capabilities == SUPPORTED_TELEPHONY_CAPABILITIES
@@ -226,6 +232,7 @@ def test_synthetic_telephony_adapter_happy_path_transitions() -> None:
     assert evt1.metadata == {"custom_tag": "test_tag"}
     assert _get_call_state(adapter) == TelephonyCallState.CONNECTED
     assert adapter.stream_id == "stream_abc"
+    assert _get_last_event(adapter) is evt1
 
     assert resp1["event"] == EVENT_CALL_STARTED
     assert resp1["call_id"] == "c_lifecycle"
@@ -244,17 +251,88 @@ def test_synthetic_telephony_adapter_happy_path_transitions() -> None:
     assert evt2.reason == "customer_hangup"
     assert evt2.code == 200
     assert _get_call_state(adapter) == TelephonyCallState.DISCONNECTED
+    assert _get_last_event(adapter) is evt2
 
     assert resp2["event"] == EVENT_CALL_ENDED
     assert resp2["call_id"] == "c_lifecycle"
     assert resp2["state"] == "disconnected"
     assert resp2["reason"] == "customer_hangup"
+    assert resp2["code"] == 200
 
-    # 3. Duplicate call.end is idempotent
+    # 3. Duplicate call.end is idempotent (domain event is None to avoid duplicate dispatch)
     evt3, resp3 = adapter.handle_wire_event(end_payload)
-    assert isinstance(evt3, TelephonyCallEndedEvent)
+    assert evt3 is None
     assert _get_call_state(adapter) == TelephonyCallState.DISCONNECTED
     assert resp3["idempotent"] is True
+    assert resp3["code"] == 200
+    assert resp3["reason"] == "customer_hangup"
+
+
+def test_synthetic_telephony_adapter_duplicate_end_preserves_initial_params() -> None:
+    """Verify duplicate call.end returns None for domain event and preserves initial reason/code."""
+    ctx = _make_context(call_id="c_dup_params")
+    adapter = SyntheticTelephonyAdapter(ctx)
+
+    adapter.handle_wire_event({"event": EVENT_CALL_START})
+    assert adapter.call_state == TelephonyCallState.CONNECTED
+
+    # First call.end with initial reason and code
+    evt1, resp1 = adapter.handle_wire_event(
+        {"event": EVENT_CALL_END, "reason": "initial_hangup", "code": 16}
+    )
+    assert isinstance(evt1, TelephonyCallEndedEvent)
+    assert evt1.reason == "initial_hangup"
+    assert evt1.code == 16
+    assert resp1["reason"] == "initial_hangup"
+    assert resp1["code"] == 16
+    assert resp1.get("idempotent") is None
+
+    # Duplicate call.end with different reason and code preserves initial values
+    evt2, resp2 = adapter.handle_wire_event(
+        {"event": EVENT_CALL_END, "reason": "subsequent_hangup", "code": 99}
+    )
+    assert evt2 is None
+    assert resp2["event"] == EVENT_CALL_ENDED
+    assert resp2["call_id"] == "c_dup_params"
+    assert resp2["state"] == TelephonyCallState.DISCONNECTED.value
+    assert resp2["reason"] == "initial_hangup"
+    assert resp2["code"] == 16
+    assert resp2["idempotent"] is True
+
+    # If initial call.end had no code, duplicate response also omits code
+    ctx2 = _make_context(call_id="c_dup_no_code")
+    adapter2 = SyntheticTelephonyAdapter(ctx2)
+    adapter2.handle_wire_event({"event": EVENT_CALL_START})
+    evt_a, resp_a = adapter2.handle_wire_event(
+        {"event": EVENT_CALL_END, "reason": "no_code_hangup"}
+    )
+    assert isinstance(evt_a, TelephonyCallEndedEvent)
+    assert evt_a.code is None
+    assert "code" not in resp_a
+
+    evt_b, resp_b = adapter2.handle_wire_event(
+        {"event": EVENT_CALL_END, "reason": "diff", "code": 42}
+    )
+    assert evt_b is None
+    assert resp_b["reason"] == "no_code_hangup"
+    assert "code" not in resp_b
+    assert resp_b["idempotent"] is True
+
+
+def test_synthetic_telephony_adapter_duplicate_end_without_prior_event() -> None:
+    """Verify fallback when disconnected state lacks prior TelephonyCallEndedEvent."""
+    ctx = _make_context(call_id="c_fallback")
+    adapter = SyntheticTelephonyAdapter(ctx)
+    adapter._call_state = TelephonyCallState.DISCONNECTED
+    adapter._last_event = None
+
+    evt, resp = adapter.handle_wire_event(
+        {"event": EVENT_CALL_END, "reason": "fallback_reason", "code": 404}
+    )
+    assert evt is None
+    assert resp["reason"] == "fallback_reason"
+    assert resp["code"] == 404
+    assert resp["idempotent"] is True
 
 
 def test_synthetic_telephony_adapter_invalid_transitions() -> None:
@@ -314,6 +392,7 @@ def test_synthetic_telephony_adapter_identity_spoofing_prevention() -> None:
             "provider_id": "pvd_legit",
         }
     )
+    assert evt is not None
     assert evt.call_id == "call_legit"
     assert resp["call_id"] == "call_legit"
 
@@ -351,8 +430,9 @@ def test_synthetic_telephony_adapter_unsupported_operation_rejection() -> None:
         with pytest.raises(UnsupportedOperationError, match=op):
             adapter.handle_wire_event({"event": op})
 
-    with pytest.raises(UnsupportedEventError, match="unknown_custom_op"):
+    with pytest.raises(UnsupportedEventError, match="Unsupported event type") as exc_info:
         adapter.handle_wire_event({"event": "unknown_custom_op"})
+    assert exc_info.value.event_name == "unknown_custom_op"
 
 
 # ==============================================================================
@@ -515,6 +595,7 @@ async def test_real_loopback_telephony_full_lifecycle_scenario() -> None:
             assert ended_data["call_id"] == "call_tel_001"
             assert ended_data["state"] == "disconnected"
             assert ended_data["reason"] == "completed"
+            assert ended_data["code"] == 16
 
             # 7. Graceful session close
             await ws.send(json.dumps({"event": EVENT_SESSION_END}))
@@ -562,15 +643,19 @@ async def test_real_loopback_telephony_idempotent_duplicate_end() -> None:
             assert resp1["event"] == EVENT_CALL_STARTED
 
             # End call (first time)
-            await ws.send(json.dumps({"event": EVENT_CALL_END, "reason": "hangup_1"}))
+            await ws.send(json.dumps({"event": EVENT_CALL_END, "reason": "hangup_1", "code": 16}))
             resp2 = json.loads(await ws.recv())
             assert resp2["event"] == EVENT_CALL_ENDED
+            assert resp2["reason"] == "hangup_1"
+            assert resp2["code"] == 16
             assert resp2.get("idempotent") is None
 
-            # End call (second time - duplicate)
-            await ws.send(json.dumps({"event": EVENT_CALL_END, "reason": "hangup_2"}))
+            # End call (second time - duplicate with different reason and code preserves initial)
+            await ws.send(json.dumps({"event": EVENT_CALL_END, "reason": "hangup_2", "code": 99}))
             resp3 = json.loads(await ws.recv())
             assert resp3["event"] == EVENT_CALL_ENDED
+            assert resp3["reason"] == "hangup_1"
+            assert resp3["code"] == 16
             assert resp3.get("idempotent") is True
 
             # Connection remains open and clean; terminate normally
@@ -796,4 +881,66 @@ async def test_real_loopback_telephony_transport_closure_while_call_active() -> 
 
     # Capacity and active call are completely cleaned up
     assert ctrl.snapshot().active_connections == 0
+    assert len(bridge._active_calls) == 0
+
+
+@pytest.mark.parametrize(
+    "unknown_event",
+    [
+        "x" * 250,  # 200+ ASCII characters
+        "ü" * 150,  # 200+ UTF-8 bytes Unicode characters (300 UTF-8 bytes)
+        "a" * 60000,  # Near 64 KiB payload (~60,020 bytes < 65,536 limit)
+        "invalid.event",  # Short unknown event
+    ],
+)
+@pytest.mark.anyio
+async def test_real_loopback_telephony_unsupported_event_rejection_bounded_close_reason(
+    unknown_event: str,
+) -> None:
+    """Verify unknown events are rejected with close code 1008 and bounded close reason without client reflection."""
+    port = _get_free_port()
+    verifier = SyntheticTokenVerifier(TEST_SECRET_KEY)
+    bridge = SyntheticAuthBridge(verifier)
+    ctrl = AdmissionController()
+    coord = InstanceDrainCoordinator(controller=ctrl)
+    cfg = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
+    app = create_gateway_app(config=cfg, drain_coordinator=coord, synthetic_auth_bridge=bridge)
+
+    token = verifier.issue_token(
+        provider_id="carrier_test",
+        tenant_id="tenant_unknown_evt",
+        call_id=f"call_{uuid.uuid4().hex[:8]}",
+        allowed_scopes=["voice.stream"],
+    )
+
+    async with _run_server(app, port) as ws_base_url:
+        ws_url = f"{ws_base_url}{SYNTHETIC_WS_ENDPOINT_PATH}"
+        headers = {"Authorization": f"Bearer {token}"}
+
+        async with websockets.connect(ws_url, additional_headers=headers) as ws:
+            # 1. Establish session
+            ready_raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+            ready_data = json.loads(ready_raw)
+            assert ready_data["event"] == EVENT_SESSION_READY
+            assert ctrl.snapshot().active_connections == 1
+
+            # 2. Send unknown event frame
+            unknown_frame = {"event": unknown_event}
+            await ws.send(json.dumps(unknown_frame))
+
+            # 3. Connection must be closed with 1008 and fixed bounded reason
+            with pytest.raises(websockets.exceptions.ConnectionClosed) as exc_info:
+                await ws.recv()
+
+            assert exc_info.value.rcvd is not None
+            assert exc_info.value.rcvd.code == 1008
+            close_reason = exc_info.value.rcvd.reason
+            assert len(close_reason.encode("utf-8")) <= 123
+            assert close_reason == "Unsupported event type"
+            # Ensure client-controlled event payload is NEVER reflected in the close frame
+            assert unknown_event not in close_reason
+
+    # 4. Clean resource reclamation
+    assert ctrl.snapshot().active_connections == 0
+    assert coord.active_connections_count == 0
     assert len(bridge._active_calls) == 0

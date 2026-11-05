@@ -107,6 +107,11 @@ class SyntheticTelephonyAdapter(TelephonyControlPort):
         return self._stream_id
 
     @property
+    def last_event(self) -> TelephonyControlEvent | None:
+        """Most recent normalized telephony control event emitted by this adapter."""
+        return self._last_event
+
+    @property
     def supported_capabilities(self) -> frozenset[str]:
         """Declared supported capabilities of this synthetic adapter."""
         return SUPPORTED_TELEPHONY_CAPABILITIES
@@ -159,11 +164,12 @@ class SyntheticTelephonyAdapter(TelephonyControlPort):
 
     def handle_wire_event(
         self, payload: dict[str, Any]
-    ) -> tuple[TelephonyControlEvent, dict[str, Any]]:
+    ) -> tuple[TelephonyControlEvent | None, dict[str, Any]]:
         """Translate an inbound wire payload into a domain control event and outbound response frame.
 
         Returns:
-            Tuple of (domain_event, wire_response_dict)
+            Tuple of (domain_event_or_none, wire_response_dict). For duplicate idempotent events,
+            domain_event is None to prevent duplicate terminal event dispatch.
 
         Raises:
             InvalidMessageFormatError: If caller attempts to spoof verified context.
@@ -231,29 +237,30 @@ class SyntheticTelephonyAdapter(TelephonyControlPort):
                     "state": TelephonyCallState.DISCONNECTED.value,
                     "reason": reason,
                 }
+                if code is not None:
+                    end_response["code"] = code
                 return end_event, end_response
 
             if self._call_state == TelephonyCallState.DISCONNECTED:
-                # Idempotent terminal event: duplicate call.end is acknowledged without error
-                idem_event = TelephonyCallEndedEvent(
-                    event_type="call_ended",
-                    tenant_id=self.tenant_id,
-                    provider_id=self.provider_id,
-                    call_id=self.call_id,
-                    timestamp=now,
-                    reason=reason,
-                    code=code,
-                )
+                # Idempotent terminal event: duplicate call.end is acknowledged without error,
+                # but does NOT generate a new domain event (returns None) to preserve terminal event idempotency.
+                initial_reason = reason
+                initial_code = code
+                if isinstance(self._last_event, TelephonyCallEndedEvent):
+                    initial_reason = self._last_event.reason
+                    initial_code = self._last_event.code
                 idem_response: dict[str, Any] = {
                     "event": EVENT_CALL_ENDED,
                     "call_id": self.call_id,
                     "state": TelephonyCallState.DISCONNECTED.value,
-                    "reason": reason,
+                    "reason": initial_reason,
                     "idempotent": True,
                 }
-                return idem_event, idem_response
+                if initial_code is not None:
+                    idem_response["code"] = initial_code
+                return None, idem_response
 
             # IDLE -> END is an invalid state transition (cannot end an unstarted call)
             raise InvalidCallStateTransitionError(self._call_state, EVENT_CALL_END)
 
-        raise UnsupportedEventError(str(event_name))
+        raise UnsupportedEventError(str(event_name) if event_name is not None else None)
