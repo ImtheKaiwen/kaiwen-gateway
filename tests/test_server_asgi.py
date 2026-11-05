@@ -548,6 +548,7 @@ def test_22_main_entrypoint() -> None:
             host="127.0.0.1",
             port=8000,
             log_level="info",
+            ws_max_size=65536,
         )
 
 
@@ -768,7 +769,7 @@ def test_28_real_loopback_websocket_handshake_refusal() -> None:
             ) as client:
                 resp = await client.get("/ws", headers=headers)
                 assert resp.status_code == 403
-                assert resp.text == "WebSocket ingress not enabled"
+                assert resp.text in {"", "WebSocket ingress not enabled"}
 
                 # Standard HTTP route non-upgrade remains 404
                 resp_404 = await client.get("/nonexistent")

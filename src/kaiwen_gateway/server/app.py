@@ -6,15 +6,23 @@ from typing import Any
 
 from kaiwen_gateway.core.admission import AdmissionController
 from kaiwen_gateway.core.composition import GatewayCore, compose_gateway_core
-from kaiwen_gateway.core.config import CoreConfig, validate_core_config
+from kaiwen_gateway.core.config import INGRESS_MODE_SYNTHETIC, CoreConfig, validate_core_config
 from kaiwen_gateway.core.draining import (
     DrainPolicy,
     InstanceDrainCoordinator,
     InstanceDrainState,
 )
 from kaiwen_gateway.core.exceptions import CoreConfigurationError
+from kaiwen_gateway.core.identity import CallAuthorizationPort, ProviderAuthenticatorPort
 from kaiwen_gateway.server.exceptions import ServerDependencyError
 from kaiwen_gateway.server.lifespan import gateway_lifespan
+from kaiwen_gateway.transports.synthetic import (
+    SYNTHETIC_WS_ENDPOINT_PATH,
+    SyntheticAuthBridge,
+    SyntheticCallAuthorizer,
+    SyntheticProviderAuthenticator,
+    synthetic_websocket_endpoint,
+)
 
 try:
     from starlette.applications import Starlette
@@ -117,7 +125,27 @@ async def readiness_endpoint(request: Request) -> JSONResponse:
             status_code=503,
         )
 
-    # Ingress remains fail-closed until an authenticated transport is configured (M3.2+)
+    if app_state.config.ingress_mode == INGRESS_MODE_SYNTHETIC:
+        bridge = getattr(app_state, "synthetic_auth_bridge", None)
+        if (
+            bridge is None
+            or not bridge.enforce_call_exclusivity
+            or not bridge.verifier.enable_replay_protection
+        ):
+            return JSONResponse(
+                {"status": "unavailable", "reason": "synthetic_ingress_misconfigured"},
+                status_code=503,
+            )
+        return JSONResponse(
+            {
+                "status": "ready",
+                "ingress_mode": "synthetic",
+                "instance": app_state.config.instance_name,
+            },
+            status_code=200,
+        )
+
+    # Ingress remains fail-closed until an authenticated transport is configured
     return JSONResponse(
         {"status": "unavailable", "reason": "ingress_disabled"},
         status_code=503,
@@ -147,6 +175,9 @@ def create_gateway_app(
     admission_controller: AdmissionController | None = None,
     drain_coordinator: InstanceDrainCoordinator | None = None,
     drain_policy: DrainPolicy | None = None,
+    authenticator: ProviderAuthenticatorPort | None = None,
+    authorizer: CallAuthorizationPort | None = None,
+    synthetic_auth_bridge: SyntheticAuthBridge | None = None,
 ) -> Starlette:
     """Construct a fresh, instance-scoped ASGI application for Kaiwen Gateway.
 
@@ -252,12 +283,85 @@ def create_gateway_app(
             f"vs config=({effective_config.max_concurrent_connections}, {effective_config.max_connections_per_tenant})"
         )
 
-    routes = [
-        Route("/health", endpoint=health_endpoint, methods=["GET"]),
-        Route("/ready", endpoint=readiness_endpoint, methods=["GET"]),
-        WebSocketRoute("/", endpoint=reject_websocket_endpoint),
-        WebSocketRoute("/{path:path}", endpoint=reject_websocket_endpoint),
-    ]
+    # Resolve and validate authenticator / authorizer / synthetic auth bridge
+    effective_auth_bridge = synthetic_auth_bridge
+    effective_authenticator = authenticator
+    effective_authorizer = authorizer
+
+    if effective_config.ingress_mode == INGRESS_MODE_SYNTHETIC:
+        if effective_auth_bridge is not None:
+            if not isinstance(effective_auth_bridge, SyntheticAuthBridge):
+                raise TypeError(
+                    f"synthetic_auth_bridge must be a SyntheticAuthBridge, got {type(effective_auth_bridge).__name__}"
+                )
+            if (
+                authenticator is not None
+                and authenticator is not effective_auth_bridge.authenticator
+            ):
+                raise CoreConfigurationError(
+                    "Explicit authenticator conflicts with synthetic_auth_bridge.authenticator"
+                )
+            if authorizer is not None and authorizer is not effective_auth_bridge.authorizer:
+                raise CoreConfigurationError(
+                    "Explicit authorizer conflicts with synthetic_auth_bridge.authorizer"
+                )
+            effective_authenticator = effective_auth_bridge.authenticator
+            effective_authorizer = effective_auth_bridge.authorizer
+        else:
+            if effective_authenticator is None or effective_authorizer is None:
+                raise CoreConfigurationError(
+                    "Synthetic ingress mode requires explicit authenticator and authorizer (or synthetic_auth_bridge)"
+                )
+            if not isinstance(effective_authenticator, ProviderAuthenticatorPort):
+                raise TypeError("authenticator must satisfy ProviderAuthenticatorPort")
+            if not isinstance(effective_authorizer, CallAuthorizationPort):
+                raise TypeError("authorizer must satisfy CallAuthorizationPort")
+            if (
+                isinstance(effective_authenticator, SyntheticProviderAuthenticator)
+                and isinstance(effective_authorizer, SyntheticCallAuthorizer)
+                and effective_authenticator._bridge is effective_authorizer._bridge
+            ):
+                effective_auth_bridge = effective_authenticator._bridge
+            else:
+                raise CoreConfigurationError(
+                    "Synthetic ingress requires authenticator and authorizer belonging to the same SyntheticAuthBridge"
+                )
+
+        assert effective_auth_bridge is not None
+        if not effective_auth_bridge.enforce_call_exclusivity:
+            raise CoreConfigurationError(
+                "Synthetic ingress requires active call exclusivity enforcement to be enabled"
+            )
+        if not effective_auth_bridge.verifier.enable_replay_protection:
+            raise CoreConfigurationError(
+                "Synthetic ingress requires token replay protection to be enabled"
+            )
+    else:
+        # Disabled ingress mode
+        if effective_authenticator is not None and not isinstance(
+            effective_authenticator, ProviderAuthenticatorPort
+        ):
+            raise TypeError("authenticator must satisfy ProviderAuthenticatorPort")
+        if effective_authorizer is not None and not isinstance(
+            effective_authorizer, CallAuthorizationPort
+        ):
+            raise TypeError("authorizer must satisfy CallAuthorizationPort")
+
+    if effective_config.ingress_mode == INGRESS_MODE_SYNTHETIC:
+        routes = [
+            Route("/health", endpoint=health_endpoint, methods=["GET"]),
+            Route("/ready", endpoint=readiness_endpoint, methods=["GET"]),
+            WebSocketRoute(SYNTHETIC_WS_ENDPOINT_PATH, endpoint=synthetic_websocket_endpoint),
+            WebSocketRoute("/", endpoint=reject_websocket_endpoint),
+            WebSocketRoute("/{path:path}", endpoint=reject_websocket_endpoint),
+        ]
+    else:
+        routes = [
+            Route("/health", endpoint=health_endpoint, methods=["GET"]),
+            Route("/ready", endpoint=readiness_endpoint, methods=["GET"]),
+            WebSocketRoute("/", endpoint=reject_websocket_endpoint),
+            WebSocketRoute("/{path:path}", endpoint=reject_websocket_endpoint),
+        ]
 
     middleware = [Middleware(UpgradeRejectionMiddleware)]
 
@@ -272,6 +376,9 @@ def create_gateway_app(
     app.state.config = effective_config
     app.state.admission_controller = effective_controller
     app.state.drain_coordinator = effective_coordinator
+    app.state.authenticator = effective_authenticator
+    app.state.authorizer = effective_authorizer
+    app.state.synthetic_auth_bridge = effective_auth_bridge
     app.state.started = False
     app.state.shutting_down = False
     app.state.stopped = False

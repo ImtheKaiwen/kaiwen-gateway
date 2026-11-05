@@ -125,7 +125,7 @@ jobs:
               mandatory = [line for line in req_lines if "extra ==" not in line]
               assert mandatory == [], f"Unexpected mandatory runtime dependencies in wheel: {mandatory}"
               optional = [line for line in req_lines if "extra ==" in line]
-              assert len(optional) == 2, f"Expected 2 optional dependencies, got: {optional}"
+              assert len(optional) == 3, f"Expected 3 optional dependencies, got: {optional}"
               for line in optional:
                   assert 'extra ==' in line and 'server' in line
 
@@ -632,4 +632,83 @@ jobs:
           asyncio.run(_run_server_smoke())
           assert getattr(app.state, "stopped", False) is True
           print("Server extra ASGI smoke test passed (M3.1).")
+
+          # 4. Verify real WebSockets package and synthetic transport loopback
+          import json
+          import websockets
+          from kaiwen_gateway.core import CoreConfig
+          from kaiwen_gateway.transports.synthetic import SyntheticAuthBridge, SyntheticTokenVerifier
+
+          async def _run_synthetic_ws_smoke() -> None:
+              secret = "smoke_secret_key_at_least_16_bytes!"
+              verifier = SyntheticTokenVerifier(secret)
+              bridge = SyntheticAuthBridge(verifier=verifier)
+              app_syn = create_gateway_app(
+                  config=CoreConfig(ingress_mode="synthetic"),
+                  synthetic_auth_bridge=bridge,
+              )
+
+              uv_config = uvicorn.Config(
+                  app_syn,
+                  host="127.0.0.1",
+                  port=0,
+                  log_level="error",
+                  ws="websockets",
+                  ws_max_size=65536,
+              )
+              server = uvicorn.Server(uv_config)
+              serve_task = asyncio.create_task(server.serve())
+
+              try:
+                  while not server.started:
+                      await asyncio.sleep(0.02)
+
+                  assert server.servers is not None and len(server.servers) > 0
+                  sockets = server.servers[0].sockets
+                  port = sockets[0].getsockname()[1]
+                  ws_url = f"ws://127.0.0.1:{port}/ws/synthetic/v1"
+
+                  # A. Valid token -> Handshake -> session.ready -> ping -> pong -> end
+                  valid_token = verifier.issue_token(
+                      provider_id="smoke_provider",
+                      tenant_id="tenant_smoke",
+                      call_id="call_smoke_01",
+                      allowed_scopes=["voice.stream"],
+                  )
+                  hdrs = {"Authorization": f"Bearer {valid_token}"}
+                  async with websockets.connect(ws_url, additional_headers=hdrs) as ws:
+                      ready_raw = await ws.recv()
+                      ready = json.loads(ready_raw)
+                      assert ready["event"] == "session.ready"
+                      assert ready["call_id"] == "call_smoke_01"
+
+                      await ws.send(json.dumps({"event": "session.ping", "seq": 42}))
+                      pong_raw = await ws.recv()
+                      pong = json.loads(pong_raw)
+                      assert pong["event"] == "session.pong"
+                      assert pong["seq"] == 42
+
+                      await ws.send(json.dumps({"event": "session.end"}))
+                      try:
+                          await ws.recv()
+                      except websockets.exceptions.ConnectionClosed as close_exc:
+                          assert close_exc.rcvd.code == 1000
+
+                  # B. Forged token -> Pre-accept rejection (HTTP 403)
+                  forged_hdrs = {"Authorization": "Bearer forged_invalid_token"}
+                  try:
+                      async with websockets.connect(ws_url, additional_headers=forged_hdrs):
+                          raise AssertionError("Expected handshake rejection for forged token")
+                  except websockets.exceptions.InvalidStatus as err:
+                      assert err.response.status_code == 403
+
+                  # C. Verify zero active leases remaining
+                  assert app_syn.state.drain_coordinator.active_connections_count == 0
+                  assert app_syn.state.admission_controller.snapshot().active_connections == 0
+              finally:
+                  server.should_exit = True
+                  await serve_task
+
+          asyncio.run(_run_synthetic_ws_smoke())
+          print("Server extra real WebSockets loopback smoke test passed (M3.2A).")
           PY

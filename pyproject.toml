@@ -41,6 +41,7 @@ dependencies = []
 server = [
     "starlette>=0.40,<2",
     "uvicorn>=0.30,<1",
+    "websockets>=13.0,<16",
 ]
 
 [project.urls]

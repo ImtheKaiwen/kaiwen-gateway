@@ -26,6 +26,7 @@ def main() -> None:
         host="127.0.0.1",
         port=8000,
         log_level="info",
+        ws_max_size=65536,
     )
 
 
