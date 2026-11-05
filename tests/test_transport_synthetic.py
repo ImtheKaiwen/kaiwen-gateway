@@ -1883,11 +1883,117 @@ async def test_handshake_cancellation_and_failure_boundaries() -> None:
     ws2.app.state.shutting_down = False
     ws2.app.state.stopped = False
     ws2.headers = {"authorization": f"Bearer {_token('call_c2')}"}
+    ws2.close = AsyncMock()
     ws2.accept = AsyncMock(side_effect=asyncio.CancelledError())
 
     with pytest.raises(asyncio.CancelledError):
         await synthetic_websocket_endpoint(ws2)
 
+    ws2.close.assert_awaited_once_with(code=1008, reason="Handshake aborted")
+    assert coord.active_connections_count == 0
+    assert ctrl.snapshot().active_connections == 0
+    assert len(bridge._active_calls) == 0
+
+    # Phase 2b: ASGI accept sent over the wire, then cancelled
+    ws2b = MagicMock()
+    ws2b.app.state.config = cfg
+    ws2b.app.state.drain_coordinator = coord
+    ws2b.app.state.synthetic_auth_bridge = bridge
+    ws2b.app.state.shutting_down = False
+    ws2b.app.state.stopped = False
+    ws2b.headers = {"authorization": f"Bearer {_token('call_c2b')}"}
+    ws2b.close = AsyncMock()
+
+    async def _wire_accept_then_cancel() -> None:
+        ws2b.client_state = "CONNECTED"
+        raise asyncio.CancelledError("cancelled after wire accept message sent")
+
+    ws2b.accept = AsyncMock(side_effect=_wire_accept_then_cancel)
+
+    with pytest.raises(asyncio.CancelledError):
+        await synthetic_websocket_endpoint(ws2b)
+
+    ws2b.close.assert_awaited_once_with(code=1000, reason="Server shutting down")
+    assert coord.active_connections_count == 0
+    assert ctrl.snapshot().active_connections == 0
+    assert len(bridge._active_calls) == 0
+
+    # Phase 2c: Supervisor resource registration failure
+    class _FailingRegisterCoord:
+        def __init__(self, real: InstanceDrainCoordinator) -> None:
+            self._real = real
+            self.state = real.state
+            self.is_stopped = real.is_stopped
+
+        async def admit_connection(self, ctx: Any) -> Any:
+            sup = await self._real.admit_connection(ctx)
+
+            class _RegFailSupervisor:
+                def __init__(self, inner: Any) -> None:
+                    self._inner = inner
+
+                @property
+                def state(self) -> Any:
+                    return self._inner.state
+
+                def register_resource(self, fn: Any) -> None:
+                    raise RuntimeError("Resource registration failed")
+
+                async def close(self, reason: Any = None) -> Any:
+                    return await self._inner.close(reason=reason)
+
+            return _RegFailSupervisor(sup)
+
+    ws2c = MagicMock()
+    ws2c.app.state.config = cfg
+    ws2c.app.state.drain_coordinator = _FailingRegisterCoord(coord)
+    ws2c.app.state.synthetic_auth_bridge = bridge
+    ws2c.app.state.shutting_down = False
+    ws2c.app.state.stopped = False
+    ws2c.headers = {"authorization": f"Bearer {_token('call_c2c')}"}
+    ws2c.accept = AsyncMock()
+    ws2c.close = AsyncMock(side_effect=RuntimeError("socket close failed"))
+
+    await synthetic_websocket_endpoint(ws2c)
+    ws2c.close.assert_awaited_once_with(code=1011, reason="Lifecycle initialization failed")
+    assert coord.active_connections_count == 0
+    assert ctrl.snapshot().active_connections == 0
+    assert len(bridge._active_calls) == 0
+
+    # Phase 2d: Handshake accept raises transport Exception
+    ws2d = MagicMock()
+    ws2d.app.state.config = cfg
+    ws2d.app.state.drain_coordinator = coord
+    ws2d.app.state.synthetic_auth_bridge = bridge
+    ws2d.app.state.shutting_down = False
+    ws2d.app.state.stopped = False
+    ws2d.headers = {"authorization": f"Bearer {_token('call_c2d')}"}
+    ws2d.accept = AsyncMock(side_effect=RuntimeError("transport accept failed"))
+    ws2d.close = AsyncMock()
+
+    await synthetic_websocket_endpoint(ws2d)
+    ws2d.close.assert_awaited_once_with(code=1011, reason="Handshake accept failed")
+    assert coord.active_connections_count == 0
+    assert ctrl.snapshot().active_connections == 0
+    assert len(bridge._active_calls) == 0
+
+    # Phase 2e: Repeated cancellation
+    ws2e = MagicMock()
+    ws2e.app.state.config = cfg
+    ws2e.app.state.drain_coordinator = coord
+    ws2e.app.state.synthetic_auth_bridge = bridge
+    ws2e.app.state.shutting_down = False
+    ws2e.app.state.stopped = False
+    ws2e.headers = {"authorization": f"Bearer {_token('call_c2e')}"}
+    ws2e.accept = AsyncMock()
+    ws2e.close = AsyncMock()
+
+    t_rep = asyncio.create_task(synthetic_websocket_endpoint(ws2e))
+    await asyncio.sleep(0.01)
+    t_rep.cancel()
+    t_rep.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await t_rep
     assert coord.active_connections_count == 0
     assert ctrl.snapshot().active_connections == 0
     assert len(bridge._active_calls) == 0
@@ -2319,3 +2425,235 @@ async def test_endpoint_and_readiness_edge_case_branches() -> None:
     with pytest.raises(asyncio.CancelledError):
         await synthetic_websocket_endpoint(ws3)
     assert coord3.active_connections_count == 0
+
+
+@pytest.mark.anyio
+async def test_socket_close_failure_observability_and_lease_release() -> None:
+    """BLOCKER A: Socket close failure must not be masked as NORMAL, outcomes reflect CLEANUP_FAILED, lease released."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from kaiwen_gateway.core.lifecycle import ConnectionState, TerminalReason
+    from kaiwen_gateway.transports.synthetic.endpoint import synthetic_websocket_endpoint
+
+    verifier = SyntheticTokenVerifier(TEST_SECRET_KEY)
+    bridge = SyntheticAuthBridge(verifier)
+    ctrl = AdmissionController()
+    coord = InstanceDrainCoordinator(controller=ctrl)
+    cfg = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
+    app = create_gateway_app(config=cfg, drain_coordinator=coord, synthetic_auth_bridge=bridge)
+
+    tok = verifier.issue_token(
+        provider_id="pvd",
+        tenant_id="tnt",
+        call_id="call_close_fail_01",
+        allowed_scopes=["voice.stream"],
+    )
+
+    admitted_sup: list[Any] = []
+
+    class _TrackingCoord:
+        def __init__(self, real: InstanceDrainCoordinator) -> None:
+            self._real = real
+            self.state = real.state
+            self.is_stopped = real.is_stopped
+            self.policy = real.policy
+            self.controller = real.controller
+
+        async def admit_connection(self, ctx: Any) -> Any:
+            sup = await self._real.admit_connection(ctx)
+            admitted_sup.append(sup)
+            return sup
+
+    tracking_coord = _TrackingCoord(coord)
+
+    ws = MagicMock()
+    ws.app = app
+    ws.app.state.drain_coordinator = tracking_coord
+    ws.headers = {"authorization": f"Bearer {tok}"}
+    ws.accept = AsyncMock()
+    ws.send_text = AsyncMock()
+    ws.close = AsyncMock(
+        side_effect=RuntimeError("transport socket close failed deterministically")
+    )
+
+    hang_evt = asyncio.Event()
+
+    async def _hang_recv() -> dict[str, Any]:
+        await hang_evt.wait()
+        return {"type": "websocket.disconnect"}
+
+    ws.receive = _hang_recv
+
+    # Start session worker
+    ep_task = asyncio.create_task(synthetic_websocket_endpoint(ws))
+    await asyncio.sleep(0.01)
+
+    assert len(admitted_sup) == 1
+    sup = admitted_sup[0]
+
+    # 1. Accept succeeded
+    ws.accept.assert_awaited_once()
+    assert ctrl.snapshot().active_connections == 1
+
+    # 2. Trigger supervisor close while client is still connected (server-initiated close)
+    close_task = asyncio.create_task(sup.close(reason=TerminalReason.NORMAL))
+    # Give event loop a turn so cleanup runs
+    await asyncio.sleep(0.01)
+    outcome = await close_task
+    # Ep task finishes
+    await ep_task
+
+    # 3. Socket close was attempted and failed
+    ws.close.assert_awaited()
+
+    # 4. Connection outcome is NOT mistakenly marked NORMAL; it is CLEANUP_FAILED!
+    assert outcome.state == ConnectionState.FAILED
+    assert outcome.reason == TerminalReason.CLEANUP_FAILED
+    assert sup.outcome is not None
+    assert sup.outcome.reason == TerminalReason.CLEANUP_FAILED
+
+    # 5. Admission lease is released despite the transport error!
+    assert ctrl.snapshot().active_connections == 0
+    assert coord.active_connections_count == 0
+    assert len(bridge._active_calls) == 0
+
+    # 6. Error was observed directly on the supervisor outcome
+    assert sup.state == ConnectionState.FAILED
+
+    # 7. Second close attempt behavior: idempotent, outcome remains CLEANUP_FAILED, lease remains 0
+    outcome2 = await sup.close()
+    assert outcome2.state == ConnectionState.FAILED
+    assert outcome2.reason == TerminalReason.CLEANUP_FAILED
+    assert ctrl.snapshot().active_connections == 0
+
+    # Normal disconnect sub-case: verify normal disconnect is NOT a false error
+    tok_norm = verifier.issue_token(
+        provider_id="pvd",
+        tenant_id="tnt",
+        call_id="call_norm_disc",
+        allowed_scopes=["voice.stream"],
+    )
+    ws_norm = MagicMock()
+    ws_norm.app = app
+    ws_norm.headers = {"authorization": f"Bearer {tok_norm}"}
+    ws_norm.accept = AsyncMock()
+    ws_norm.send_text = AsyncMock()
+    ws_norm.receive = AsyncMock(return_value={"type": "websocket.disconnect"})
+    ws_norm.close = AsyncMock()
+
+    await synthetic_websocket_endpoint(ws_norm)
+    sup_norm = admitted_sup[1]
+    assert sup_norm.outcome is not None
+    assert sup_norm.outcome.state == ConnectionState.CLOSED
+    assert sup_norm.outcome.reason == TerminalReason.NORMAL
+    assert ctrl.snapshot().active_connections == 0
+
+
+@pytest.mark.anyio
+async def test_synthetic_secure_configuration_enforcement() -> None:
+    """BLOCKER C: Synthetic ingress requires replay protection and active call exclusivity; read-only properties validated."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from kaiwen_gateway.transports.synthetic.endpoint import synthetic_websocket_endpoint
+
+    verifier = SyntheticTokenVerifier(TEST_SECRET_KEY, enable_replay_protection=True)
+    assert verifier.enable_replay_protection is True
+
+    verifier_no_replay = SyntheticTokenVerifier(TEST_SECRET_KEY, enable_replay_protection=False)
+    assert verifier_no_replay.enable_replay_protection is False
+
+    bridge = SyntheticAuthBridge(verifier, enforce_call_exclusivity=True)
+    assert bridge.enforce_call_exclusivity is True
+    assert bridge.verifier is verifier
+
+    bridge_no_excl = SyntheticAuthBridge(verifier, enforce_call_exclusivity=False)
+    assert bridge_no_excl.enforce_call_exclusivity is False
+
+    bridge_no_replay = SyntheticAuthBridge(verifier_no_replay, enforce_call_exclusivity=True)
+
+    cfg = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
+    ctrl = AdmissionController()
+    coord = InstanceDrainCoordinator(controller=ctrl)
+
+    # 1. Replay protection disabled -> create_gateway_app fails closed
+    with pytest.raises(
+        CoreConfigurationError, match="requires token replay protection to be enabled"
+    ):
+        create_gateway_app(
+            config=cfg, drain_coordinator=coord, synthetic_auth_bridge=bridge_no_replay
+        )
+
+    # 2. Active call exclusivity disabled -> create_gateway_app fails closed
+    with pytest.raises(
+        CoreConfigurationError, match="requires active call exclusivity enforcement to be enabled"
+    ):
+        create_gateway_app(
+            config=cfg, drain_coordinator=coord, synthetic_auth_bridge=bridge_no_excl
+        )
+
+    # 3. Both enabled -> create_gateway_app succeeds
+    app_valid = create_gateway_app(
+        config=cfg, drain_coordinator=coord, synthetic_auth_bridge=bridge
+    )
+    assert app_valid is not None
+
+    # 4. Readiness endpoint reflects security misconfiguration
+    client = TestClient(app_valid)
+    with client:
+        # Normal ready
+        r_ok = client.get("/ready")
+        assert r_ok.status_code == 200
+
+        # Misconfigured exclusivity
+        app_valid.state.synthetic_auth_bridge = bridge_no_excl
+        r_bad_excl = client.get("/ready")
+        assert r_bad_excl.status_code == 503
+        assert r_bad_excl.json() == {
+            "status": "unavailable",
+            "reason": "synthetic_ingress_misconfigured",
+        }
+
+        # Misconfigured replay
+        app_valid.state.synthetic_auth_bridge = bridge_no_replay
+        r_bad_replay = client.get("/ready")
+        assert r_bad_replay.status_code == 503
+        assert r_bad_replay.json() == {
+            "status": "unavailable",
+            "reason": "synthetic_ingress_misconfigured",
+        }
+
+    # 5. Endpoint rejection if bridge security policy is misconfigured
+    tok = verifier.issue_token(
+        provider_id="pvd",
+        tenant_id="tnt",
+        call_id="call_sec_policy",
+        allowed_scopes=["voice.stream"],
+    )
+
+    ws_bad_excl = MagicMock()
+    ws_bad_excl.app.state.config = cfg
+    ws_bad_excl.app.state.drain_coordinator = coord
+    ws_bad_excl.app.state.synthetic_auth_bridge = bridge_no_excl
+    ws_bad_excl.app.state.shutting_down = False
+    ws_bad_excl.app.state.stopped = False
+    ws_bad_excl.headers = {"authorization": f"Bearer {tok}"}
+    ws_bad_excl.close = AsyncMock()
+
+    await synthetic_websocket_endpoint(ws_bad_excl)
+    ws_bad_excl.close.assert_awaited_once_with(
+        code=1008, reason="Synthetic ingress security policy misconfigured"
+    )
+
+    ws_bad_replay = MagicMock()
+    ws_bad_replay.app.state.config = cfg
+    ws_bad_replay.app.state.drain_coordinator = coord
+    ws_bad_replay.app.state.synthetic_auth_bridge = bridge_no_replay
+    ws_bad_replay.app.state.shutting_down = False
+    ws_bad_replay.app.state.stopped = False
+    ws_bad_replay.headers = {"authorization": f"Bearer {tok}"}
+    ws_bad_replay.close = AsyncMock()
+
+    await synthetic_websocket_endpoint(ws_bad_replay)
+    ws_bad_replay.close.assert_awaited_once_with(
+        code=1008, reason="Synthetic ingress security policy misconfigured"
+    )

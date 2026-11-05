@@ -81,6 +81,11 @@ class SyntheticTokenVerifier:
         self._max_replay_entries = max_replay_entries
         self._consumed_tokens: dict[str, float] = {}
 
+    @property
+    def enable_replay_protection(self) -> bool:
+        """Return True if replay protection cache is active on this verifier."""
+        return self._enable_replay_protection
+
     def __repr__(self) -> str:
         return (
             f"<SyntheticTokenVerifier key_length={len(self._key)} "

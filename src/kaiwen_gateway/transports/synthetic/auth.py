@@ -131,6 +131,11 @@ class SyntheticAuthBridge:
     def authorizer(self) -> CallAuthorizationPort:
         return self._authorizer
 
+    @property
+    def enforce_call_exclusivity(self) -> bool:
+        """Return True if active call exclusivity enforcement is active on this bridge."""
+        return self._enforce_call_exclusivity
+
     def get_verified_claims(self, connection_id: str) -> SyntheticTokenClaims | None:
         return self._claims_by_conn.get(connection_id)
 
@@ -178,10 +183,11 @@ class SyntheticAuthBridge:
                 existing_conn = self._active_calls.get(
                     (token_claims.tenant_id, token_claims.call_id)
                 )
-                if existing_conn is not None and existing_conn != canonical_conn_id:
-                    raise IdentityAuthorizationError(
-                        f"Call session is already active for call_id '{token_claims.call_id}' in tenant '{token_claims.tenant_id}'"
-                    )
+                if existing_conn is not None:
+                    if existing_conn != canonical_conn_id:
+                        raise IdentityAuthorizationError(
+                            f"Call session is already active for call_id '{token_claims.call_id}' in tenant '{token_claims.tenant_id}'"
+                        )
 
         # 3. Register verified claims for the duration of identity resolution
         async with self._lock:

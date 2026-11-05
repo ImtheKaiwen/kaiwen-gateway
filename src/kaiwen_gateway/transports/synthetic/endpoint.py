@@ -50,6 +50,13 @@ async def synthetic_websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.close(code=1008, reason="Synthetic ingress not enabled")
         return
 
+    if (
+        not auth_bridge.enforce_call_exclusivity
+        or not auth_bridge.verifier.enable_replay_protection
+    ):
+        await websocket.close(code=1008, reason="Synthetic ingress security policy misconfigured")
+        return
+
     # 2. Coordinator viability verification (no admission during draining or after shutdown)
     if (
         coordinator.state != InstanceDrainState.ACCEPTING
@@ -108,9 +115,53 @@ async def synthetic_websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.close(code=1008, reason="Admission rejected (capacity exceeded)")
         return
 
-    # From here on, supervisor owns an active admission lease and MUST be cleaned up.
+    # -------------------------------------------------------------------------
+    # Handshake & Session Supervision with unified socket lifecycle ownership
+    # -------------------------------------------------------------------------
     active_call_registered = False
     supervisor_closed = False
+    socket_closed = False
+    socket_disconnected = False
+    wire_accepted = False
+
+    def _is_wire_accepted() -> bool:
+        if wire_accepted:
+            return True
+        state = getattr(websocket, "client_state", None)
+        return state is not None and str(state).endswith("CONNECTED")
+
+    async def _close_socket(code: int, reason: str) -> None:
+        nonlocal socket_closed
+        if socket_closed or socket_disconnected:
+            return
+        await websocket.close(code=code, reason=reason)
+        socket_closed = True
+
+    # Register resource cleanup callback so supervisor owns socket & call cleanup
+    async def _cleanup_socket() -> None:
+        try:
+            if active_call_registered:
+                await auth_bridge.unregister_active_call(
+                    connection_id, verified_context.tenant_id, verified_context.call_id
+                )
+        finally:
+            accepted_flag = _is_wire_accepted()
+            close_code = 1000 if accepted_flag else 1008
+            close_reason = "Server shutting down" if accepted_flag else "Handshake aborted"
+            await _close_socket(code=close_code, reason=close_reason)
+
+    try:
+        supervisor.register_resource(_cleanup_socket)
+    except Exception:
+        # Resource registration failed on supervisor: fail closed immediately
+        try:
+            await _close_socket(code=1011, reason="Lifecycle initialization failed")
+        except Exception:
+            pass
+        await asyncio.shield(supervisor.close(reason=TerminalReason.STARTUP_FAILED))
+        supervisor_closed = True
+        return
+
     try:
         # 7. Register active call exclusivity
         try:
@@ -120,48 +171,34 @@ async def synthetic_websocket_endpoint(websocket: WebSocket) -> None:
             active_call_registered = True
         except IdentityAuthorizationError:
             # Active call collision / race: another connection for the same call won.
-            # Immediately close supervisor to release its capacity lease.
-            await asyncio.shield(supervisor.close(reason=TerminalReason.STARTUP_FAILED))
-            supervisor_closed = True
-            await websocket.close(code=1008, reason="Call session already active")
+            # Close pre-accept with 1008 and immediately close supervisor to release capacity lease.
+            try:
+                await _close_socket(code=1008, reason="Call session already active")
+            finally:
+                await asyncio.shield(supervisor.close(reason=TerminalReason.STARTUP_FAILED))
+                supervisor_closed = True
             return
 
         # 8. Accept the WebSocket connection (completing upgrade handshake)
         try:
             await websocket.accept()
+            wire_accepted = True
         except Exception:
-            # Handshake failure or client abort before accept completion
-            await asyncio.shield(supervisor.close(reason=TerminalReason.STARTUP_FAILED))
-            supervisor_closed = True
+            # Handshake failure before accept completion
+            try:
+                await _close_socket(code=1011, reason="Handshake accept failed")
+            finally:
+                await asyncio.shield(supervisor.close(reason=TerminalReason.STARTUP_FAILED))
+                supervisor_closed = True
             return
 
-        socket_closed = False
-
-        async def _close_socket(code: int, reason: str) -> None:
-            nonlocal socket_closed
-            if not socket_closed:
-                socket_closed = True
-                await websocket.close(code=code, reason=reason)
-
-        # Register resource cleanup callback so supervisor can close WebSocket on shutdown or cancellation
-        async def _cleanup_socket() -> None:
-            if active_call_registered:
-                await auth_bridge.unregister_active_call(
-                    connection_id, verified_context.tenant_id, verified_context.call_id
-                )
-            try:
-                await _close_socket(code=1000, reason="Server shutting down")
-            except Exception:
-                pass
-
-        supervisor.register_resource(_cleanup_socket)
         # 9. Supervised session worker coroutine
         idle_timeout = float(
             getattr(app_state, "synthetic_idle_timeout", DEFAULT_IDLE_TIMEOUT_SECONDS)
         )
 
         async def _session_worker() -> None:
-            nonlocal socket_closed
+            nonlocal socket_disconnected
             try:
                 # Send session.ready event upon established connection
                 ready_payload = {
@@ -185,7 +222,7 @@ async def synthetic_websocket_endpoint(websocket: WebSocket) -> None:
                     msg_type = message.get("type")
 
                     if msg_type == "websocket.disconnect":
-                        socket_closed = True
+                        socket_disconnected = True
                         break
 
                     # Reject binary frames (voice audio streaming is not accepted in M3.2A)
@@ -218,7 +255,7 @@ async def synthetic_websocket_endpoint(websocket: WebSocket) -> None:
             except asyncio.CancelledError:
                 raise
             except WebSocketDisconnect:
-                socket_closed = True
+                socket_disconnected = True
                 pass
             except Exception:
                 try:
@@ -233,24 +270,11 @@ async def synthetic_websocket_endpoint(websocket: WebSocket) -> None:
 
     except asyncio.CancelledError:
         # Bounded shielded cleanup on cancellation during any phase after admission
-        if active_call_registered:
-            await asyncio.shield(
-                auth_bridge.unregister_active_call(
-                    connection_id, verified_context.tenant_id, verified_context.call_id
-                )
-            )
-            active_call_registered = False
         if supervisor is not None and not supervisor_closed and not supervisor.state.is_terminal:
             await asyncio.shield(supervisor.close(reason=TerminalReason.CANCELLED))
             supervisor_closed = True
         raise
     finally:
         # 11. Ensure active call unregistration and supervisor terminal closure
-        if active_call_registered:
-            await asyncio.shield(
-                auth_bridge.unregister_active_call(
-                    connection_id, verified_context.tenant_id, verified_context.call_id
-                )
-            )
         if supervisor is not None and not supervisor_closed and not supervisor.state.is_terminal:
             await asyncio.shield(supervisor.close(reason=TerminalReason.NORMAL))

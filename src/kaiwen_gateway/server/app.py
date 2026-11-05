@@ -126,7 +126,12 @@ async def readiness_endpoint(request: Request) -> JSONResponse:
         )
 
     if app_state.config.ingress_mode == INGRESS_MODE_SYNTHETIC:
-        if getattr(app_state, "synthetic_auth_bridge", None) is None:
+        bridge = getattr(app_state, "synthetic_auth_bridge", None)
+        if (
+            bridge is None
+            or not bridge.enforce_call_exclusivity
+            or not bridge.verifier.enable_replay_protection
+        ):
             return JSONResponse(
                 {"status": "unavailable", "reason": "synthetic_ingress_misconfigured"},
                 status_code=503,
@@ -321,6 +326,16 @@ def create_gateway_app(
                 raise CoreConfigurationError(
                     "Synthetic ingress requires authenticator and authorizer belonging to the same SyntheticAuthBridge"
                 )
+
+        assert effective_auth_bridge is not None
+        if not effective_auth_bridge.enforce_call_exclusivity:
+            raise CoreConfigurationError(
+                "Synthetic ingress requires active call exclusivity enforcement to be enabled"
+            )
+        if not effective_auth_bridge.verifier.enable_replay_protection:
+            raise CoreConfigurationError(
+                "Synthetic ingress requires token replay protection to be enabled"
+            )
     else:
         # Disabled ingress mode
         if effective_authenticator is not None and not isinstance(
