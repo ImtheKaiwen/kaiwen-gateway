@@ -392,7 +392,6 @@ def test_loopback_capacity_saturation_stage() -> None:
             assert (
                 res.completed_calls == 35
             )  # 10 tenant + 25 global (beta is admission only, not call)
-            assert res.completed_calls == 35  # 10 tenant + 25 global (beta is admission only, not call)
             assert res.unexpected_failures == 0
             assert res.error is None
 
