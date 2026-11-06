@@ -37,6 +37,9 @@ classifiers = [
 ]
 dependencies = []
 
+[project.scripts]
+kaiwen-gateway = "kaiwen_gateway.server.__main__:main"
+
 [project.optional-dependencies]
 server = [
     "starlette>=0.40,<2",

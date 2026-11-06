@@ -162,7 +162,7 @@ A passing unit suite does **not** prove real telephony interoperability, securit
 
 ## Getting started
 
-**The package is not yet released on PyPI. While the Core layer (M1, M2) and runnable ASGI runtime foundation (M3.1, merged in PR #15 / `224284f`) are implemented, and the authenticated synthetic WebSocket ingress vertical slice (M3.2A) is implemented locally with 100% test coverage, CLI commands (M3.3), the Voice audio runtime (M4), and real provider adapters remain pre-alpha and unimplemented.** Public endpoint paths, server commands, and configuration examples will be published after they are merged and released. Please do not assume an example endpoint or command from design discussions is available today.
+**The package is not yet released on PyPI. The Core layer (M1, M2), runnable ASGI runtime foundation (M3.1, merged in PR #15 / `224284f`), authenticated synthetic WebSocket ingress (M3.2A, merged in PR #16 / `558bd95`), synthetic telephony adapter foundation (M3.2B, merged in PR #17 / `7a28c40`), and CLI with executable synthetic call demo (M3.3A) are implemented. Voice audio media streaming (M4) and real provider adapters remain pre-alpha and unimplemented.** Public endpoint paths, server commands, and configuration examples will be published after they are merged and released. Please do not assume an example endpoint or command from design discussions is available today.
 
 ### Verified local package, quality, and CI foundation (M1)
 
@@ -178,28 +178,39 @@ uv run --locked --group dev --extra server pytest -q --cov=kaiwen_gateway --cov-
 uv build
 ```
 
-### Local development ASGI host runtime (M3.1 & M3.2A)
+### Local development CLI and ASGI host runtime (M3.1, M3.2 & M3.3A)
 
-With optional server dependencies installed (`uv sync --locked --group dev --extra server`), the instance-scoped ASGI server foundation can be run locally on the loopback interface:
+Kaiwen Gateway provides an `argparse`-driven command-line interface via `kaiwen-gateway`:
 
 ```bash
-# Run local development ASGI server on 127.0.0.1:8000 (ingress_mode="disabled" by default)
-uv run --locked --group dev --extra server python -m kaiwen_gateway.server
+# Display CLI version and help (zero external runtime dependencies)
+uv run kaiwen-gateway --version
+uv run kaiwen-gateway --help
 
-# Alternatively, using uvicorn factory invocation:
-uv run --locked --group dev --extra server uvicorn kaiwen_gateway.server:create_gateway_app --factory --host 127.0.0.1 --port 8000
+# Validate CoreConfig and KAIWEN_GATEWAY_* environment variables without running a server
+uv run kaiwen-gateway check-config
+
+# Execute automated loopback synthetic call demo (allocates free port, verifies full lifecycle, zero leaks)
+uv run --locked --group dev --extra server kaiwen-gateway demo
+
+# Run local development ASGI server on 127.0.0.1:8000 (ingress_mode="disabled" by default)
+uv run --locked --group dev --extra server kaiwen-gateway serve
+
+# Backward-compatible python -m module execution:
+uv run --locked --group dev --extra server python -m kaiwen_gateway.server
 ```
 
 **Operational and security boundaries:**
-- **Loopback binding only:** Binds strictly to `127.0.0.1:8000`; never bind to public `0.0.0.0` or deploy without a production reverse proxy and TLS boundary.
+- **Zero base dependencies:** `kaiwen-gateway --help`, `--version`, and `check-config` run using only Python standard library. Optional extras (`kaiwen-gateway[server]`) are required for `serve` and `demo`.
+- **Loopback binding only:** Binds strictly to `127.0.0.1:8000` (or specified loopback port); never bind to public `0.0.0.0` or deploy without a production reverse proxy and TLS boundary.
 - **Liveness (`GET /health`):** Returns `200 OK` (`{"status": "ok", "instance": "<name>"}`) when the ASGI host process is viable; returns `503 Service Unavailable` if queried before lifespan startup completes.
 - **Readiness (`GET /ready`):** In default disabled mode (`ingress_mode="disabled"`), returns `503 Service Unavailable` (`{"status": "unavailable", "reason": "ingress_disabled"}`). When configured with `ingress_mode="synthetic"` and active admission capacity, returns `200 OK` (`{"status": "ready", "ingress_mode": "synthetic", "instance": "<name>"}`). Returns `503` with `reason="draining"` during instance draining, and `reason="stopped"` once stopped.
-- **Authenticated synthetic WebSocket ingress (`/ws/synthetic/v1` - M3.2A):**
+- **Authenticated synthetic WebSocket ingress (`/ws/synthetic/v1` - M3.2A & M3.2B):**
   - Explicit activation via `CoreConfig(ingress_mode="synthetic")` paired with a server-configured `SyntheticAuthBridge` (or matching authenticator and authorizer ports).
   - Inbound connections require an HTTP `Authorization: Bearer <token>` header verified cryptographically (HMAC-SHA256 signature, expiry, and canonical claims) before upgrade acceptance.
   - Handshakes lacking valid credentials, forged tokens, or exceeding admission capacity are closed prior to acceptance (`code 1008`), allocating zero capacity leases and zero upstream sessions.
-  - Established connections exchange structured text JSON control frames: `session.ready` (server -> client), `session.ping` / `session.pong`, and `session.end` (graceful termination).
-  - Binary frames are strictly rejected (`code 1003`) in M3.2A; voice audio streaming pipelines remain deferred to M4.
+  - Established connections exchange structured text JSON control frames: `session.ready` (server -> client), `call.start` / `call.started`, `call.end` / `call.ended`, `session.ping` / `session.pong`, and `session.end` (graceful termination).
+  - Binary frames are strictly rejected (`code 1003`) in M3.2; voice audio streaming pipelines remain deferred to M4.
   - Frames exceeding 64 KiB are rejected with `code 1009`; malformed JSON frames are rejected with `code 1007`.
 
 For architecture and milestone tracking:
@@ -214,7 +225,7 @@ A fast GitHub Actions CI workflow ([`.github/workflows/ci.yml`](.github/workflow
 - **M1.4A security hardening verification (`main`):** Merged in [PR #4](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/4) (`32111a402b289a5608cd70effdb70fa0fe53d877`) and verified on `push -> main` in [GitHub Actions run `41264905664`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264905664) with all 4 CI jobs and the `uv audit --locked` step (on Python 3.12) succeeding, alongside initial Dependabot version-update checks ([run `41264912866`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264912866) for `uv` and [run `41264912883`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41264912883) for `github-actions`).
 - **M1.4B.1 protected `main` branch:** Classic GitHub branch protection is enabled on `main` (`protected: true`, pull request required, `strict: true` up-to-date branch enforcement, `enforce_admins: true`, `required_linear_history: true`, `allow_force_pushes: false`, `allow_deletions: false`, and `required_approving_review_count: 0` for single-maintainer operation) with four required GitHub Actions status checks bound to `app_id: 15368`: `Quality & Tests (Python 3.11)`, `Quality & Tests (Python 3.12)`, `Quality & Tests (Python 3.13)`, and `Package Build & Clean Wheel Smoke Test`.
 
-**Note:** The M0 documentation baseline and initial ADRs (`ADR-0001`–`0003`) have been accepted as the V1 design baseline (`2026-11-01`), the M1 engineering foundation (`src/kaiwen_gateway` minimal importable package skeleton, Ruff, strict mypy, pytest, Python 3.11/3.12/3.13 fast CI, wheel/sdist smoke validation, `uv audit`, weekly Dependabot version updates, and `main` branch protection) is complete, M2.1 ([PR #9](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/9) / `68030a0`, [run `41518757425`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41518757425)) added the framework-independent Core module contracts (`GatewayModule`, `ModuleLifecycle`, `ModuleDescriptor`) and explicit instance-scoped `ModuleRegistry`, M2.2A ([PR #10](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/10) / `f65ad6d`, [run `41705325629`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/41705325629)) added immutable fail-closed Core configuration (`CoreConfig`, `validate_core_config`, `CoreConfigurationError`) and bounded instance-scoped Core composition (`GatewayCore`, `compose_gateway_core`, capped at `64` modules per instance via `MAX_COMPOSED_MODULES`), and M2.2B adds pure Core identity, tenant/call scope contracts, and authenticator/authorizer ports (`ProviderId`, `TenantId`, `ConnectionId`, `CallId`, `PermissionScope`, `UntrustedConnectionClaims`, `ProviderPrincipal`, `TenantCallBinding`, `VerifiedConnectionContext`, `ProviderAuthenticatorPort`, `CallAuthorizationPort`, `bind_verified_connection_context`, and `resolve_verified_connection_context`) in `kaiwen_gateway.core`. These Python dataclasses and validators enforce in-process structural contracts only, **not** cryptographic provider authentication or a capability sandbox against arbitrary in-process code. Configured connection ceilings in `CoreConfig` (`max_concurrent_connections`, `max_connections_per_tenant`) are not yet enforced by an active admission controller, and in-process instance isolation does not provide multi-process or distributed admission coordination. The `100%` coverage reported by pytest applies **only to the currently implemented package and `kaiwen_gateway.core` modules**, not to the unimplemented Gateway application. **Concrete transport WSS ingress, Voice audio bridge, CLI commands, real Verimor integration, and PyPI release are not yet implemented.**
+**Note:** The M0 documentation baseline and initial ADRs (`ADR-0001`–`0003`) have been accepted as the V1 design baseline (`2026-11-01`), the M1 engineering foundation is complete, M2 (Core identity, admission control, connection lifecycle, and instance draining) is complete, M3.1 (ASGI host runtime foundation) is merged in [PR #15](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/15) (`224284f`), M3.2A (authenticated synthetic WebSocket ingress) is merged in [PR #16](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/16) (`558bd95`), M3.2B (synthetic telephony control adapter foundation) is merged in [PR #17](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/17) (`7a28c40`), and M3.3A (CLI and executable synthetic call demo) is implemented locally on `feat/m3-cli-demo`. These contracts enforce in-process structural contracts, cryptographic HMAC-SHA256 token verification, and loopback simulation only, **not** live PSTN telephony interoperability. The test coverage reported applies **only to the currently implemented package, Core, ASGI, and synthetic transport modules**, not to the unimplemented Gateway application. **Voice audio media streaming (M4), real Verimor integration, and PyPI release are not yet implemented.**
 
 ## Documentation map
 
