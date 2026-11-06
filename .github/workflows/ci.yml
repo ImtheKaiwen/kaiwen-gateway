@@ -558,7 +558,7 @@ jobs:
           CONFIG_OUT="$(.venv/bin/kaiwen-gateway check-config)"
           echo "Config output: ${CONFIG_OUT}"
           case "${CONFIG_OUT}" in
-            *"Configuration: valid"*) echo "Check-config verified" ;;
+            *"Configuration valid"*) echo "Check-config verified" ;;
             *) echo "Unexpected check-config output: ${CONFIG_OUT}"; exit 1 ;;
           esac
           set +e
