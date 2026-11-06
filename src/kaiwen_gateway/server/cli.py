@@ -334,6 +334,7 @@ async def _async_run_demo(
 
     # Ephemeral credentials and isolated app
     secret_key = secrets.token_bytes(32)
+    secret_hex = secret_key.hex()
     verifier = SyntheticTokenVerifier(secret_key=secret_key, enable_replay_protection=True)
     bridge = SyntheticAuthBridge(verifier=verifier, enforce_call_exclusivity=True)
     config = CoreConfig(
@@ -395,6 +396,7 @@ async def _async_run_demo(
     stdout.write(f" on 127.0.0.1:{actual_port}... OK\n")
     stdout.flush()
 
+    token = ""
     try:
         # Mint token
         stdout.write("[2/7] Minting authenticated bearer token...")
@@ -474,12 +476,23 @@ async def _async_run_demo(
 
             await ws.send(json.dumps({"event": EVENT_SESSION_END}))
             try:
-                await asyncio.wait_for(ws.recv(), timeout=2.0)
-            except (
-                websockets.exceptions.ConnectionClosedOK,
-                websockets.exceptions.ConnectionClosed,
-            ):
-                pass
+                extra_msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                raise RuntimeError(f"Unexpected post-session message received: {extra_msg!r}")
+            except TimeoutError:
+                raise RuntimeError(
+                    "WebSocket failed to close after session.end (timeout)"
+                ) from None
+            except websockets.exceptions.ConnectionClosed as exc:
+                if exc.rcvd is not None:
+                    close_code = exc.rcvd.code
+                elif ws.close_code is not None:
+                    close_code = ws.close_code
+                else:
+                    close_code = 1006
+                if close_code != 1000:
+                    raise RuntimeError(
+                        f"WebSocket closed with unexpected code {close_code} (expected 1000)"
+                    ) from None
             stdout.write(" OK\n")
             stdout.flush()
 
@@ -491,23 +504,94 @@ async def _async_run_demo(
             raise RuntimeError(f"Active connections remaining: {coord.active_connections_count}")
         if len(bridge._active_calls) != 0:
             raise RuntimeError(f"Active calls remaining: {len(bridge._active_calls)}")
-        stdout.write(" OK (0 active connections, 0 active calls)\n")
+
+        ac = app.state.admission_controller
+        snap = ac.snapshot()
+        if snap.active_connections != 0:
+            raise RuntimeError(
+                f"AdmissionController active connections remaining: {snap.active_connections}"
+            )
+        if snap.available_capacity != snap.max_concurrent_connections:
+            raise RuntimeError(
+                f"AdmissionController capacity not fully restored: {snap.available_capacity} / {snap.max_concurrent_connections}"
+            )
+        if snap.active_tenants != 0:
+            raise RuntimeError(
+                f"AdmissionController active tenants remaining: {snap.active_tenants}"
+            )
+        stdout.write(" OK (0 active connections, 0 active calls, 0 active admission leases)\n")
         stdout.flush()
 
     except Exception as exc:
         stdout.write(" FAILED\n")
-        stderr.write(f"Synthetic demo error: {exc}\n")
+        err_msg = str(exc)
+        if token and token in err_msg:
+            err_msg = err_msg.replace(token, "[REDACTED]")
+        if secret_hex and secret_hex in err_msg:
+            err_msg = err_msg.replace(secret_hex, "[REDACTED]")
+        stderr.write(f"Synthetic demo error: {err_msg}\n")
         stderr.write("Result: FAIL\n")
         server.should_exit = True
         try:
             await asyncio.wait_for(server_task, timeout=5.0)
         except Exception:
-            pass
+            if not server_task.done():
+                server_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await server_task
         return 1
 
     # Clean server shutdown
     server.should_exit = True
-    await asyncio.wait_for(server_task, timeout=5.0)
+    try:
+        await asyncio.wait_for(server_task, timeout=5.0)
+    except TimeoutError:
+        stderr.write("Synthetic demo error: Server shutdown timed out after 5.0s\n")
+        stderr.write("Result: FAIL\n")
+        if not server_task.done():
+            server_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await server_task
+        return 1
+    except Exception as exc:
+        stderr.write(f"Synthetic demo error: Server shutdown failed: {exc}\n")
+        stderr.write("Result: FAIL\n")
+        if not server_task.done():
+            server_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await server_task
+        return 1
+
+    # Verify actual application shutdown state (Blocker C)
+    if getattr(app.state, "shutdown_failed", False) is not False:
+        stderr.write("Synthetic demo error: Application state reports shutdown_failed=True\n")
+        stderr.write("Result: FAIL\n")
+        return 1
+    if getattr(app.state, "stopped", False) is not True:
+        stderr.write("Synthetic demo error: Application state did not reach stopped=True\n")
+        stderr.write("Result: FAIL\n")
+        return 1
+
+    post_coord = app.state.drain_coordinator
+    if post_coord.active_connections_count != 0:
+        stderr.write(
+            f"Synthetic demo error: Drain coordinator active connections remaining after shutdown: {post_coord.active_connections_count}\n"
+        )
+        stderr.write("Result: FAIL\n")
+        return 1
+
+    final_snap = app.state.admission_controller.snapshot()
+    if (
+        final_snap.active_connections != 0
+        or final_snap.active_tenants != 0
+        or final_snap.available_capacity != final_snap.max_concurrent_connections
+    ):
+        stderr.write(
+            f"Synthetic demo error: AdmissionController leases remaining after shutdown: {final_snap}\n"
+        )
+        stderr.write("Result: FAIL\n")
+        return 1
+
     stdout.write("Server stopped cleanly. Synthetic demo completed successfully.\nResult: PASS\n")
     stdout.flush()
     return 0

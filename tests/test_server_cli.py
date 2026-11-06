@@ -320,7 +320,7 @@ def test_18_demo_end_to_end_success() -> None:
     assert "[5/7] Testing control plane heartbeat (session.ping -> session.pong)" in output
     assert "[6/7] Teardown: call.end -> call.ended -> session.end" in output
     assert (
-        "[7/7] Verifying resource isolation and zero active leases... OK (0 active connections, 0 active calls)"
+        "[7/7] Verifying resource isolation and zero active leases... OK (0 active connections, 0 active calls, 0 active admission leases)"
         in output
     )
     assert "Result: PASS" in output
@@ -704,3 +704,480 @@ def test_38_demo_actual_port_undetermined_fallback() -> None:
         code = run_demo(port=0, timeout=1.0, stdout=out, stderr=err)
         assert code == 1
         assert "Could not determine bound port from server sockets" in err.getvalue()
+
+
+def test_39_demo_close_code_1008_fails() -> None:
+    """Verify demo fails closed when WebSocket closes with 1008 policy violation."""
+    import websockets.exceptions
+    import websockets.frames
+    from websockets.asyncio.client import ClientConnection
+
+    orig_recv = ClientConnection.recv
+    call_count = 0
+
+    async def mock_recv(self: Any, *args: Any, **kwargs: Any) -> str:
+        nonlocal call_count
+        call_count += 1
+        res = await orig_recv(self, *args, **kwargs)
+        if call_count == 4:
+            pass
+        return str(res)
+
+    async def mock_close_recv(self: Any, *args: Any, **kwargs: Any) -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 5:
+            close_frame = websockets.frames.Close(1008, "Policy violation")
+            raise websockets.exceptions.ConnectionClosedError(close_frame, None)
+        res = await orig_recv(self, *args, **kwargs)
+        return str(res)
+
+    with patch.object(ClientConnection, "recv", mock_close_recv):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=3.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "WebSocket closed with unexpected code 1008 (expected 1000)" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+
+
+def test_40_demo_close_code_1011_fails() -> None:
+    """Verify demo fails closed when WebSocket closes with 1011 internal error."""
+    import websockets.exceptions
+    import websockets.frames
+    from websockets.asyncio.client import ClientConnection
+
+    orig_recv = ClientConnection.recv
+    call_count = 0
+
+    async def mock_recv(self: Any, *args: Any, **kwargs: Any) -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 5:
+            close_frame = websockets.frames.Close(1011, "Internal server error")
+            raise websockets.exceptions.ConnectionClosedError(close_frame, None)
+        res = await orig_recv(self, *args, **kwargs)
+        return str(res)
+
+    with patch.object(ClientConnection, "recv", mock_recv):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=3.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "WebSocket closed with unexpected code 1011 (expected 1000)" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+
+
+def test_41_demo_close_abnormal_1006_transport_drop_fails() -> None:
+    """Verify demo fails closed when connection drops without close frame (1006)."""
+    import websockets.exceptions
+    from websockets.asyncio.client import ClientConnection
+
+    orig_recv = ClientConnection.recv
+    call_count = 0
+
+    async def mock_recv(self: Any, *args: Any, **kwargs: Any) -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 5:
+            raise websockets.exceptions.ConnectionClosedError(None, None)
+        res = await orig_recv(self, *args, **kwargs)
+        return str(res)
+
+    with patch.object(ClientConnection, "recv", mock_recv):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=3.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "WebSocket closed with unexpected code 1006 (expected 1000)" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+
+
+def test_42_demo_unexpected_post_session_message_fails() -> None:
+    """Verify demo fails closed when server sends unexpected extra frame after session.end."""
+    import json
+
+    from websockets.asyncio.client import ClientConnection
+
+    orig_recv = ClientConnection.recv
+    call_count = 0
+
+    async def mock_recv(self: Any, *args: Any, **kwargs: Any) -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 5:
+            return json.dumps({"event": "unexpected.frame", "data": "extra"})
+        res = await orig_recv(self, *args, **kwargs)
+        return str(res)
+
+    with patch.object(ClientConnection, "recv", mock_recv):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=3.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "Unexpected post-session message received" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+
+
+def test_43_demo_post_session_close_timeout_fails() -> None:
+    """Verify demo fails closed when socket fails to close after session.end."""
+    import asyncio
+
+    from websockets.asyncio.client import ClientConnection
+
+    orig_recv = ClientConnection.recv
+    call_count = 0
+
+    async def mock_recv(self: Any, *args: Any, **kwargs: Any) -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 5:
+            await asyncio.sleep(5.0)
+            return ""
+        res = await orig_recv(self, *args, **kwargs)
+        return str(res)
+
+    with patch.object(ClientConnection, "recv", mock_recv):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=1.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "WebSocket failed to close after session.end (timeout)" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+
+
+def test_44_demo_token_and_secret_redaction_in_error() -> None:
+    """Verify that sensitive tokens and secret keys are never leaked into stderr on error."""
+    from websockets.asyncio.client import ClientConnection
+
+    from kaiwen_gateway.transports.synthetic import SyntheticTokenVerifier
+
+    captured_secret: list[str] = []
+    orig_verifier_init = SyntheticTokenVerifier.__init__
+
+    def mock_verifier_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        orig_verifier_init(self, *args, **kwargs)
+        captured_secret.append(self._key.hex())
+
+    captured_token: list[str] = []
+
+    async def mock_recv(self: Any, *args: Any, **kwargs: Any) -> str:
+        hdr = getattr(self.request, "headers", {}).get("Authorization", "")
+        tok = hdr.removeprefix("Bearer ").strip()
+        if tok:
+            captured_token.append(tok)
+        raise RuntimeError(
+            f"Simulated error with token={captured_token[0]} and secret={captured_secret[0]}"
+        )
+
+    with (
+        patch.object(SyntheticTokenVerifier, "__init__", mock_verifier_init),
+        patch.object(ClientConnection, "recv", mock_recv),
+    ):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=2.0, stdout=out, stderr=err)
+        assert code == 1
+        err_output = err.getvalue()
+        assert "Result: FAIL" in err_output
+        assert "[REDACTED]" in err_output
+        assert captured_token[0] not in err_output
+        assert captured_secret[0] not in err_output
+        assert "Simulated error with token=[REDACTED] and secret=[REDACTED]" in err_output
+
+
+def test_45_demo_admission_controller_active_connections_leak_fails() -> None:
+    """Verify demo fails closed if AdmissionController reports active connections remaining."""
+    import kaiwen_gateway.server.app as app_mod
+    from kaiwen_gateway.core.admission import AdmissionSnapshot
+
+    orig_create = app_mod.create_gateway_app
+
+    def mock_create(*args: Any, **kwargs: Any) -> Any:
+        app = orig_create(*args, **kwargs)
+        orig_snap = app.state.admission_controller.snapshot
+
+        def mock_snapshot() -> AdmissionSnapshot:
+            snap = orig_snap()
+            return AdmissionSnapshot(
+                active_connections=1,
+                available_capacity=snap.available_capacity,
+                max_concurrent_connections=snap.max_concurrent_connections,
+                max_connections_per_tenant=snap.max_connections_per_tenant,
+                active_tenants=snap.active_tenants,
+            )
+
+        app.state.admission_controller.snapshot = mock_snapshot
+        return app
+
+    with patch("kaiwen_gateway.server.app.create_gateway_app", mock_create):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=3.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "AdmissionController active connections remaining: 1" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+
+
+def test_46_demo_admission_controller_capacity_not_restored_fails() -> None:
+    """Verify demo fails closed if AdmissionController capacity is not fully restored."""
+    import kaiwen_gateway.server.app as app_mod
+    from kaiwen_gateway.core.admission import AdmissionSnapshot
+
+    orig_create = app_mod.create_gateway_app
+
+    def mock_create(*args: Any, **kwargs: Any) -> Any:
+        app = orig_create(*args, **kwargs)
+        orig_snap = app.state.admission_controller.snapshot
+
+        def mock_snapshot() -> AdmissionSnapshot:
+            snap = orig_snap()
+            return AdmissionSnapshot(
+                active_connections=0,
+                available_capacity=snap.max_concurrent_connections - 1,
+                max_concurrent_connections=snap.max_concurrent_connections,
+                max_connections_per_tenant=snap.max_connections_per_tenant,
+                active_tenants=0,
+            )
+
+        app.state.admission_controller.snapshot = mock_snapshot
+        return app
+
+    with patch("kaiwen_gateway.server.app.create_gateway_app", mock_create):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=3.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "AdmissionController capacity not fully restored" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+
+
+def test_47_demo_admission_controller_active_tenants_remaining_fails() -> None:
+    """Verify demo fails closed if AdmissionController reports active tenants remaining."""
+    import kaiwen_gateway.server.app as app_mod
+    from kaiwen_gateway.core.admission import AdmissionSnapshot
+
+    orig_create = app_mod.create_gateway_app
+
+    def mock_create(*args: Any, **kwargs: Any) -> Any:
+        app = orig_create(*args, **kwargs)
+        orig_snap = app.state.admission_controller.snapshot
+
+        def mock_snapshot() -> AdmissionSnapshot:
+            snap = orig_snap()
+            return AdmissionSnapshot(
+                active_connections=0,
+                available_capacity=snap.max_concurrent_connections,
+                max_concurrent_connections=snap.max_concurrent_connections,
+                max_connections_per_tenant=snap.max_connections_per_tenant,
+                active_tenants=1,
+            )
+
+        app.state.admission_controller.snapshot = mock_snapshot
+        return app
+
+    with patch("kaiwen_gateway.server.app.create_gateway_app", mock_create):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=3.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "AdmissionController active tenants remaining: 1" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+
+
+def test_48_demo_shutdown_timeout_fails() -> None:
+    """Verify demo fails closed when server task fails to terminate within 5s shutdown timeout."""
+    import asyncio
+
+    import uvicorn
+
+    orig_serve = uvicorn.Server.serve
+
+    async def mock_serve(self: Any, *args: Any, **kwargs: Any) -> None:
+        # Run normally until started, then ignore should_exit
+        await orig_serve(self, *args, **kwargs)
+
+    # Patch asyncio.wait_for specifically inside clean server shutdown to raise TimeoutError
+    orig_wait_for = asyncio.wait_for
+
+    wait_count = 0
+
+    async def mock_wait_for(fut: Any, timeout: float | None = None) -> Any:
+        nonlocal wait_count
+        wait_count += 1
+        # When waiting for server_task during clean shutdown (timeout=5.0)
+        if timeout == 5.0 and wait_count >= 6:
+            raise TimeoutError()
+        return await orig_wait_for(fut, timeout=timeout)
+
+    with patch("asyncio.wait_for", side_effect=mock_wait_for):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=3.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "Server shutdown timed out after 5.0s" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+
+
+def test_49_demo_shutdown_exception_fails() -> None:
+    """Verify demo fails closed when server task raises an exception on shutdown."""
+    import asyncio
+
+    orig_wait_for = asyncio.wait_for
+    wait_count = 0
+
+    async def mock_wait_for(fut: Any, timeout: float | None = None) -> Any:
+        nonlocal wait_count
+        wait_count += 1
+        if timeout == 5.0 and wait_count >= 6:
+            raise RuntimeError("Fatal server shutdown crash")
+        return await orig_wait_for(fut, timeout=timeout)
+
+    with patch("asyncio.wait_for", side_effect=mock_wait_for):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=3.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "Server shutdown failed: Fatal server shutdown crash" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+
+
+def test_50_demo_shutdown_state_not_stopped_fails() -> None:
+    """Verify demo fails closed if application state does not reach stopped=True."""
+    import kaiwen_gateway.server.app as app_mod
+
+    orig_create = app_mod.create_gateway_app
+
+    def mock_create(*args: Any, **kwargs: Any) -> Any:
+        app = orig_create(*args, **kwargs)
+
+        class StateProxy:
+            def __init__(self, target: Any) -> None:
+                self._target = target
+
+            def __getattr__(self, name: str) -> Any:
+                if name == "stopped":
+                    return False
+                return getattr(self._target, name)
+
+            def __setattr__(self, name: str, value: Any) -> None:
+                if name == "_target":
+                    super().__setattr__(name, value)
+                else:
+                    setattr(self._target, name, value)
+
+        app.state = StateProxy(app.state)  # type: ignore[assignment]
+        return app
+
+    with patch("kaiwen_gateway.server.app.create_gateway_app", mock_create):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=3.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "Application state did not reach stopped=True" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+
+
+def test_51_demo_shutdown_state_shutdown_failed_flag() -> None:
+    """Verify demo fails closed if application state reports shutdown_failed=True."""
+    import kaiwen_gateway.server.app as app_mod
+
+    orig_create = app_mod.create_gateway_app
+
+    def mock_create(*args: Any, **kwargs: Any) -> Any:
+        app = orig_create(*args, **kwargs)
+
+        class StateProxy:
+            def __init__(self, target: Any) -> None:
+                self._target = target
+
+            def __getattr__(self, name: str) -> Any:
+                if name == "shutdown_failed":
+                    return True
+                return getattr(self._target, name)
+
+            def __setattr__(self, name: str, value: Any) -> None:
+                if name == "_target":
+                    super().__setattr__(name, value)
+                else:
+                    setattr(self._target, name, value)
+
+        app.state = StateProxy(app.state)  # type: ignore[assignment]
+        return app
+
+    with patch("kaiwen_gateway.server.app.create_gateway_app", mock_create):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=3.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "Application state reports shutdown_failed=True" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+
+
+def test_52_demo_post_shutdown_drain_coordinator_leak_fails() -> None:
+    """Verify demo fails closed if drain coordinator has active connections after shutdown."""
+    from unittest.mock import PropertyMock
+
+    from kaiwen_gateway.core.draining import InstanceDrainCoordinator
+
+    call_count = 0
+
+    def get_count() -> int:
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 2:
+            return 1
+        return 0
+
+    with patch.object(
+        InstanceDrainCoordinator,
+        "active_connections_count",
+        new_callable=PropertyMock,
+        side_effect=get_count,
+    ):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=3.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "Drain coordinator active connections remaining after shutdown" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+
+
+def test_53_demo_post_shutdown_admission_leak_fails() -> None:
+    """Verify demo fails closed if AdmissionController has active leases after shutdown."""
+    import kaiwen_gateway.server.app as app_mod
+    from kaiwen_gateway.core.admission import AdmissionSnapshot
+
+    orig_create = app_mod.create_gateway_app
+
+    def mock_create(*args: Any, **kwargs: Any) -> Any:
+        app = orig_create(*args, **kwargs)
+        orig_snap = app.state.admission_controller.snapshot
+        call_count = 0
+
+        def mock_snapshot() -> AdmissionSnapshot:
+            nonlocal call_count
+            call_count += 1
+            snap = orig_snap()
+            assert isinstance(snap, AdmissionSnapshot)
+            if call_count >= 2:
+                return AdmissionSnapshot(
+                    active_connections=1,
+                    available_capacity=snap.available_capacity,
+                    max_concurrent_connections=snap.max_concurrent_connections,
+                    max_connections_per_tenant=snap.max_connections_per_tenant,
+                    active_tenants=snap.active_tenants,
+                )
+            return snap
+
+        app.state.admission_controller.snapshot = mock_snapshot
+        return app
+
+    with patch("kaiwen_gateway.server.app.create_gateway_app", mock_create):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = run_demo(port=0, timeout=3.0, stdout=out, stderr=err)
+        assert code == 1
+        assert "AdmissionController leases remaining after shutdown" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
+        assert "Result: FAIL" in err.getvalue()
