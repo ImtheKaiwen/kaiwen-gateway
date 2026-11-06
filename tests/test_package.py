@@ -31,7 +31,8 @@ def test_public_api_surface_is_minimal() -> None:
     unexported_public_objects = [
         name
         for name in dir(kaiwen_gateway)
-        if not name.startswith("_") and name not in {"Final", "core", "server", "transports"}
+        if not name.startswith("_")
+        and name not in {"Final", "core", "server", "transports", "modules"}
     ]
     assert unexported_public_objects == []
 
