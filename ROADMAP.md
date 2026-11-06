@@ -61,8 +61,8 @@ Use only these milestone status values:
 | **M0** | Documentation baseline and approval | `Complete` (closed 2026-11-01; commits `d422350`, `27ab0f9`, `4a8fe82`) | Maintainer review |
 | **M1** | Python package and CI foundation | `Complete` (M1.1 merged in `#1` / `b0a666e`; M1.2 merged in `#2` / `9c0293c`; M1.3 merged in `#3` / `1355b0c` & verified on `main` run `41263309448`; M1.4A merged in `#4` / `32111a4` & verified on `main` run `41264905664` + Dependabot runs `41264912866`, `41264912883`; M1.4B.1 `main` branch protection enabled & verified via GitHub API) | M0 |
 | **M2** | Core contracts, identity and security/admission | `In progress` (M2.1 merged in `#9` / `68030a0`; M2.2A merged in `#10` / `f65ad6d`; M2.2B merged in `#11` / `705091e`; M2.3 merged in `#12` / `192ec9b`; M2.4A merged in `#13` / `cd835bf`; M2.4B merged in `#14` / `ade73ec`; remaining M2 exit criteria under evaluation) | M1 |
-| **M3** | ASGI/WSS ingress and synthetic telephony adapter | `In progress` (M3.1 merged in `#15` / `224284f`; M3.2A merged in `#16` / `558bd95`; M3.2B merged in `#17` / `7a28c40`; M3.3A merged in `#18` / `d347eae`; M3.3B in review in `#19`) | M2 |
-| **M4** | Voice audio bridge and Kaiwen Agent integration | `Not started` | M3 |
+| **M3** | ASGI/WSS ingress and synthetic telephony adapter | `Complete` (M3.1 merged in `#15` / `224284f`; M3.2A merged in `#16` / `558bd95`; M3.2B merged in `#17` / `7a28c40`; M3.3A merged in `#18` / `d347eae`; M3.3B merged in `#19` / `4fa9a18` & verified on `main` run `42289608463`) | M2 |
+| **M4** | Voice audio bridge and Kaiwen Agent integration | `In progress` (M4.1 in review in draft PR; M4.2 not started) | M3 |
 | **M5** | Resilience, simulation, security and load evidence | `Not started` | M4 |
 | **M6** | Alpha packaging and release-readiness review | `Not started` | M5 |
 | **M7** | Conditional Verimor pilot | `Blocked` (official protocol and authorizations) | M6 + `OPEN-*` dependencies |
@@ -146,7 +146,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - [x] Versioned synthetic WSS endpoint contract, provider-neutral telephony control port, and synthetic telephony adapter (M3.2B merged in `#17` / `7a28c40`).
 - [x] **Project-owned fake telephony wire protocol**, explicitly named synthetic in code, examples and tests (`call.start`, `call.started`, `call.end`, `call.ended`, ping/pong).
 - [x] Comprehensive CLI and executable synthetic call demo (M3.3A merged in `#18` / `d347eae`).
-- [x] Synthetic load, soak and fault runner with measured 1, 5, 25 concurrency stages, capacity saturation, and fault injection (M3.3B in review in `#19`).
+- [x] Synthetic load, soak and fault runner with measured 1, 5, 25 concurrency stages, capacity saturation, and fault injection (M3.3B merged in `#19` / `4fa9a18`).
 - [x] Authenticated WSS handshake, per-connection identity binding, input schema/frame-size validation and rejection before upstream allocation.
 - [x] Connection close/error mapping, request/resource limits, idle handling as relevant to current scope.
 - [x] Synthetic WSS test client and basic handshake/security/integration tests.
@@ -166,12 +166,12 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 **Deliverables**
 
-- [ ] Voice-local media/domain contracts and provider-neutral telephony/AI adapter interfaces.
-- [ ] Two lifetime-bound concurrent audio pumps: telephony → AI and AI → telephony.
+- [x] Voice-local media/domain contracts and provider-neutral telephony/AI adapter interfaces (M4.1 local implementation).
+- [x] Two lifetime-bound concurrent audio pumps: telephony → AI and AI → telephony (M4.1 local implementation).
 - [ ] Provider-specific codec negotiation/conversion **only when evidence requires it**; validate frame formats/order/timing.
-- [ ] Bounded media queues/backpressure, precise cancellation and idempotent cleanup.
+- [x] Bounded media queues/backpressure, precise cancellation and idempotent cleanup (M4.1 local implementation).
 - [ ] Barge-in/unplayed-output handling according to **verified adapter capabilities**.
-- [ ] Fake AI adapter and independent per-call session state; concurrency/isolation fixtures.
+- [x] Fake AI adapter and independent per-call session state; concurrency/isolation fixtures (M4.1 local implementation).
 - [ ] Kaiwen Agent integration adapter using **public, compatible APIs**; no duplicate agent runtime.
 - [ ] OpenAI Live contract review against current official docs; an authorized sandbox smoke test if credentials/approval are available.
 - [ ] Clear capability matrix distinguishing synthetic operation, reviewed contract and real provider-verified behavior.
