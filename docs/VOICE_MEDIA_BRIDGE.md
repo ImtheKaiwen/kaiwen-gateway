@@ -112,10 +112,13 @@ Media Port     │                             │                │     Media 
   This accounts solely for queued `AudioFrame` payloads and excludes in-flight OS socket buffers, adapter states, or external runtime memory.
 - **Test Adapter Boundary:** Note that `FakeTelephonyMediaAdapter` and `FakeAIMediaAdapter` utilize unbounded `asyncio.Queue` internally for harness frame pre-staging. This is a deterministic testing mechanism and must not be confused with the strictly bounded queue guarantees enforced within `VoiceBridgeSession`.
 
-### Failure and Cancellation Guarantees:
-- **Pump Failure Isolation:** If either pump encounters an exception (e.g. transport reset, timeout, invalid frame), the supervisor immediately cancels the sibling pump, sets session state to `FAILED`, and closes both ports.
+### Failure, Cancellation & Lifecycle Guarantees:
+- **Parent `run()` Cancellation:** When a parent task running `session.run()` is cancelled, the session immediately executes `await session.close()`. All background pumps and the supervisor task are cancelled and gathered, underlying ports are closed, `_closed_event` is set, and `asyncio.CancelledError` is cleanly re-raised. Zero orphan tasks or open ports remain.
+- **Single-Owner Terminal Cleanup:** Cleanup is serialized under an internal `asyncio.Lock` (`_cleanup_lock`). Concurrent calls to `session.close()` wait for active port teardown to complete and only return once `_closed_event` is set.
+- **Terminal State Preservation:** A failed session (`FAILED` state caused by an unhandled pump error, invalid frame, or backpressure overflow) cannot be overwritten by concurrent or subsequent `close()` calls to `CLOSING` or `CLOSED`. The terminal state strictly remains `FAILED` with `session.error` intact.
+- **Pump Failure Isolation:** If either pump encounters an exception, the supervisor immediately cancels the sibling pump, sets session state to `FAILED`, and closes both ports under lock.
 - **Clean EOF:** When a source signals EOF (`receive_frame() -> None`), the receiver queues a sentinel. The forwarder drains all buffered frames in FIFO order, then terminates cleanly.
-- **Idempotent Teardown:** `session.close()` can be invoked repeatedly and concurrently; all pump tasks and supervisor tasks are cancelled and awaited, preventing orphan tasks or resource leaks.
+- **Idempotent Teardown:** `session.close()` can be invoked repeatedly and concurrently without deadlocks, errors, or duplicate port teardown.
 
 ---
 

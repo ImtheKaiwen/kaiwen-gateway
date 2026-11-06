@@ -12,6 +12,7 @@ Invariants:
 from __future__ import annotations
 
 import asyncio
+import math
 from enum import StrEnum
 from types import TracebackType
 from typing import Final, Self
@@ -68,12 +69,24 @@ class VoiceBridgeSession:
             raise VoiceDomainError("call_id must be a non-empty string")
         if not isinstance(tenant_id, str) or not tenant_id.strip():
             raise VoiceDomainError("tenant_id must be a non-empty string")
-        if not isinstance(queue_capacity, int) or queue_capacity < 1:
-            raise VoiceDomainError("queue_capacity must be an integer >= 1")
-        if backpressure_timeout is not None and (
-            not isinstance(backpressure_timeout, (int, float)) or backpressure_timeout <= 0.0
+        if (
+            isinstance(queue_capacity, bool)
+            or not isinstance(queue_capacity, int)
+            or queue_capacity < 1
         ):
-            raise VoiceDomainError("backpressure_timeout must be a positive float or None")
+            raise VoiceDomainError("queue_capacity must be an integer >= 1")
+        if backpressure_timeout is not None:
+            if isinstance(backpressure_timeout, bool) or not isinstance(
+                backpressure_timeout, (int, float)
+            ):
+                raise VoiceDomainError(
+                    "backpressure_timeout must be a positive finite float or None"
+                )
+            timeout_float = float(backpressure_timeout)
+            if not math.isfinite(timeout_float) or timeout_float <= 0.0:
+                raise VoiceDomainError(
+                    "backpressure_timeout must be a positive finite float or None"
+                )
 
         self.call_id: Final[str] = call_id.strip()
         self.tenant_id: Final[str] = tenant_id.strip()
@@ -90,7 +103,8 @@ class VoiceBridgeSession:
         self._error: BaseException | None = None
         self._closing_event: asyncio.Event = asyncio.Event()
         self._closed_event: asyncio.Event = asyncio.Event()
-        self._is_internally_closed: bool = False
+        self._cleanup_lock: asyncio.Lock = asyncio.Lock()
+        self._is_cleaned_up: bool = False
 
         # Bounded per-direction queues
         self._inbound_queue: asyncio.Queue[AudioFrame | None] = asyncio.Queue(
@@ -183,27 +197,34 @@ class VoiceBridgeSession:
     async def run(self) -> None:
         """Start the bridge and wait for completion."""
         await self.start()
-        await self.wait_until_closed()
+        try:
+            await self.wait_until_closed()
+        except asyncio.CancelledError:
+            await self.close()
+            raise
 
     async def close(self) -> None:
         """Idempotently close the session, cancel pump tasks, and release port resources."""
         if self._closed_event.is_set():
             return
-        if self._state in (VoiceBridgeState.CLOSING, VoiceBridgeState.CLOSED):
-            await self._closed_event.wait()
-            return
-
-        self._state = VoiceBridgeState.CLOSING
+        if self._state != VoiceBridgeState.FAILED:
+            self._state = VoiceBridgeState.CLOSING
         self._closing_event.set()
 
-        if self._supervisor_task is not None and not self._supervisor_task.done():
-            self._supervisor_task.cancel()
+        await self._cleanup()
+
+        current = asyncio.current_task()
+        if (
+            self._supervisor_task is not None
+            and self._supervisor_task is not current
+            and not self._supervisor_task.done()
+        ):
             try:
                 await self._supervisor_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, Exception):
                 pass
 
-        await self._internal_close()
+        await self._closed_event.wait()
 
     async def __aenter__(self) -> Self:
         await self.start()
@@ -217,37 +238,42 @@ class VoiceBridgeSession:
     ) -> None:
         await self.close()
 
-    async def _internal_close(self) -> None:
-        """Perform terminal cleanup of tasks and ports exactly once."""
-        if self._is_internally_closed:
-            return
-        self._is_internally_closed = True
-        self._closing_event.set()
+    async def _cleanup(self) -> None:
+        """Perform terminal cleanup of tasks and ports exactly once under lock."""
+        async with self._cleanup_lock:
+            if self._is_cleaned_up:
+                return
+            self._closing_event.set()
 
-        # Cancel pump tasks if still running
-        pending_pumps = [
-            t for t in (self._inbound_task, self._outbound_task) if t is not None and not t.done()
-        ]
-        for t in pending_pumps:
-            t.cancel()
-        if pending_pumps:
-            await asyncio.gather(*pending_pumps, return_exceptions=True)
+            # Cancel pump tasks if still running
+            pending_pumps = [
+                t
+                for t in (self._inbound_task, self._outbound_task)
+                if t is not None and not t.done()
+            ]
+            for t in pending_pumps:
+                t.cancel()
+            if pending_pumps:
+                await asyncio.gather(*pending_pumps, return_exceptions=True)
 
-        # Idempotently close underlying media ports
-        try:
-            await self._telephony_port.close()
-        except Exception:
-            pass
+            # Idempotently close underlying media ports
+            try:
+                await self._telephony_port.close()
+            except Exception:
+                pass
 
-        try:
-            await self._ai_port.close()
-        except Exception:
-            pass
+            try:
+                await self._ai_port.close()
+            except Exception:
+                pass
 
-        if self._state != VoiceBridgeState.FAILED:
-            self._state = VoiceBridgeState.CLOSED
+            if self._error is not None or self._state == VoiceBridgeState.FAILED:
+                self._state = VoiceBridgeState.FAILED
+            else:
+                self._state = VoiceBridgeState.CLOSED
 
-        self._closed_event.set()
+            self._is_cleaned_up = True
+            self._closed_event.set()
 
     async def _run_supervisor(self) -> None:
         """Supervise the two pumps, handle early failure, and drive termination."""
@@ -263,7 +289,8 @@ class VoiceBridgeSession:
             failed_exc: BaseException | None = None
             for t in done:
                 if t.cancelled():
-                    failed_exc = asyncio.CancelledError()
+                    if not self._closing_event.is_set():
+                        failed_exc = asyncio.CancelledError()
                     break
                 exc = t.exception()
                 if exc is not None:
@@ -281,17 +308,17 @@ class VoiceBridgeSession:
                 if self._state not in (VoiceBridgeState.CLOSING, VoiceBridgeState.CLOSED):
                     self._state = VoiceBridgeState.CLOSED
 
-            await self._internal_close()
+            await self._cleanup()
         except asyncio.CancelledError:
             for pump_task in (self._inbound_task, self._outbound_task):
                 if pump_task is not None and not pump_task.done():
                     pump_task.cancel()
-            await self._internal_close()
+            await self._cleanup()
             raise
         except Exception as exc:
             self._error = exc
             self._state = VoiceBridgeState.FAILED
-            await self._internal_close()
+            await self._cleanup()
 
     async def _run_inbound_pump(self) -> None:
         """Run the inbound media pump (Telephony -> AI)."""

@@ -816,3 +816,383 @@ class TestMultiCallAndTenantIsolation:
             assert session_b.state == VoiceBridgeState.CLOSED
 
         asyncio.run(_test())
+
+
+class _BarrierTelephonyMediaAdapter(FakeTelephonyMediaAdapter):
+    """Fake adapter that signals when close starts and waits for test release."""
+
+    def __init__(
+        self,
+        *,
+        enter_close_event: asyncio.Event,
+        release_close_event: asyncio.Event,
+        name: str = "barrier-telephony",
+    ) -> None:
+        super().__init__(name=name)
+        self.enter_close_event = enter_close_event
+        self.release_close_event = release_close_event
+
+    async def close(self) -> None:
+        self.enter_close_event.set()
+        await self.release_close_event.wait()
+        await super().close()
+
+
+class TestVoiceBridgeStrictConfigValidation:
+    """Gate C: Strict boolean, non-finite, and range validation on configuration."""
+
+    @pytest.mark.parametrize("invalid_capacity", [True, False])
+    def test_queue_capacity_boolean_rejected(self, invalid_capacity: object) -> None:
+        tel = FakeTelephonyMediaAdapter()
+        ai = FakeAIMediaAdapter()
+        with pytest.raises(VoiceDomainError, match="queue_capacity must be an integer >= 1"):
+            VoiceBridgeSession(
+                call_id="call-c1",
+                tenant_id="tenant-c1",
+                telephony_port=tel,
+                ai_port=ai,
+                queue_capacity=invalid_capacity,  # type: ignore[arg-type]
+            )
+
+    @pytest.mark.parametrize("invalid_timeout", [True, False])
+    def test_backpressure_timeout_boolean_rejected(self, invalid_timeout: object) -> None:
+        tel = FakeTelephonyMediaAdapter()
+        ai = FakeAIMediaAdapter()
+        with pytest.raises(
+            VoiceDomainError, match="backpressure_timeout must be a positive finite float or None"
+        ):
+            VoiceBridgeSession(
+                call_id="call-c2",
+                tenant_id="tenant-c2",
+                telephony_port=tel,
+                ai_port=ai,
+                backpressure_timeout=invalid_timeout,  # type: ignore[arg-type]
+            )
+
+    @pytest.mark.parametrize("invalid_float", [float("nan"), float("inf"), float("-inf")])
+    def test_backpressure_timeout_non_finite_rejected(self, invalid_float: float) -> None:
+        tel = FakeTelephonyMediaAdapter()
+        ai = FakeAIMediaAdapter()
+        with pytest.raises(
+            VoiceDomainError, match="backpressure_timeout must be a positive finite float or None"
+        ):
+            VoiceBridgeSession(
+                call_id="call-c3",
+                tenant_id="tenant-c3",
+                telephony_port=tel,
+                ai_port=ai,
+                backpressure_timeout=invalid_float,
+            )
+
+    @pytest.mark.parametrize("invalid_non_positive", [0, 0.0, -1, -1.0])
+    def test_backpressure_timeout_non_positive_rejected(self, invalid_non_positive: float) -> None:
+        tel = FakeTelephonyMediaAdapter()
+        ai = FakeAIMediaAdapter()
+        with pytest.raises(
+            VoiceDomainError, match="backpressure_timeout must be a positive finite float or None"
+        ):
+            VoiceBridgeSession(
+                call_id="call-c4",
+                tenant_id="tenant-c4",
+                telephony_port=tel,
+                ai_port=ai,
+                backpressure_timeout=invalid_non_positive,
+            )
+
+
+class TestVoiceBridgeParentRunCancellation:
+    """Gate A: Parent run() task cancellation guarantees clean teardown and propagation."""
+
+    def test_parent_run_cancellation_during_active_streaming(self) -> None:
+        async def _test() -> None:
+            tel = FakeTelephonyMediaAdapter()
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-cancel-1",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            # Push initial frame so streaming starts
+            frame = create_synthetic_pcm16le_frame(b"AUDIO_DATA_0", sequence=0)
+            tel.push_frame(frame)
+
+            run_task = asyncio.create_task(session.run())
+            # Allow run_task to start pumps and transfer first frame
+            while session.inbound_frames_transferred < 1:
+                await asyncio.sleep(0.001)
+
+            # Cancel parent run task
+            run_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
+
+            # Verify session cleanup invariants
+            state_val = session.state.value
+            assert state_val == "closed"
+            assert tel.is_closed is True
+            assert ai.is_closed is True
+            assert session._closed_event.is_set() is True
+
+            # Verify zero orphan tasks
+            assert session._supervisor_task is not None
+            assert session._supervisor_task.done() is True
+            assert session._inbound_task is not None
+            assert session._inbound_task.done() is True
+            assert session._outbound_task is not None
+            assert session._outbound_task.done() is True
+
+        asyncio.run(_test())
+
+    def test_parent_run_cancellation_during_backpressure_wait(self) -> None:
+        async def _test() -> None:
+            tel = FakeTelephonyMediaAdapter()
+            ai = FakeAIMediaAdapter()
+            ai.set_send_delay(1.0)  # Slow down AI forwarder to fill inbound queue
+            session = VoiceBridgeSession(
+                call_id="call-cancel-bp",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+                queue_capacity=1,
+                backpressure_timeout=10.0,
+            )
+
+            # Push frames to fill the queue and block on backpressure
+            tel.push_frame(create_synthetic_pcm16le_frame(b"FRAME_1", sequence=0))
+            tel.push_frame(create_synthetic_pcm16le_frame(b"FRAME_2", sequence=1))
+            tel.push_frame(create_synthetic_pcm16le_frame(b"FRAME_3", sequence=2))
+
+            run_task = asyncio.create_task(session.run())
+            await asyncio.sleep(0.01)
+
+            run_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
+
+            state_val = session.state.value
+            assert state_val == "closed"
+            assert tel.is_closed is True
+            assert ai.is_closed is True
+            assert session._closed_event.is_set() is True
+
+        asyncio.run(_test())
+
+    def test_parent_run_cancellation_during_receive_wait(self) -> None:
+        async def _test() -> None:
+            tel = FakeTelephonyMediaAdapter()
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-cancel-recv",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            # No frames pushed: receiver will be blocked waiting for input
+            run_task = asyncio.create_task(session.run())
+            await asyncio.sleep(0.01)
+
+            run_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
+
+            state_val = session.state.value
+            assert state_val == "closed"
+            assert tel.is_closed is True
+            assert ai.is_closed is True
+            assert session._closed_event.is_set() is True
+
+        asyncio.run(_test())
+
+    def test_parent_run_cancellation_unblocks_concurrent_waiters(self) -> None:
+        async def _test() -> None:
+            tel = FakeTelephonyMediaAdapter()
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-cancel-waiters",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            run_task = asyncio.create_task(session.run())
+            waiter_task = asyncio.create_task(session.wait_until_closed(propagate_error=False))
+            await asyncio.sleep(0.01)
+
+            run_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
+
+            # The waiter must unblock without error because _closed_event is set
+            await asyncio.wait_for(waiter_task, timeout=1.0)
+            assert waiter_task.done() is True
+            state_val = session.state.value
+            assert state_val == "closed"
+
+        asyncio.run(_test())
+
+
+class TestVoiceBridgeSingleOwnerCleanupAndRaces:
+    """Gate B: Single-owner cleanup, concurrent close synchronization, and state preservation."""
+
+    def test_delayed_port_close_blocks_concurrent_session_close(self) -> None:
+        async def _test() -> None:
+            enter_close_event = asyncio.Event()
+            release_close_event = asyncio.Event()
+            tel = _BarrierTelephonyMediaAdapter(
+                enter_close_event=enter_close_event,
+                release_close_event=release_close_event,
+            )
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-race-1",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            await session.start()
+
+            # First close task enters cleanup and pauses at telephony_port.close()
+            close_task_1 = asyncio.create_task(session.close())
+            await enter_close_event.wait()
+
+            # Launch concurrent close calls while port cleanup is in progress
+            close_task_2 = asyncio.create_task(session.close())
+            close_task_3 = asyncio.create_task(session.close())
+
+            # Give event loop cycles to attempt completion
+            await asyncio.sleep(0.01)
+
+            # Invariant: None of the close tasks have returned, _closed_event not set
+            assert close_task_1.done() is False
+            assert close_task_2.done() is False
+            assert close_task_3.done() is False
+            assert session._closed_event.is_set() is False
+
+            # Release the barrier
+            release_close_event.set()
+
+            # All close tasks must now complete
+            await asyncio.wait_for(
+                asyncio.gather(close_task_1, close_task_2, close_task_3),
+                timeout=1.0,
+            )
+
+            state_val = session.state.value
+            assert state_val == "closed"
+            assert session._closed_event.is_set() is True
+            assert tel.is_closed is True
+            assert ai.is_closed is True
+
+        asyncio.run(_test())
+
+    def test_supervisor_failure_cleanup_preserves_failed_state_against_concurrent_close(
+        self,
+    ) -> None:
+        async def _test() -> None:
+            enter_close_event = asyncio.Event()
+            release_close_event = asyncio.Event()
+            tel = _BarrierTelephonyMediaAdapter(
+                enter_close_event=enter_close_event,
+                release_close_event=release_close_event,
+            )
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-race-fail",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            # Inject error in telephony receive
+            tel.inject_receive_error(InvalidAudioFrameError("injected frame failure"))
+            await session.start()
+
+            # Wait for supervisor to detect failure, set FAILED, and pause at port close
+            await enter_close_event.wait()
+
+            state_val = session.state.value
+            assert state_val == "failed"
+
+            # Concurrently call close() from outside while supervisor is cleaning up
+            close_task_1 = asyncio.create_task(session.close())
+            close_task_2 = asyncio.create_task(session.close())
+            await asyncio.sleep(0.01)
+
+            # Invariant: close tasks have not returned, FAILED state is NOT overwritten
+            assert close_task_1.done() is False
+            assert close_task_2.done() is False
+            state_val_mid = session.state.value
+            assert state_val_mid == "failed"
+            assert session._closed_event.is_set() is False
+
+            # Release port close barrier
+            release_close_event.set()
+
+            await asyncio.wait_for(
+                asyncio.gather(close_task_1, close_task_2),
+                timeout=1.0,
+            )
+
+            # Invariant: terminal state is strictly FAILED, error preserved
+            state_val_end = session.state.value
+            assert state_val_end == "failed"
+            assert isinstance(session.error, InvalidAudioFrameError)
+            assert session._closed_event.is_set() is True
+            assert tel.is_closed is True
+            assert ai.is_closed is True
+
+        asyncio.run(_test())
+
+    def test_clean_eof_with_delayed_port_close_and_concurrent_close(self) -> None:
+        async def _test() -> None:
+            enter_close_event = asyncio.Event()
+            release_close_event = asyncio.Event()
+            tel = _BarrierTelephonyMediaAdapter(
+                enter_close_event=enter_close_event,
+                release_close_event=release_close_event,
+            )
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-race-eof",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            # Push valid frames then EOF
+            frame = create_synthetic_pcm16le_frame(b"AUDIO_DATA", sequence=0)
+            tel.push_frame(frame)
+            tel.push_eof()
+            ai.push_eof()
+
+            run_task = asyncio.create_task(session.run())
+
+            # Wait until streams finish and supervisor enters cleanup at port close
+            await enter_close_event.wait()
+
+            # Concurrently invoke close()
+            close_task = asyncio.create_task(session.close())
+            await asyncio.sleep(0.01)
+
+            assert close_task.done() is False
+            assert run_task.done() is False
+            assert session._closed_event.is_set() is False
+
+            # Release barrier
+            release_close_event.set()
+
+            await asyncio.wait_for(asyncio.gather(run_task, close_task), timeout=1.0)
+
+            state_val = session.state.value
+            assert state_val == "closed"
+            assert session.error is None
+            assert session.inbound_completed is True
+            assert session._closed_event.is_set() is True
+            assert tel.is_closed is True
+            assert ai.is_closed is True
+
+        asyncio.run(_test())
