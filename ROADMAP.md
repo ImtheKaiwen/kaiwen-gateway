@@ -1,6 +1,6 @@
 # Kaiwen Gateway — Development Roadmap
 
-> **Status:** Active roadmap — M0 Complete (2026-11-01); M1 Complete (2026-11-01; M1.1–M1.4 verified); M2 In progress (M2.1 merged in `#9` / `68030a0`; M2.2A merged in `#10` / `f65ad6d`; M2.2B merged in `#11` / `705091e`; M2.3 local Core admission control)
+> **Status:** Active roadmap — M0 Complete (2026-11-01); M1 Complete (2026-11-01; M1.1–M1.4 verified); M2 Complete; M3 Complete; M4 In progress (M4.1 Complete — PR #20 / `577e6b9`; M4.2A Draft PR pending review; M4.2B Not started; M5 Not started)
 > **Project phase:** Design / pre-implementation
 > **Initial target release:** `0.1.0a1` (synthetic-environment alpha)
 > **Last reviewed:** 2026-11-01
@@ -62,7 +62,7 @@ Use only these milestone status values:
 | **M1** | Python package and CI foundation | `Complete` (M1.1 merged in `#1` / `b0a666e`; M1.2 merged in `#2` / `9c0293c`; M1.3 merged in `#3` / `1355b0c` & verified on `main` run `41263309448`; M1.4A merged in `#4` / `32111a4` & verified on `main` run `41264905664` + Dependabot runs `41264912866`, `41264912883`; M1.4B.1 `main` branch protection enabled & verified via GitHub API) | M0 |
 | **M2** | Core contracts, identity and security/admission | `In progress` (M2.1 merged in `#9` / `68030a0`; M2.2A merged in `#10` / `f65ad6d`; M2.2B merged in `#11` / `705091e`; M2.3 merged in `#12` / `192ec9b`; M2.4A merged in `#13` / `cd835bf`; M2.4B merged in `#14` / `ade73ec`; remaining M2 exit criteria under evaluation) | M1 |
 | **M3** | ASGI/WSS ingress and synthetic telephony adapter | `Complete` (M3.1 merged in `#15` / `224284f`; M3.2A merged in `#16` / `558bd95`; M3.2B merged in `#17` / `7a28c40`; M3.3A merged in `#18` / `d347eae`; M3.3B merged in `#19` / `4fa9a18` & verified on `main` run `42289608463`) | M2 |
-| **M4** | Voice audio bridge and Kaiwen Agent integration | `In progress` (M4.1 in review in draft PR; M4.2 not started) | M3 |
+| **M4** | Voice audio bridge and Kaiwen Agent integration | `In progress` (M4.1 Complete — PR #20 / `577e6b9`; M4.2A Draft PR pending review; M4.2B Not started) | M3 |
 | **M5** | Resilience, simulation, security and load evidence | `Not started` | M4 |
 | **M6** | Alpha packaging and release-readiness review | `Not started` | M5 |
 | **M7** | Conditional Verimor pilot | `Blocked` (official protocol and authorizations) | M6 + `OPEN-*` dependencies |
@@ -166,17 +166,19 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 **Deliverables**
 
-- [x] Voice-local media/domain contracts and provider-neutral telephony/AI adapter interfaces (M4.1 local implementation).
-- [x] Two lifetime-bound concurrent audio pumps: telephony → AI and AI → telephony (M4.1 local implementation).
+- [x] Voice-local media/domain contracts and provider-neutral telephony/AI adapter interfaces (M4.1 Complete — PR #20 / `577e6b9`).
+- [x] Two lifetime-bound concurrent audio pumps: telephony → AI and AI → telephony (M4.1 Complete — PR #20 / `577e6b9`).
+- [x] Synthetic binary WebSocket media vertical slice: `/ws/synthetic-media/v1` with PCM16LE 20ms framing and single read-loop demux (M4.2A Local implementation / In progress).
+- [x] Bounded per-call Fake AI echo port and backpressure enforcement (M4.2A Local implementation / In progress).
 - [ ] Provider-specific codec negotiation/conversion **only when evidence requires it**; validate frame formats/order/timing.
-- [x] Bounded media queues/backpressure, precise cancellation and idempotent cleanup (M4.1 local implementation).
-- [ ] Barge-in/unplayed-output handling according to **verified adapter capabilities**.
-- [x] Fake AI adapter and independent per-call session state; concurrency/isolation fixtures (M4.1 local implementation).
+- [x] Bounded media queues/backpressure, precise cancellation and idempotent cleanup (M4.1 Complete; M4.2A verified over loopback WebSocket).
+- [ ] Barge-in/unplayed-output handling according to **verified adapter capabilities** (M4.2B).
+- [x] Fake AI adapter and independent per-call session state; concurrency/isolation fixtures (M4.1 Complete; M4.2A multi-tenant isolation verified).
 - [ ] Kaiwen Agent integration adapter using **public, compatible APIs**; no duplicate agent runtime.
 - [ ] OpenAI Live contract review against current official docs; an authorized sandbox smoke test if credentials/approval are available.
 - [ ] Clear capability matrix distinguishing synthetic operation, reviewed contract and real provider-verified behavior.
 
-**Exit evidence:** Deterministic bidirectional audio test; two tenants/calls never cross frames or context; interruption test demonstrates correct unplayed-output policy for the mock; forced close cleans upstream and both tasks; documented evidence or unresolved limitation for OpenAI Live real smoke test.
+**Exit evidence:** Deterministic bidirectional audio test (M4.1); real loopback Uvicorn server binary audio smoke test (`tools/synthetic_media_smoke.py`); two tenants/calls never cross frames or context (M4.2A); forced close cleans upstream and both tasks; complete capacity recovery; documented evidence or unresolved limitation for OpenAI Live real smoke test.
 
 **Relevant IDs:** `FR-VOICE-001` through `FR-VOICE-008`, `FR-INT-002` through `FR-INT-005`, `SEC-003`, `SEC-007`, `SEC-008`, `AT-002`, `AT-004`, `AT-006`, `AT-007`.
 

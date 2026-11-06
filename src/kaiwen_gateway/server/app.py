@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from kaiwen_gateway.core.admission import AdmissionController
@@ -14,13 +15,16 @@ from kaiwen_gateway.core.draining import (
 )
 from kaiwen_gateway.core.exceptions import CoreConfigurationError
 from kaiwen_gateway.core.identity import CallAuthorizationPort, ProviderAuthenticatorPort
+from kaiwen_gateway.modules.voice.ports import AIRealtimeMediaPort
 from kaiwen_gateway.server.exceptions import ServerDependencyError
 from kaiwen_gateway.server.lifespan import gateway_lifespan
 from kaiwen_gateway.transports.synthetic import (
+    SYNTHETIC_MEDIA_WS_ENDPOINT_PATH,
     SYNTHETIC_WS_ENDPOINT_PATH,
     SyntheticAuthBridge,
     SyntheticCallAuthorizer,
     SyntheticProviderAuthenticator,
+    synthetic_media_websocket_endpoint,
     synthetic_websocket_endpoint,
 )
 
@@ -178,6 +182,8 @@ def create_gateway_app(
     authenticator: ProviderAuthenticatorPort | None = None,
     authorizer: CallAuthorizationPort | None = None,
     synthetic_auth_bridge: SyntheticAuthBridge | None = None,
+    enable_synthetic_media: bool = False,
+    ai_media_port_factory: Callable[[], AIRealtimeMediaPort] | None = None,
 ) -> Starlette:
     """Construct a fresh, instance-scoped ASGI application for Kaiwen Gateway.
 
@@ -212,6 +218,13 @@ def create_gateway_app(
     """
     if not _HAS_STARLETTE:
         raise ServerDependencyError("ASGI server features require 'starlette' to be installed.")
+
+    if not isinstance(enable_synthetic_media, bool):
+        raise TypeError(
+            f"enable_synthetic_media must be a bool, got {type(enable_synthetic_media).__name__}"
+        )
+    if ai_media_port_factory is not None and not callable(ai_media_port_factory):
+        raise TypeError("ai_media_port_factory must be callable")
 
     # Resolve effective config and GatewayCore instance
     if core is not None:
@@ -352,9 +365,20 @@ def create_gateway_app(
             Route("/health", endpoint=health_endpoint, methods=["GET"]),
             Route("/ready", endpoint=readiness_endpoint, methods=["GET"]),
             WebSocketRoute(SYNTHETIC_WS_ENDPOINT_PATH, endpoint=synthetic_websocket_endpoint),
-            WebSocketRoute("/", endpoint=reject_websocket_endpoint),
-            WebSocketRoute("/{path:path}", endpoint=reject_websocket_endpoint),
         ]
+        if enable_synthetic_media:
+            routes.append(
+                WebSocketRoute(
+                    SYNTHETIC_MEDIA_WS_ENDPOINT_PATH,
+                    endpoint=synthetic_media_websocket_endpoint,
+                )
+            )
+        routes.extend(
+            [
+                WebSocketRoute("/", endpoint=reject_websocket_endpoint),
+                WebSocketRoute("/{path:path}", endpoint=reject_websocket_endpoint),
+            ]
+        )
     else:
         routes = [
             Route("/health", endpoint=health_endpoint, methods=["GET"]),
@@ -379,6 +403,8 @@ def create_gateway_app(
     app.state.authenticator = effective_authenticator
     app.state.authorizer = effective_authorizer
     app.state.synthetic_auth_bridge = effective_auth_bridge
+    app.state.enable_synthetic_media = enable_synthetic_media
+    app.state.ai_media_port_factory = ai_media_port_factory
     app.state.started = False
     app.state.shutting_down = False
     app.state.stopped = False
