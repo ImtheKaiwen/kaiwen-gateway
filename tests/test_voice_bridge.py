@@ -606,7 +606,9 @@ class TestVoiceBridgeNegativeAndFaultScenarios:
             )
             await session.start()
             await session.close()
-            assert session.state == VoiceBridgeState.CLOSED
+            state_val = session.state.value
+            assert state_val == "failed"
+            assert isinstance(session.error, ExceptionGroup)
 
         asyncio.run(_test())
 
@@ -1193,6 +1195,397 @@ class TestVoiceBridgeSingleOwnerCleanupAndRaces:
             assert session.inbound_completed is True
             assert session._closed_event.is_set() is True
             assert tel.is_closed is True
+            assert ai.is_closed is True
+
+        asyncio.run(_test())
+
+
+class TestVoiceBridgeCleanupCancellationResilience:
+    """Gate A: Cleanup ownership, caller cancellation propagation, and background completion."""
+
+    def test_cancellation_during_cleanup_unstarted_session(self) -> None:
+        async def _test() -> None:
+            enter_close_event = asyncio.Event()
+            release_close_event = asyncio.Event()
+            tel = _BarrierTelephonyMediaAdapter(
+                enter_close_event=enter_close_event,
+                release_close_event=release_close_event,
+            )
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-cancel-clean-unstarted",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            # 2. Session cleanup starts via close()
+            close_caller_task = asyncio.create_task(session.close())
+
+            # 3. Verify port close started
+            await asyncio.wait_for(enter_close_event.wait(), timeout=1.0)
+            assert enter_close_event.is_set() is True
+            assert session._closed_event.is_set() is False
+
+            # 4. Cancel cleanup caller task
+            close_caller_task.cancel()
+
+            # 5. Cancellation propagated immediately to caller task
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(close_caller_task, timeout=1.0)
+
+            # Invariant: barrier still blocked, cleanup task running in background
+            assert session._closed_event.is_set() is False
+            tel_early_closed = bool(tel.is_closed)
+            assert tel_early_closed is False
+
+            # 6. Release port close barrier
+            release_close_event.set()
+
+            # 7. Verify background cleanup completes
+            await asyncio.wait_for(
+                session.wait_until_closed(propagate_error=False),
+                timeout=1.0,
+            )
+
+            # 8. _closed_event is set
+            assert session._closed_event.is_set() is True
+
+            # 9. Both ports closed properly
+            tel_final_closed = bool(tel.is_closed)
+            ai_final_closed = bool(ai.is_closed)
+            assert tel_final_closed is True
+            assert ai_final_closed is True
+
+            # 10. No orphan tasks or lockups
+            state_val = session.state.value
+            assert state_val == "closed"
+            assert session.error is None
+            assert session._cleanup_task is not None
+            assert session._cleanup_task.done() is True
+
+        asyncio.run(_test())
+
+    def test_cancellation_during_cleanup_active_streaming_session(self) -> None:
+        async def _test() -> None:
+            enter_close_event = asyncio.Event()
+            release_close_event = asyncio.Event()
+            tel = _BarrierTelephonyMediaAdapter(
+                enter_close_event=enter_close_event,
+                release_close_event=release_close_event,
+            )
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-cancel-clean-active",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            # Push audio frame for active streaming
+            frame = create_synthetic_pcm16le_frame(b"AUDIO_DATA", sequence=0)
+            tel.push_frame(frame)
+
+            await session.start()
+
+            while session.inbound_frames_transferred < 1:
+                await asyncio.sleep(0.001)
+
+            # 2. Session cleanup starts
+            close_caller_task = asyncio.create_task(session.close())
+
+            # 3. Verify port close started
+            await asyncio.wait_for(enter_close_event.wait(), timeout=1.0)
+            assert enter_close_event.is_set() is True
+            assert session._closed_event.is_set() is False
+
+            # 4. Cancel cleanup caller task
+            close_caller_task.cancel()
+
+            # 5. Cancellation propagated to caller task
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(close_caller_task, timeout=1.0)
+
+            # Invariant: barrier still blocked, cleanup task running in background
+            assert session._closed_event.is_set() is False
+            tel_early_closed = bool(tel.is_closed)
+            assert tel_early_closed is False
+
+            # Verify concurrent second close() caller awaits in-progress cleanup
+            second_caller_task = asyncio.create_task(session.close())
+            await asyncio.sleep(0.01)
+            assert second_caller_task.done() is False
+
+            # 6. Release port close barrier
+            release_close_event.set()
+
+            # Second caller finishes cleanly once barrier is released
+            await asyncio.wait_for(second_caller_task, timeout=1.0)
+
+            # 7. Verify cleanup completes
+            await asyncio.wait_for(
+                session.wait_until_closed(propagate_error=False),
+                timeout=1.0,
+            )
+
+            # 8. _closed_event is set
+            assert session._closed_event.is_set() is True
+
+            # 9. Both ports closed properly
+            tel_final_closed = bool(tel.is_closed)
+            ai_final_closed = bool(ai.is_closed)
+            assert tel_final_closed is True
+            assert ai_final_closed is True
+
+            # 10. No orphan tasks or lockups
+            state_val = session.state.value
+            assert state_val == "closed"
+            assert session.error is None
+            assert session._cleanup_task is not None
+            assert session._cleanup_task.done() is True
+            assert session._supervisor_task is not None
+            assert session._supervisor_task.done() is True
+            assert session._inbound_task is not None
+            assert session._inbound_task.done() is True
+            assert session._outbound_task is not None
+            assert session._outbound_task.done() is True
+
+        asyncio.run(_test())
+
+
+class TestVoiceBridgePortCloseFailureSemantics:
+    """Gate B: Port cleanup failures cannot report success and preserve error fidelity."""
+
+    def test_telephony_port_close_failure_marks_failed(self) -> None:
+        async def _test() -> None:
+            tel = FakeTelephonyMediaAdapter()
+            ai = FakeAIMediaAdapter()
+
+            async def failing_tel_close() -> None:
+                raise RuntimeError("telephony close hardware failure")
+
+            tel.close = failing_tel_close  # type: ignore[method-assign]
+
+            session = VoiceBridgeSession(
+                call_id="call-fail-tel-close",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            await session.start()
+            await session.close()
+
+            # Terminal state must be FAILED, not CLOSED
+            state_val = session.state.value
+            assert state_val == "failed"
+            assert isinstance(session.error, RuntimeError)
+            assert str(session.error) == "telephony close hardware failure"
+
+            # AI port close must still have been attempted and succeeded
+            assert ai.is_closed is True
+
+            # wait_until_closed with propagate_error=True raises
+            with pytest.raises(RuntimeError, match="telephony close hardware failure"):
+                await session.wait_until_closed(propagate_error=True)
+
+            # wait_until_closed with propagate_error=False returns without error
+            await session.wait_until_closed(propagate_error=False)
+
+        asyncio.run(_test())
+
+    def test_ai_port_close_failure_marks_failed(self) -> None:
+        async def _test() -> None:
+            tel = FakeTelephonyMediaAdapter()
+            ai = FakeAIMediaAdapter()
+
+            async def failing_ai_close() -> None:
+                raise RuntimeError("ai realtime socket reset")
+
+            ai.close = failing_ai_close  # type: ignore[method-assign]
+
+            session = VoiceBridgeSession(
+                call_id="call-fail-ai-close",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            await session.start()
+            await session.close()
+
+            state_val = session.state.value
+            assert state_val == "failed"
+            assert isinstance(session.error, RuntimeError)
+            assert str(session.error) == "ai realtime socket reset"
+
+            # Telephony port close must have succeeded
+            assert tel.is_closed is True
+
+            with pytest.raises(RuntimeError, match="ai realtime socket reset"):
+                await session.wait_until_closed(propagate_error=True)
+
+        asyncio.run(_test())
+
+    def test_both_ports_close_failure_records_all_failures(self) -> None:
+        async def _test() -> None:
+            tel = FakeTelephonyMediaAdapter()
+            ai = FakeAIMediaAdapter()
+
+            async def bad_tel_close() -> None:
+                raise RuntimeError("tel-hardware-err")
+
+            async def bad_ai_close() -> None:
+                raise RuntimeError("ai-socket-err")
+
+            tel.close = bad_tel_close  # type: ignore[method-assign]
+            ai.close = bad_ai_close  # type: ignore[method-assign]
+
+            session = VoiceBridgeSession(
+                call_id="call-fail-both-close",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            await session.start()
+            await session.close()
+
+            state_val = session.state.value
+            assert state_val == "failed"
+            assert isinstance(session.error, ExceptionGroup)
+            err_group = session.error
+            assert len(err_group.exceptions) == 2
+            messages = [str(e) for e in err_group.exceptions]
+            assert "tel-hardware-err" in messages
+            assert "ai-socket-err" in messages
+
+            with pytest.raises(ExceptionGroup):
+                await session.wait_until_closed(propagate_error=True)
+
+        asyncio.run(_test())
+
+    def test_pump_exception_preserved_when_port_close_fails(self) -> None:
+        async def _test() -> None:
+            tel = FakeTelephonyMediaAdapter()
+            ai = FakeAIMediaAdapter()
+
+            async def failing_close() -> None:
+                raise RuntimeError("secondary port close error")
+
+            tel.close = failing_close  # type: ignore[method-assign]
+            tel.inject_receive_error(InvalidAudioFrameError("primary pump frame error"))
+
+            session = VoiceBridgeSession(
+                call_id="call-fail-pump-and-close",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            await session.start()
+
+            # Original pump exception must be preserved, not overwritten by port close error
+            with pytest.raises(InvalidAudioFrameError, match="primary pump frame error"):
+                await session.wait_until_closed(propagate_error=True)
+
+            state_val = session.state.value
+            assert state_val == "failed"
+            assert isinstance(session.error, InvalidAudioFrameError)
+            assert str(session.error) == "primary pump frame error"
+            assert ai.is_closed is True
+
+        asyncio.run(_test())
+
+    def test_concurrent_close_while_port_cleanup_fails(self) -> None:
+        async def _test() -> None:
+            enter_close_event = asyncio.Event()
+            release_close_event = asyncio.Event()
+
+            class _FailingBarrierTelephony(FakeTelephonyMediaAdapter):
+                async def close(self) -> None:
+                    enter_close_event.set()
+                    await release_close_event.wait()
+                    raise RuntimeError("delayed telephony failure")
+
+            tel = _FailingBarrierTelephony()
+            ai = FakeAIMediaAdapter()
+
+            session = VoiceBridgeSession(
+                call_id="call-concurrent-fail",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            await session.start()
+
+            close_task_1 = asyncio.create_task(session.close())
+            await enter_close_event.wait()
+
+            close_task_2 = asyncio.create_task(session.close())
+            close_task_3 = asyncio.create_task(session.close())
+            await asyncio.sleep(0.01)
+
+            assert close_task_1.done() is False
+            assert close_task_2.done() is False
+            assert close_task_3.done() is False
+
+            release_close_event.set()
+
+            await asyncio.wait_for(
+                asyncio.gather(close_task_1, close_task_2, close_task_3),
+                timeout=1.0,
+            )
+
+            state_val = session.state.value
+            assert state_val == "failed"
+            assert isinstance(session.error, RuntimeError)
+            assert str(session.error) == "delayed telephony failure"
+            assert ai.is_closed is True
+
+        asyncio.run(_test())
+
+    def test_failure_after_cancellation(self) -> None:
+        async def _test() -> None:
+            enter_close_event = asyncio.Event()
+            release_close_event = asyncio.Event()
+
+            class _FailingBarrierTelephony(FakeTelephonyMediaAdapter):
+                async def close(self) -> None:
+                    enter_close_event.set()
+                    await release_close_event.wait()
+                    raise RuntimeError("failure after cancellation")
+
+            tel = _FailingBarrierTelephony()
+            ai = FakeAIMediaAdapter()
+
+            session = VoiceBridgeSession(
+                call_id="call-fail-after-cancel",
+                tenant_id="tenant-1",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            caller_task = asyncio.create_task(session.close())
+            await enter_close_event.wait()
+
+            caller_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller_task
+
+            release_close_event.set()
+
+            await asyncio.wait_for(
+                session.wait_until_closed(propagate_error=False),
+                timeout=1.0,
+            )
+
+            state_val = session.state.value
+            assert state_val == "failed"
+            assert isinstance(session.error, RuntimeError)
+            assert str(session.error) == "failure after cancellation"
+            assert session._closed_event.is_set() is True
             assert ai.is_closed is True
 
         asyncio.run(_test())

@@ -103,7 +103,7 @@ class VoiceBridgeSession:
         self._error: BaseException | None = None
         self._closing_event: asyncio.Event = asyncio.Event()
         self._closed_event: asyncio.Event = asyncio.Event()
-        self._cleanup_lock: asyncio.Lock = asyncio.Lock()
+        self._cleanup_task: asyncio.Task[None] | None = None
         self._is_cleaned_up: bool = False
 
         # Bounded per-direction queues
@@ -200,18 +200,46 @@ class VoiceBridgeSession:
         try:
             await self.wait_until_closed()
         except asyncio.CancelledError:
-            await self.close()
+            cleanup_task = self._ensure_cleanup_task()
+            if not cleanup_task.done():
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    while not cleanup_task.done():
+                        try:
+                            await asyncio.shield(cleanup_task)
+                        except asyncio.CancelledError:
+                            await asyncio.sleep(0)
             raise
 
-    async def close(self) -> None:
-        """Idempotently close the session, cancel pump tasks, and release port resources."""
-        if self._closed_event.is_set():
-            return
+    def _ensure_cleanup_task(self) -> asyncio.Task[None]:
+        """Ensure the single terminal cleanup task is scheduled and tracked."""
         if self._state != VoiceBridgeState.FAILED:
             self._state = VoiceBridgeState.CLOSING
         self._closing_event.set()
+        if self._cleanup_task is None:
+            self._cleanup_task = asyncio.create_task(
+                self._execute_cleanup(),
+                name=f"voice-cleanup-{self.call_id}",
+            )
+        return self._cleanup_task
 
-        await self._cleanup()
+    async def close(self) -> None:
+        """Idempotently close the session, cancel pump tasks, and release port resources.
+
+        Guarantees:
+        - Cancellation safety: If the calling task is cancelled while awaiting close(),
+          CancelledError is propagated to the caller, but the underlying cleanup task
+          continues running to completion in the background without leaking resources
+          or leaving _closed_event unset.
+        - Idempotence: Multiple concurrent or sequential calls await the same cleanup
+          task and do not duplicate teardown.
+        """
+        if self._closed_event.is_set():
+            return
+
+        cleanup_task = self._ensure_cleanup_task()
+        await asyncio.shield(cleanup_task)
 
         current = asyncio.current_task()
         if (
@@ -223,8 +251,6 @@ class VoiceBridgeSession:
                 await self._supervisor_task
             except (asyncio.CancelledError, Exception):
                 pass
-
-        await self._closed_event.wait()
 
     async def __aenter__(self) -> Self:
         await self.start()
@@ -238,42 +264,69 @@ class VoiceBridgeSession:
     ) -> None:
         await self.close()
 
-    async def _cleanup(self) -> None:
-        """Perform terminal cleanup of tasks and ports exactly once under lock."""
-        async with self._cleanup_lock:
-            if self._is_cleaned_up:
-                return
-            self._closing_event.set()
+    async def _execute_cleanup(self) -> None:
+        """Perform terminal cleanup of pumps and ports exactly once.
 
-            # Cancel pump tasks if still running
-            pending_pumps = [
-                t
-                for t in (self._inbound_task, self._outbound_task)
-                if t is not None and not t.done()
-            ]
-            for t in pending_pumps:
-                t.cancel()
-            if pending_pumps:
-                await asyncio.gather(*pending_pumps, return_exceptions=True)
+        Guarantees:
+        - Cancellation resilience: runs as a dedicated session-owned task, so caller
+          cancellation does not abort media port release or leave _closed_event unset.
+        - Exhaustive port teardown: both telephony and AI ports are attempted even
+          if the first port raises an exception.
+        - Observable failure: port close exceptions mark the session FAILED and are
+          recorded in self._error without silently overwriting prior pump failures.
+        """
+        self._closing_event.set()
 
-            # Idempotently close underlying media ports
+        # 1. Cancel pump tasks if still running
+        pending_pumps = [
+            t for t in (self._inbound_task, self._outbound_task) if t is not None and not t.done()
+        ]
+        for t in pending_pumps:
+            t.cancel()
+        if pending_pumps:
+            await asyncio.gather(*pending_pumps, return_exceptions=True)
+
+        # 2. Await supervisor task so all pump supervision is terminated
+        if self._supervisor_task is not None and not self._supervisor_task.done():
             try:
-                await self._telephony_port.close()
-            except Exception:
+                await self._supervisor_task
+            except (asyncio.CancelledError, Exception):
                 pass
 
-            try:
-                await self._ai_port.close()
-            except Exception:
-                pass
+        # 3. Media port teardown: both ports MUST be attempted
+        close_errors: list[Exception] = []
 
-            if self._error is not None or self._state == VoiceBridgeState.FAILED:
-                self._state = VoiceBridgeState.FAILED
+        try:
+            await self._telephony_port.close()
+        except Exception as exc:
+            close_errors.append(exc)
+
+        try:
+            await self._ai_port.close()
+        except Exception as exc:
+            close_errors.append(exc)
+
+        # 3. Determine terminal state and error
+        if self._error is not None:
+            # Prior pump or supervisor failure is preserved; cleanup failure does not overwrite it
+            self._state = VoiceBridgeState.FAILED
+            for err in close_errors:
+                if hasattr(err, "__context__"):
+                    err.__context__ = self._error
+        elif close_errors:
+            # No prior failure, but port cleanup failed -> record as terminal failure
+            self._state = VoiceBridgeState.FAILED
+            if len(close_errors) == 1:
+                self._error = close_errors[0]
             else:
-                self._state = VoiceBridgeState.CLOSED
+                self._error = ExceptionGroup("Multiple media port cleanup failures", close_errors)
+        elif self._state == VoiceBridgeState.FAILED:
+            self._state = VoiceBridgeState.FAILED
+        else:
+            self._state = VoiceBridgeState.CLOSED
 
-            self._is_cleaned_up = True
-            self._closed_event.set()
+        self._is_cleaned_up = True
+        self._closed_event.set()
 
     async def _run_supervisor(self) -> None:
         """Supervise the two pumps, handle early failure, and drive termination."""
@@ -308,17 +361,17 @@ class VoiceBridgeSession:
                 if self._state not in (VoiceBridgeState.CLOSING, VoiceBridgeState.CLOSED):
                     self._state = VoiceBridgeState.CLOSED
 
-            await self._cleanup()
+            self._ensure_cleanup_task()
         except asyncio.CancelledError:
             for pump_task in (self._inbound_task, self._outbound_task):
                 if pump_task is not None and not pump_task.done():
                     pump_task.cancel()
-            await self._cleanup()
+            self._ensure_cleanup_task()
             raise
         except Exception as exc:
             self._error = exc
             self._state = VoiceBridgeState.FAILED
-            await self._cleanup()
+            self._ensure_cleanup_task()
 
     async def _run_inbound_pump(self) -> None:
         """Run the inbound media pump (Telephony -> AI)."""
