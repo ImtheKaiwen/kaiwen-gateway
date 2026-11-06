@@ -116,6 +116,7 @@ jobs:
               assert "kaiwen_gateway/server/exceptions.py" in wheel_names
               assert "kaiwen_gateway/server/lifespan.py" in wheel_names
               assert "kaiwen_gateway/server/__main__.py" in wheel_names
+              assert "kaiwen_gateway/server/cli.py" in wheel_names
               assert not any(name.startswith("tests/") for name in wheel_names), "tests/ leaked into wheel"
               meta_files = [name for name in wheel_names if name.endswith(".dist-info/METADATA")]
               assert len(meta_files) == 1
@@ -156,7 +157,9 @@ jobs:
               assert any(name.endswith("/src/kaiwen_gateway/server/exceptions.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/server/lifespan.py") for name in sdist_names)
               assert any(name.endswith("/src/kaiwen_gateway/server/__main__.py") for name in sdist_names)
+              assert any(name.endswith("/src/kaiwen_gateway/server/cli.py") for name in sdist_names)
               assert any(name.endswith("/tests/test_server_asgi.py") for name in sdist_names)
+              assert any(name.endswith("/tests/test_server_cli.py") for name in sdist_names)
           PY
 
       - name: Install wheel into isolated virtualenv and verify side-effect-free import outside repo
@@ -536,6 +539,40 @@ jobs:
           print("Clean wheel smoke test passed (M1 + M2.1 + M2.2A + M2.2B + M2.3 + M2.4A + M2.4B).")
           PY
 
+          # Verify base-wheel CLI entrypoints in clean isolated environment
+          .venv/bin/python -c "
+          for pkg in ['starlette', 'uvicorn', 'websockets']:
+              try:
+                  __import__(pkg)
+                  raise AssertionError(f'Unexpected package {pkg} in base wheel environment')
+              except ImportError:
+                  pass
+          "
+          .venv/bin/kaiwen-gateway --help
+          VERSION_OUT="$(.venv/bin/kaiwen-gateway --version)"
+          echo "Version output: ${VERSION_OUT}"
+          case "${VERSION_OUT}" in
+            *"kaiwen-gateway 0.1.0a1"*) echo "Version verified" ;;
+            *) echo "Unexpected version output: ${VERSION_OUT}"; exit 1 ;;
+          esac
+          CONFIG_OUT="$(.venv/bin/kaiwen-gateway check-config)"
+          echo "Config output: ${CONFIG_OUT}"
+          case "${CONFIG_OUT}" in
+            *"Configuration valid"*) echo "Check-config verified" ;;
+            *) echo "Unexpected check-config output: ${CONFIG_OUT}"; exit 1 ;;
+          esac
+          set +e
+          SERVE_OUT="$(.venv/bin/kaiwen-gateway serve 2>&1)"
+          SERVE_CODE=$?
+          set -e
+          test "${SERVE_CODE}" -ne 0 || exit 1
+          echo "Serve output when server extra missing: ${SERVE_OUT}"
+          case "${SERVE_OUT}" in
+            *"starlette"*|*"server"*) echo "Serve missing dependency error verified" ;;
+            *) echo "Unexpected serve missing dependency message: ${SERVE_OUT}"; exit 1 ;;
+          esac
+          echo "Base wheel CLI entrypoint smoke test passed (M3.3A)."
+
       - name: Install wheel with [server] extra into isolated virtualenv and verify ASGI runtime smoke outside repo
         run: |
           WHEEL_PATH="$(pwd)/dist/kaiwen_gateway-0.1.0a1-py3-none-any.whl"
@@ -712,3 +749,17 @@ jobs:
           asyncio.run(_run_synthetic_ws_smoke())
           print("Server extra real WebSockets loopback smoke test passed (M3.2A).")
           PY
+
+          # 5. Verify installed kaiwen-gateway demo executable via CLI entrypoint
+          echo "Running installed kaiwen-gateway demo via CLI entrypoint..."
+          DEMO_OUT="$(.venv_server/bin/kaiwen-gateway demo --timeout 10.0)"
+          echo "${DEMO_OUT}"
+          case "${DEMO_OUT}" in
+            *"Result: PASS"*) echo "CLI demo smoke test passed!" ;;
+            *) echo "CLI demo failed unexpected output: ${DEMO_OUT}"; exit 1 ;;
+          esac
+          case "${DEMO_OUT}" in
+            *"0 active connections, 0 active calls, 0 active admission leases"*) echo "Zero leak verified in installed demo!" ;;
+            *) echo "Demo output missing zero-leak confirmation: ${DEMO_OUT}"; exit 1 ;;
+          esac
+          echo "Server extra CLI demo smoke test passed (M3.3A)."
