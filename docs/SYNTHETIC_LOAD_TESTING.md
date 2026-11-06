@@ -50,7 +50,7 @@ To prevent ambiguity between time-bounded and iteration-bounded runs, the runner
 2. **Actual Elapsed Duration (`duration_seconds`):** The measured wall-clock time taken by the stage from start to complete teardown.
 3. **Completed Iterations (`completed_iterations`):** In repeated soak mode, the stage stops as soon as `--iterations` cycles complete OR elapsed time reaches `--duration`, whichever happens first.
 4. **Sustained Holding Duration (`sustained_holding_seconds`):** In sustained soak mode (`--scenario sustained`), all connections are held actively concurrent for the target duration (e.g. 60.0s), with periodic keepalive pings and periodic active connection sampling.
-5. **Continuous Active Concurrency Proof:** During sustained soak, active connections are sampled periodically (e.g. every 1.0s). The report records `min_active_connections` and `max_active_connections`. A result of `min_active == max_active == target` proves that all connections were continuously maintained throughout the entire holding window without drops.
+5. **Active Concurrency Sampling:** During sustained soak, active connections are sampled periodically (e.g. every 1.0s). The report records `min_active_connections` and `max_active_connections`. A result of `min_active == max_active == target` confirms that active connections remained at target capacity at all sampled inspection intervals during the holding window. Note that discrete sampling provides evidence at sample instants rather than continuous mathematical guarantees for unobserved microseconds.
 
 ---
 
@@ -138,8 +138,8 @@ To maintain absolute accounting integrity, all result metrics are rigorously dis
 - `successful_admissions`: Connections that completed the WebSocket handshake and were admitted.
 - `expected_rejections`: Connections rejected as expected under protocol security rules (e.g. HTTP 403 for forged/replayed/overflow tokens). **Never counted as successful calls.**
 - `unexpected_failures`: Any unplanned connection drop or unhandled error.
-- `completed_calls`: Calls that completed orderly start-ping-end lifecycle.
-- `peak_active_connections`: Maximum sampled active concurrent connections.
+- `completed_calls`: Calls that completed orderly start-ping-end lifecycle (`call.start` through `call.ended`). Connections that perform only session handshake and termination without starting a telephone call are counted as admissions, not completed calls.
+- `peak_active_connections`: Maximum active concurrent connections observed directly from `AdmissionController` capacity snapshots during holding/barrier phases.
 - `final_active_connections`: Active connections remaining at stage end (must be 0).
 - `active_leases_after_cleanup`: Remaining managed connection leases in coordinator (must be 0).
 
@@ -165,7 +165,7 @@ concurrency_1      handshake       1      31.96    31.96   * 31.96   * 31.96    
 
 - **Heap Memory Peak:** Measured via Python's standard `tracemalloc` module (`tracemalloc.get_traced_memory()`). This measures Python heap allocation overhead rather than operating system Resident Set Size (RSS).
 - **Process CPU Time:** Measured via `time.process_time()`, tracking combined user and kernel CPU execution seconds.
-- **Events Per Second:** Calculated as $\frac{\text{total\_control\_events}}{\text{duration\_seconds}}$, where each synthetic call comprises 6 to 8 control frames.
+- **Events Per Second:** Calculated as $\frac{\text{observed\_protocol\_events}}{\text{duration\_seconds}}$, derived from actual protocol frames (handshake, call control, ping/pong, session termination) counted directly on client transports rather than fixed estimates.
 
 ---
 
@@ -241,7 +241,7 @@ Scenario               Req  Peak  Attempts  Admitted  Rej   Calls  Status  Durat
 concurrency_1          1    1     1         1         0     1      PASS    0.036   s
 concurrency_5          5    5     5         5         0     5      PASS    0.038   s
 concurrency_25         25   25    25        25        0     25     PASS    0.169   s
-capacity_saturation    25   25    38        36        2     36     PASS    0.229   s
+capacity_saturation    25   25    38        36        2     35     PASS    0.229   s
 fault_injection        1    2     11        7         4     3      PASS    0.316   s
 repeated_soak_1        1    1     3         3         0     3      PASS    0.021   s
 --------------------------------------------------------------------------------

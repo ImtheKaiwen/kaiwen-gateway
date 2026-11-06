@@ -35,6 +35,7 @@ from tools.synthetic_soak import (
     compute_metric_summary,
     main,
     render_console_report,
+    resolve_sustained_tenant_distribution,
     run_capacity_saturation_stage,
     run_concurrency_stage,
     run_fault_injection_stage,
@@ -312,7 +313,7 @@ def test_console_report_rendering() -> None:
     buf = io.StringIO()
     render_console_report(report, buf)
     output = buf.getvalue()
-    assert "KAIWEN GATEWAY — SYNTHETIC LOAD & SOAK TEST REPORT" in output
+    assert "KAIWEN GATEWAY -- SYNTHETIC LOAD & SOAK TEST REPORT" in output
     assert "concurrency_1" in output
     assert "RESOURCE RECOVERY:" in output
 
@@ -388,6 +389,10 @@ def test_loopback_capacity_saturation_stage() -> None:
             assert res.connection_attempts == 38
             assert res.successful_admissions == 36
             assert res.expected_rejections == 2  # 1 tenant overflow + 1 global overflow
+            assert (
+                res.completed_calls == 35
+            )  # 10 tenant + 25 global (beta is admission only, not call)
+            assert res.completed_calls == 35  # 10 tenant + 25 global (beta is admission only, not call)
             assert res.unexpected_failures == 0
             assert res.error is None
 
@@ -395,6 +400,221 @@ def test_loopback_capacity_saturation_stage() -> None:
             snap = s_ctx.controller.snapshot()
             assert snap.active_connections == 0
             assert snap.available_capacity == 25
+            assert len(s_ctx.bridge._active_calls) == 0
+
+    asyncio.run(_run())
+
+
+def test_saturation_holder_failure_yields_stage_fail() -> None:
+    """Verify that a failure in a saturation holder task marks stage as FAIL and does not swallow error."""
+
+    async def _run() -> None:
+        async with start_ephemeral_soak_server() as s_ctx:
+            res = await run_capacity_saturation_stage(
+                s_ctx,
+                timeout=5.0,
+                _fail_holder_after_admission=True,
+            )
+            assert res.status == "FAIL"
+            assert res.unexpected_failures >= 1
+            assert res.error is not None
+            assert "Simulated tenant holder failure after admission" in res.error
+
+            # Verify complete resource recovery even after failure
+            snap = s_ctx.controller.snapshot()
+            assert snap.active_connections == 0
+            assert snap.available_capacity == 25
+            assert len(s_ctx.bridge._active_calls) == 0
+
+    asyncio.run(_run())
+
+
+def test_sustained_tenant_distribution_resolution_and_validation() -> None:
+    """Verify tenant distribution resolution rules and validation invariants."""
+    # 1 -> 1 tenant
+    d1 = resolve_sustained_tenant_distribution(concurrency=1)
+    assert d1 == {"tenant_a": 1}
+
+    # 5 -> 5 on single tenant
+    d5 = resolve_sustained_tenant_distribution(concurrency=5)
+    assert d5 == {"tenant_a": 5}
+
+    # 25 -> 10 + 10 + 5 across three tenants
+    d25 = resolve_sustained_tenant_distribution(concurrency=25)
+    assert d25 == {"tenant_a": 10, "tenant_b": 10, "tenant_c": 5}
+    assert sum(d25.values()) == 25
+
+    # Valid custom distribution
+    custom = resolve_sustained_tenant_distribution(
+        concurrency=5,
+        tenant_distribution={"t1": 3, "t2": 2},
+    )
+    assert custom == {"t1": 3, "t2": 2}
+
+    # Mismatched total vs concurrency
+    with pytest.raises(ValueError, match="does not equal requested concurrency"):
+        resolve_sustained_tenant_distribution(
+            concurrency=5,
+            tenant_distribution={"t1": 2, "t2": 2},
+        )
+
+    # Exceeding per-tenant limit (10)
+    with pytest.raises(ValueError, match="exceeds per-tenant limit"):
+        resolve_sustained_tenant_distribution(
+            concurrency=15,
+            tenant_distribution={"t1": 15},
+        )
+
+    # Exceeding max concurrent capacity (25)
+    with pytest.raises(ValueError, match="exceeds max capacity"):
+        resolve_sustained_tenant_distribution(concurrency=30)
+
+    # Invalid non-positive concurrency
+    with pytest.raises(ValueError, match="Concurrency must be positive"):
+        resolve_sustained_tenant_distribution(concurrency=0)
+
+
+def test_loopback_sustained_soak_concurrency_1() -> None:
+    """Verify sustained soak runner executes cleanly with concurrency 1."""
+
+    async def _run() -> None:
+        async with start_ephemeral_soak_server() as s_ctx:
+            res = await run_sustained_soak_stage(
+                s_ctx,
+                concurrency=1,
+                duration=0.15,
+                ping_interval=0.05,
+                sample_interval=0.05,
+            )
+            assert res.status == "PASS"
+            assert res.achieved_concurrency == 1
+            assert res.completed_calls == 1
+            assert res.unexpected_failures == 0
+            assert res.peak_active_connections == 1
+            assert res.min_active_connections == 1
+            assert res.final_active_connections == 0
+            assert res.active_leases_after_cleanup == 0
+
+            # Zero leaks
+            snap = s_ctx.controller.snapshot()
+            assert snap.active_connections == 0
+            assert len(s_ctx.bridge._active_calls) == 0
+
+    asyncio.run(_run())
+
+
+def test_loopback_sustained_soak_concurrency_5() -> None:
+    """Verify sustained soak runner executes cleanly with concurrency 5."""
+
+    async def _run() -> None:
+        async with start_ephemeral_soak_server() as s_ctx:
+            res = await run_sustained_soak_stage(
+                s_ctx,
+                concurrency=5,
+                duration=0.15,
+                ping_interval=0.05,
+                sample_interval=0.05,
+            )
+            assert res.status == "PASS"
+            assert res.achieved_concurrency == 5
+            assert res.completed_calls == 5
+            assert res.unexpected_failures == 0
+            assert res.peak_active_connections == 5
+            assert res.min_active_connections == 5
+            assert res.final_active_connections == 0
+            assert res.active_leases_after_cleanup == 0
+
+            # Zero leaks
+            snap = s_ctx.controller.snapshot()
+            assert snap.active_connections == 0
+            assert len(s_ctx.bridge._active_calls) == 0
+
+    asyncio.run(_run())
+
+
+def test_loopback_sustained_soak_concurrency_25() -> None:
+    """Verify sustained soak runner executes cleanly with concurrency 25 across 3 tenants."""
+
+    async def _run() -> None:
+        async with start_ephemeral_soak_server() as s_ctx:
+            res = await run_sustained_soak_stage(
+                s_ctx,
+                concurrency=25,
+                duration=0.15,
+                ping_interval=0.05,
+                sample_interval=0.05,
+            )
+            assert res.status == "PASS"
+            assert res.achieved_concurrency == 25
+            assert res.completed_calls == 25
+            assert res.unexpected_failures == 0
+            assert res.peak_active_connections == 25
+            assert res.min_active_connections == 25
+            assert res.final_active_connections == 0
+            assert res.active_leases_after_cleanup == 0
+
+            # Zero leaks
+            snap = s_ctx.controller.snapshot()
+            assert snap.active_connections == 0
+            assert len(s_ctx.bridge._active_calls) == 0
+
+    asyncio.run(_run())
+
+
+def test_sustained_worker_failure_before_barrier() -> None:
+    """Verify worker failure before barrier aborts barrier, cancels tasks, and leaves zero leases."""
+
+    async def _run() -> None:
+        async with start_ephemeral_soak_server() as s_ctx:
+            res = await run_sustained_soak_stage(
+                s_ctx,
+                concurrency=5,
+                duration=1.0,
+                _fail_worker_before_barrier=True,
+            )
+            assert res.status == "FAIL"
+            assert res.unexpected_failures >= 1
+            assert res.error is not None
+            assert res.final_active_connections == 0
+            assert res.active_leases_after_cleanup == 0
+
+            # Zero leaks
+            snap = s_ctx.controller.snapshot()
+            assert snap.active_connections == 0
+            assert len(s_ctx.bridge._active_calls) == 0
+
+    asyncio.run(_run())
+
+
+def test_sustained_bounded_cancellation() -> None:
+    """Verify that canceling a sustained soak stage cancels child tasks boundedly with zero leaks."""
+
+    async def _run() -> None:
+        async with start_ephemeral_soak_server() as s_ctx:
+            task = asyncio.create_task(
+                run_sustained_soak_stage(
+                    s_ctx,
+                    concurrency=5,
+                    duration=10.0,
+                    ping_interval=0.1,
+                    sample_interval=0.05,
+                )
+            )
+            # Allow clients to reach connected / holding state
+            await asyncio.sleep(0.2)
+            assert s_ctx.controller.snapshot().active_connections == 5
+
+            # Cancel the parent task
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            # Allow brief moment for client tasks to finish teardown
+            await asyncio.sleep(0.1)
+
+            # Verify resource cleanup
+            snap = s_ctx.controller.snapshot()
+            assert snap.active_connections == 0
             assert len(s_ctx.bridge._active_calls) == 0
 
     asyncio.run(_run())

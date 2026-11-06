@@ -82,6 +82,7 @@ class CallLatencyRecord:
     call_end_rtt_ms: float = 0.0
     cleanup_ms: float = 0.0
     total_duration_ms: float = 0.0
+    observed_events: int = 0
 
 
 @dataclass
@@ -161,6 +162,7 @@ class StageResult:
     latencies: dict[str, MetricSummary]
     capacity_before: dict[str, Any]
     capacity_after: dict[str, Any]
+    observed_events: int = 0
     min_active_connections: int = 0
     max_active_connections: int = 0
     sustained_holding_seconds: float = 0.0
@@ -170,6 +172,66 @@ class StageResult:
         d = dataclasses.asdict(self)
         d["latencies"] = {k: v.to_dict() for k, v in self.latencies.items()}
         return d
+
+
+def resolve_sustained_tenant_distribution(
+    *,
+    concurrency: int,
+    tenant_distribution: dict[str, int] | None = None,
+    max_connections_per_tenant: int = DEFAULT_MAX_CONNECTIONS_PER_TENANT,
+    max_concurrent_connections: int = DEFAULT_MAX_CONCURRENT_CONNECTIONS,
+) -> dict[str, int]:
+    """Resolve and validate tenant distribution for sustained soak stage.
+
+    Invariants:
+    1. Distribution total must strictly match concurrency.
+    2. No tenant may exceed max_connections_per_tenant.
+    3. Concurrency must not exceed max_concurrent_connections.
+    4. Validation must occur BEFORE starting the WebSocket server.
+    """
+    if concurrency <= 0:
+        raise ValueError(f"Concurrency must be positive (got {concurrency})")
+    if concurrency > max_concurrent_connections:
+        raise ValueError(
+            f"Requested concurrency {concurrency} exceeds max capacity {max_concurrent_connections}"
+        )
+
+    if tenant_distribution is None:
+        if concurrency == 1:
+            return {"tenant_a": 1}
+        if concurrency == 5:
+            return {"tenant_a": 5}
+        if concurrency == 25:
+            return {"tenant_a": 10, "tenant_b": 10, "tenant_c": 5}
+        if concurrency <= max_connections_per_tenant:
+            return {"tenant_a": concurrency}
+
+        # Generic even distribution respecting max_connections_per_tenant
+        dist: dict[str, int] = {}
+        remaining = concurrency
+        idx = 0
+        while remaining > 0:
+            chunk = min(remaining, max_connections_per_tenant)
+            dist[f"tenant_{chr(ord('a') + idx)}"] = chunk
+            remaining -= chunk
+            idx += 1
+        return dist
+
+    total = sum(tenant_distribution.values())
+    if total != concurrency:
+        raise ValueError(
+            f"Mismatched tenant distribution: sum of connections ({total}) does not equal requested concurrency ({concurrency})"
+        )
+
+    for tid, count in tenant_distribution.items():
+        if count <= 0:
+            raise ValueError(f"Tenant count for '{tid}' must be positive (got {count})")
+        if count > max_connections_per_tenant:
+            raise ValueError(
+                f"Tenant count {count} for '{tid}' exceeds per-tenant limit {max_connections_per_tenant}"
+            )
+
+    return dict(tenant_distribution)
 
 
 @dataclass
@@ -373,6 +435,7 @@ async def run_single_synthetic_call(
             raise RuntimeError(
                 f"Call ID mismatch in session.ready: expected {call_id}, got {ready_data.get('call_id')}"
             )
+        record.observed_events += 1
         record.handshake_ms = (time.perf_counter_ns() - t0) / 1e6
 
         # 2. call.start -> call.started
@@ -383,6 +446,7 @@ async def run_single_synthetic_call(
             "metadata": {"caller": "+15550001", "callee": "+15550002"},
         }
         await ws.send(json.dumps(start_frame))
+        record.observed_events += 1
         started_raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
         started_data = json.loads(started_raw)
         if (
@@ -390,6 +454,7 @@ async def run_single_synthetic_call(
             or started_data.get("state") != "connected"
         ):
             raise RuntimeError(f"Unexpected call start response: {started_data}")
+        record.observed_events += 1
         record.call_start_rtt_ms = (time.perf_counter_ns() - t1) / 1e6
 
         # Synchronization barrier: align active concurrency across all client tasks
@@ -399,10 +464,12 @@ async def run_single_synthetic_call(
         # 3. Heartbeat ping -> pong
         t2 = time.perf_counter_ns()
         await ws.send(json.dumps({"event": EVENT_SESSION_PING, "seq": seq}))
+        record.observed_events += 1
         pong_raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
         pong_data = json.loads(pong_raw)
         if pong_data.get("event") != EVENT_SESSION_PONG or pong_data.get("seq") != seq:
             raise RuntimeError(f"Unexpected ping response: {pong_data}")
+        record.observed_events += 1
         record.ping_rtt_ms = (time.perf_counter_ns() - t2) / 1e6
 
         # Optional synchronization barrier before teardown
@@ -413,15 +480,18 @@ async def run_single_synthetic_call(
         t3 = time.perf_counter_ns()
         end_frame = {"event": EVENT_CALL_END, "reason": "completed", "code": 16}
         await ws.send(json.dumps(end_frame))
+        record.observed_events += 1
         ended_raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
         ended_data = json.loads(ended_raw)
         if ended_data.get("event") != EVENT_CALL_ENDED or ended_data.get("state") != "disconnected":
             raise RuntimeError(f"Unexpected call end response: {ended_data}")
+        record.observed_events += 1
         record.call_end_rtt_ms = (time.perf_counter_ns() - t3) / 1e6
 
         # 5. session.end -> clean 1000 close
         t4 = time.perf_counter_ns()
         await ws.send(json.dumps({"event": EVENT_SESSION_END}))
+        record.observed_events += 1
         try:
             extra_msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
             raise RuntimeError(f"Unexpected post-session message received: {extra_msg!r}")
@@ -575,8 +645,8 @@ async def run_concurrency_stage(
         "total_duration": compute_metric_summary([r.total_duration_ms for r in records]),
     }
 
-    total_events = len(records) * 6  # ready, start, started, ping, pong, end, ended, session.end
-    eps = (total_events / duration_sec) if duration_sec > 0 else 0.0
+    observed_events = sum(r.observed_events for r in records)
+    eps = round(observed_events / duration_sec, 1) if duration_sec > 0 else 0.0
 
     return StageResult(
         scenario=f"concurrency_{concurrency}",
@@ -594,10 +664,11 @@ async def run_concurrency_stage(
         active_leases_after_cleanup=server_ctx.coordinator.active_connections_count,
         duration_seconds=round(duration_sec, 3),
         configured_duration_seconds=timeout,
-        events_per_second=round(eps, 1),
+        events_per_second=eps,
         latencies=latencies,
         capacity_before=cap_before,
         capacity_after=cap_after,
+        observed_events=observed_events,
         min_active_connections=achieved_active,
         max_active_connections=achieved_active,
         sustained_holding_seconds=0.0,
@@ -614,6 +685,7 @@ async def run_capacity_saturation_stage(
     server_ctx: RunningServerContext,
     *,
     timeout: float = 15.0,
+    _fail_holder_after_admission: bool = False,
 ) -> StageResult:
     """Validate per-tenant and global connection quotas fail-closed during HTTP upgrade handshake."""
     snap_before = server_ctx.controller.snapshot()
@@ -629,18 +701,32 @@ async def run_capacity_saturation_stage(
     admitted_count = 0
     expected_rejections = 0
     unexpected_failures = 0
+    completed_calls = 0
     total_attempts = 0
+    total_observed_events = 0
+    tenant_peak_active = 0
+    global_peak_active = 0
 
     # 1. Per-tenant saturation test: fill tenant_alpha to limit (10 connections)
     barrier_tenant = asyncio.Barrier(11)  # 10 clients + 1 inspector
     end_tenant = asyncio.Event()
 
-    async def _tenant_holder(c_id: str, tok: str) -> None:
+    async def _tenant_holder(c_id: str, tok: str, idx: int) -> None:
+        nonlocal admitted_count, completed_calls, total_observed_events
         try:
             async with websockets.connect(
                 ws_url, additional_headers={"Authorization": f"Bearer {tok}"}
             ) as ws:
-                await ws.recv()  # session.ready
+                ready_raw = await ws.recv()  # session.ready
+                ready_data = json.loads(ready_raw)
+                if ready_data.get("event") != EVENT_SESSION_READY:
+                    raise RuntimeError(f"Unexpected initial event: {ready_data.get('event')}")
+                admitted_count += 1
+                total_observed_events += 1
+
+                if _fail_holder_after_admission and idx == 0:
+                    raise RuntimeError("Simulated tenant holder failure after admission")
+
                 await ws.send(
                     json.dumps(
                         {
@@ -650,18 +736,33 @@ async def run_capacity_saturation_stage(
                         }
                     )
                 )
-                await ws.recv()  # call.started
-                await barrier_tenant.wait()
+                total_observed_events += 1
+                started_raw = await ws.recv()  # call.started
+                started_data = json.loads(started_raw)
+                if started_data.get("event") != EVENT_CALL_STARTED:
+                    raise RuntimeError(f"Unexpected start event: {started_data}")
+                total_observed_events += 1
+
+                await asyncio.wait_for(barrier_tenant.wait(), timeout=timeout)
                 await end_tenant.wait()
+
                 await ws.send(
                     json.dumps({"event": EVENT_CALL_END, "reason": "completed", "code": 16})
                 )
-                await ws.recv()  # call.ended
+                total_observed_events += 1
+                ended_raw = await ws.recv()  # call.ended
+                ended_data = json.loads(ended_raw)
+                if ended_data.get("event") == EVENT_CALL_ENDED:
+                    completed_calls += 1
+                total_observed_events += 1
+
                 await ws.send(json.dumps({"event": EVENT_SESSION_END}))
+                total_observed_events += 1
                 with contextlib.suppress(Exception):
                     await ws.recv()
         except Exception:
-            await barrier_tenant.abort()
+            with contextlib.suppress(Exception):
+                await barrier_tenant.abort()
             raise
 
     tenant_tokens = [
@@ -676,12 +777,21 @@ async def run_capacity_saturation_stage(
         )
         for i in range(10)
     ]
-    t_tasks = [asyncio.create_task(_tenant_holder(cid, tok)) for cid, tok in tenant_tokens]
+    t_tasks = [
+        asyncio.create_task(_tenant_holder(cid, tok, i))
+        for i, (cid, tok) in enumerate(tenant_tokens)
+    ]
     total_attempts += 10
 
     try:
         await asyncio.wait_for(barrier_tenant.wait(), timeout=timeout)
-        admitted_count += 10
+        snap_t_mid = server_ctx.controller.snapshot()
+        tenant_peak_active = snap_t_mid.active_connections
+        if tenant_peak_active != 10:
+            stage_error = (
+                f"Expected 10 active connections for tenant saturation, got {tenant_peak_active}"
+            )
+
         # Tenant alpha is at limit 10/10; attempt 11th connection for tenant_alpha
         total_attempts += 1
         tok_11 = server_ctx.verifier.issue_token(
@@ -718,29 +828,48 @@ async def run_capacity_saturation_stage(
         async with websockets.connect(
             ws_url, additional_headers={"Authorization": f"Bearer {tok_beta}"}
         ) as ws_b:
-            await ws_b.recv()  # session.ready
-            admitted_count += 1
+            ready_b = await ws_b.recv()  # session.ready
+            if json.loads(ready_b).get("event") == EVENT_SESSION_READY:
+                admitted_count += 1
+                total_observed_events += 1
+            # Note: tok_beta only connects and ends session; it does NOT start a call, so completed_calls is NOT incremented!
             await ws_b.send(json.dumps({"event": EVENT_SESSION_END}))
+            total_observed_events += 1
             with contextlib.suppress(Exception):
                 await ws_b.recv()
     except (TimeoutError, asyncio.BrokenBarrierError) as b_err:
         stage_error = f"Tenant saturation barrier failed: {b_err}"
-        await barrier_tenant.abort()
+        with contextlib.suppress(Exception):
+            await barrier_tenant.abort()
         unexpected_failures += 1
     finally:
         end_tenant.set()
-        await asyncio.gather(*t_tasks, return_exceptions=True)
+        with contextlib.suppress(Exception):
+            await barrier_tenant.abort()
+        t_results = await asyncio.gather(*t_tasks, return_exceptions=True)
+        for res in t_results:
+            if isinstance(res, Exception):
+                unexpected_failures += 1
+                if stage_error is None or "barrier failed" in stage_error:
+                    stage_error = f"Tenant holder failed: {res}"
 
     # 2. Global saturation test: fill all 25 connections across tenants (10 on tA, 10 on tB, 5 on tC)
     barrier_global = asyncio.Barrier(26)  # 25 clients + 1 inspector
     end_global = asyncio.Event()
 
     async def _global_holder(t_id: str, c_id: str, tok: str) -> None:
+        nonlocal admitted_count, completed_calls, total_observed_events
         try:
             async with websockets.connect(
                 ws_url, additional_headers={"Authorization": f"Bearer {tok}"}
             ) as ws:
-                await ws.recv()
+                ready_raw = await ws.recv()
+                ready_data = json.loads(ready_raw)
+                if ready_data.get("event") != EVENT_SESSION_READY:
+                    raise RuntimeError(f"Unexpected initial event: {ready_data.get('event')}")
+                admitted_count += 1
+                total_observed_events += 1
+
                 await ws.send(
                     json.dumps(
                         {
@@ -750,18 +879,33 @@ async def run_capacity_saturation_stage(
                         }
                     )
                 )
-                await ws.recv()
-                await barrier_global.wait()
+                total_observed_events += 1
+                started_raw = await ws.recv()
+                started_data = json.loads(started_raw)
+                if started_data.get("event") != EVENT_CALL_STARTED:
+                    raise RuntimeError(f"Unexpected start event: {started_data}")
+                total_observed_events += 1
+
+                await asyncio.wait_for(barrier_global.wait(), timeout=timeout + 5.0)
                 await end_global.wait()
+
                 await ws.send(
                     json.dumps({"event": EVENT_CALL_END, "reason": "completed", "code": 16})
                 )
-                await ws.recv()
+                total_observed_events += 1
+                ended_raw = await ws.recv()
+                ended_data = json.loads(ended_raw)
+                if ended_data.get("event") == EVENT_CALL_ENDED:
+                    completed_calls += 1
+                total_observed_events += 1
+
                 await ws.send(json.dumps({"event": EVENT_SESSION_END}))
+                total_observed_events += 1
                 with contextlib.suppress(Exception):
                     await ws.recv()
         except Exception:
-            await barrier_global.abort()
+            with contextlib.suppress(Exception):
+                await barrier_global.abort()
             raise
 
     g_specs: list[tuple[str, str, str]] = []
@@ -810,7 +954,13 @@ async def run_capacity_saturation_stage(
 
     try:
         await asyncio.wait_for(barrier_global.wait(), timeout=timeout + 5.0)
-        admitted_count += 25
+        snap_g_mid = server_ctx.controller.snapshot()
+        global_peak_active = snap_g_mid.active_connections
+        if global_peak_active != 25:
+            stage_error = (
+                f"Expected 25 active connections for global saturation, got {global_peak_active}"
+            )
+
         # Global capacity 25/25 is saturated. Attempt 26th call for tenant_gC (which only has 5/10 tenant usage)
         total_attempts += 1
         tok_26 = server_ctx.verifier.issue_token(
@@ -837,11 +987,19 @@ async def run_capacity_saturation_stage(
                 unexpected_failures += 1
     except (TimeoutError, asyncio.BrokenBarrierError) as b_err:
         stage_error = f"Global saturation barrier failed: {b_err}"
-        await barrier_global.abort()
+        with contextlib.suppress(Exception):
+            await barrier_global.abort()
         unexpected_failures += 1
     finally:
         end_global.set()
-        await asyncio.gather(*g_tasks, return_exceptions=True)
+        with contextlib.suppress(Exception):
+            await barrier_global.abort()
+        g_results = await asyncio.gather(*g_tasks, return_exceptions=True)
+        for res in g_results:
+            if isinstance(res, Exception):
+                unexpected_failures += 1
+                if stage_error is None or "barrier failed" in stage_error:
+                    stage_error = f"Global holder failed: {res}"
 
     duration_sec = (time.perf_counter_ns() - t_start) / 1e9
 
@@ -862,7 +1020,8 @@ async def run_capacity_saturation_stage(
         leak_msg = f"Resource leak after saturation stage: {cap_after}"
         stage_error = leak_msg if stage_error is None else f"{stage_error}; {leak_msg}"
 
-    eps = round((admitted_count * 6) / duration_sec, 1) if duration_sec > 0 else 0.0
+    eps = round(total_observed_events / duration_sec, 1) if duration_sec > 0 else 0.0
+    peak_active = max(tenant_peak_active, global_peak_active)
 
     return StageResult(
         scenario="capacity_saturation",
@@ -871,11 +1030,11 @@ async def run_capacity_saturation_stage(
         successful_admissions=admitted_count,
         expected_rejections=expected_rejections,
         unexpected_failures=unexpected_failures,
-        completed_calls=admitted_count,
+        completed_calls=completed_calls,
         completed_iterations=1,
         requested_concurrency=25,
-        achieved_concurrency=25,
-        peak_active_connections=25,
+        achieved_concurrency=peak_active,
+        peak_active_connections=peak_active,
         final_active_connections=snap_after.active_connections,
         active_leases_after_cleanup=server_ctx.coordinator.active_connections_count,
         duration_seconds=round(duration_sec, 3),
@@ -884,8 +1043,9 @@ async def run_capacity_saturation_stage(
         latencies={},
         capacity_before=cap_before,
         capacity_after=cap_after,
+        observed_events=total_observed_events,
         min_active_connections=0,
-        max_active_connections=25,
+        max_active_connections=peak_active,
         sustained_holding_seconds=0.0,
         error=stage_error,
     )
@@ -917,6 +1077,7 @@ async def run_fault_injection_stage(
     expected_rejections = 0
     unexpected_failures = 0
     completed_calls = 0
+    total_observed_events = 0
 
     # 1. Invalid forged token signature
     total_attempts += 1
@@ -1007,8 +1168,10 @@ async def run_fault_injection_stage(
     ) as ws:
         await ws.recv()  # session.ready
         successful_admissions += 1
+        total_observed_events += 1
         # Send illegal malformed JSON
         await ws.send("not-valid-json-{{{")
+        total_observed_events += 1
         try:
             await ws.recv()
             stage_error = "Expected malformed JSON frame to trigger connection closure"
@@ -1034,6 +1197,7 @@ async def run_fault_injection_stage(
     )
     await ws_close.recv()  # session.ready
     successful_admissions += 1
+    total_observed_events += 1
     await ws_close.send(
         json.dumps(
             {
@@ -1043,7 +1207,9 @@ async def run_fault_injection_stage(
             }
         )
     )
+    total_observed_events += 1
     await ws_close.recv()  # call.started
+    total_observed_events += 1
     assert server_ctx.controller.snapshot().active_connections >= 1
     await ws_close.close(code=1001, reason="Going away")
     await asyncio.sleep(0.1)  # Allow supervisor task to detect close frame and release lease
@@ -1073,6 +1239,7 @@ async def run_fault_injection_stage(
     await ws_abort.recv()  # ready
     await ws_ctrl.recv()  # ready
     successful_admissions += 2
+    total_observed_events += 2
 
     await ws_abort.send(
         json.dumps(
@@ -1092,8 +1259,10 @@ async def run_fault_injection_stage(
             }
         )
     )
+    total_observed_events += 2
     await ws_abort.recv()  # started
     await ws_ctrl.recv()  # started
+    total_observed_events += 2
     assert server_ctx.controller.snapshot().active_connections == 2
 
     # Abruptly abort raw transport socket without sending WebSocket close frame
@@ -1110,9 +1279,12 @@ async def run_fault_injection_stage(
     await ws_ctrl.send(json.dumps({"event": EVENT_SESSION_PING, "seq": 999}))
     pong_ctrl = await ws_ctrl.recv()
     assert json.loads(pong_ctrl).get("event") == EVENT_SESSION_PONG
+    total_observed_events += 2
     await ws_ctrl.send(json.dumps({"event": EVENT_CALL_END, "reason": "completed", "code": 16}))
     await ws_ctrl.recv()
+    total_observed_events += 2
     await ws_ctrl.send(json.dumps({"event": EVENT_SESSION_END}))
+    total_observed_events += 1
     with contextlib.suppress(Exception):
         await ws_ctrl.recv()
     completed_calls += 1
@@ -1130,6 +1302,7 @@ async def run_fault_injection_stage(
     ) as ws:
         await ws.recv()  # session.ready
         successful_admissions += 1
+        total_observed_events += 1
         await ws.send(
             json.dumps(
                 {
@@ -1139,7 +1312,9 @@ async def run_fault_injection_stage(
                 }
             )
         )
+        total_observed_events += 1
         await ws.recv()  # call.started
+        total_observed_events += 1
         # Send duplicate call.start
         await ws.send(
             json.dumps(
@@ -1150,6 +1325,7 @@ async def run_fault_injection_stage(
                 }
             )
         )
+        total_observed_events += 1
         try:
             await ws.recv()
             stage_error = "Expected duplicate call.start to close connection with 1008"
@@ -1175,6 +1351,7 @@ async def run_fault_injection_stage(
     )
     await ws_drain.recv()  # session.ready
     successful_admissions += 1
+    total_observed_events += 1
     # Initiate coordinator drain with short grace period
     drain_task = asyncio.create_task(
         server_ctx.coordinator.drain(policy=DrainPolicy(grace_period=0.2, force_close_timeout=0.2))
@@ -1197,6 +1374,7 @@ async def run_fault_injection_stage(
 
     # Complete active call and await drain completion
     await ws_drain.send(json.dumps({"event": EVENT_SESSION_END}))
+    total_observed_events += 1
     with contextlib.suppress(Exception):
         await ws_drain.recv()
     await drain_task
@@ -1221,6 +1399,8 @@ async def run_fault_injection_stage(
         leak_msg = f"Resource leak after fault injection stage: {cap_after}"
         stage_error = leak_msg if stage_error is None else f"{stage_error}; {leak_msg}"
 
+    eps = round(total_observed_events / duration_sec, 1) if duration_sec > 0 else 0.0
+
     return StageResult(
         scenario="fault_injection",
         status="PASS" if stage_error is None and unexpected_failures == 0 else "FAIL",
@@ -1237,12 +1417,11 @@ async def run_fault_injection_stage(
         active_leases_after_cleanup=server_ctx.coordinator.active_connections_count,
         duration_seconds=round(duration_sec, 3),
         configured_duration_seconds=timeout,
-        events_per_second=round((total_attempts * 3) / duration_sec, 1)
-        if duration_sec > 0
-        else 0.0,
+        events_per_second=eps,
         latencies={},
         capacity_before=cap_before,
         capacity_after=cap_after,
+        observed_events=total_observed_events,
         min_active_connections=0,
         max_active_connections=2,
         sustained_holding_seconds=0.0,
@@ -1274,6 +1453,7 @@ async def run_repeated_soak_stage(
     admitted = 0
     completed_calls = 0
     unexpected_failures = 0
+    total_observed_events = 0
     stage_error: str | None = None
     completed_iterations = 0
     t_start = time.perf_counter_ns()
@@ -1292,6 +1472,7 @@ async def run_repeated_soak_stage(
         admitted += res.successful_admissions
         completed_calls += res.completed_calls
         unexpected_failures += res.unexpected_failures
+        total_observed_events += res.observed_events
         completed_iterations += 1
 
         if res.status != "PASS":
@@ -1307,8 +1488,7 @@ async def run_repeated_soak_stage(
         "active_tenants": snap_after.active_tenants,
     }
 
-    total_events = completed_calls * 6
-    eps = (total_events / duration_sec) if duration_sec > 0 else 0.0
+    eps = round(total_observed_events / duration_sec, 1) if duration_sec > 0 else 0.0
 
     return StageResult(
         scenario=f"repeated_soak_{concurrency}",
@@ -1326,10 +1506,11 @@ async def run_repeated_soak_stage(
         active_leases_after_cleanup=server_ctx.coordinator.active_connections_count,
         duration_seconds=round(duration_sec, 3),
         configured_duration_seconds=max_duration,
-        events_per_second=round(eps, 1),
+        events_per_second=eps,
         latencies={},
         capacity_before=cap_before,
         capacity_after=cap_after,
+        observed_events=total_observed_events,
         min_active_connections=0,
         max_active_connections=concurrency,
         sustained_holding_seconds=0.0,
@@ -1351,6 +1532,7 @@ async def run_sustained_soak_stage(
     ping_interval: float = 5.0,
     sample_interval: float = 1.0,
     timeout: float = 75.0,
+    _fail_worker_before_barrier: bool = False,
 ) -> StageResult:
     """Execute sustained active concurrent calls held over target duration with keepalives and periodic sampling."""
     snap_before = server_ctx.controller.snapshot()
@@ -1360,14 +1542,19 @@ async def run_sustained_soak_stage(
         "active_tenants": snap_before.active_tenants,
     }
 
-    if tenant_distribution is None:
-        tenant_distribution = {"tenant_a": 10, "tenant_b": 10, "tenant_c": 5}
+    # Pre-validate and resolve tenant distribution against server limits
+    resolved_dist = resolve_sustained_tenant_distribution(
+        concurrency=concurrency,
+        tenant_distribution=tenant_distribution,
+        max_connections_per_tenant=server_ctx.controller.max_connections_per_tenant,
+        max_concurrent_connections=server_ctx.controller.max_concurrent_connections,
+    )
 
     ws_url = f"{server_ctx.ws_base_url}{SYNTHETIC_WS_ENDPOINT_PATH}"
     t_start = time.perf_counter_ns()
 
     call_specs: list[tuple[str, str, str]] = []
-    for t_id, count in tenant_distribution.items():
+    for t_id, count in resolved_dist.items():
         for i in range(count):
             c_id = f"call_sustained_{t_id}_{i}_{secrets.token_hex(4)}"
             tok = server_ctx.verifier.issue_token(
@@ -1402,7 +1589,11 @@ async def run_sustained_soak_stage(
                 if ready_data.get("event") != EVENT_SESSION_READY:
                     raise RuntimeError(f"Unexpected initial event: {ready_data.get('event')}")
                 rec.handshake_ms = (time.perf_counter_ns() - t0) / 1e6
+                rec.observed_events += 1
                 admitted_count += 1
+
+                if _fail_worker_before_barrier and idx == 0:
+                    raise RuntimeError("Simulated sustained client failure before barrier")
 
                 # Start call
                 t1 = time.perf_counter_ns()
@@ -1412,6 +1603,7 @@ async def run_sustained_soak_stage(
                     "metadata": {"caller": f"+1555{idx:04d}"},
                 }
                 await ws.send(json.dumps(start_frame))
+                rec.observed_events += 1
                 started_raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
                 started_data = json.loads(started_raw)
                 if (
@@ -1420,9 +1612,11 @@ async def run_sustained_soak_stage(
                 ):
                     raise RuntimeError(f"Unexpected call start response: {started_data}")
                 rec.call_start_rtt_ms = (time.perf_counter_ns() - t1) / 1e6
+                rec.observed_events += 1
 
-                # Synchronize active concurrency: all clients wait here
-                await start_barrier.wait()
+                # Synchronize active concurrency: all clients wait here with bounded timeout
+                barrier_timeout = max(10.0, timeout / 2.0)
+                await asyncio.wait_for(start_barrier.wait(), timeout=barrier_timeout)
 
                 # Sustained holding loop with periodic keepalives
                 seq = 1000 + idx
@@ -1432,10 +1626,12 @@ async def run_sustained_soak_stage(
                     t_ping = time.perf_counter_ns()
                     seq += 1
                     await ws.send(json.dumps({"event": EVENT_SESSION_PING, "seq": seq}))
+                    rec.observed_events += 1
                     pong_raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
                     pong_data = json.loads(pong_raw)
                     if pong_data.get("event") != EVENT_SESSION_PONG or pong_data.get("seq") != seq:
                         raise RuntimeError(f"Ping mismatch: {pong_data}")
+                    rec.observed_events += 1
                     ping_rtts.append((time.perf_counter_ns() - t_ping) / 1e6)
 
                     # Sleep until next ping or until hold_event is set
@@ -1452,14 +1648,17 @@ async def run_sustained_soak_stage(
                 await ws.send(
                     json.dumps({"event": EVENT_CALL_END, "reason": "completed", "code": 16})
                 )
+                rec.observed_events += 1
                 ended_raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
                 ended_data = json.loads(ended_raw)
                 if ended_data.get("event") != EVENT_CALL_ENDED:
                     raise RuntimeError(f"Unexpected call end response: {ended_data}")
+                rec.observed_events += 1
                 rec.call_end_rtt_ms = (time.perf_counter_ns() - t3) / 1e6
 
                 t4 = time.perf_counter_ns()
                 await ws.send(json.dumps({"event": EVENT_SESSION_END}))
+                rec.observed_events += 1
                 try:
                     await asyncio.wait_for(ws.recv(), timeout=5.0)
                 except websockets.exceptions.ConnectionClosed as exc:
@@ -1473,7 +1672,8 @@ async def run_sustained_soak_stage(
                 records.append(rec)
         except Exception as err:
             failed_sessions += 1
-            await start_barrier.abort()
+            with contextlib.suppress(Exception):
+                await start_barrier.abort()
             hold_event.set()
             raise err
 
@@ -1497,10 +1697,11 @@ async def run_sustained_soak_stage(
     sustained_holding_sec = 0.0
 
     try:
-        # 1. Await all 25 clients reaching active connected state at the start barrier
-        await asyncio.wait_for(start_barrier.wait(), timeout=15.0)
+        # 1. Await all clients reaching active connected state at the start barrier
+        barrier_timeout = max(15.0, timeout / 2.0)
+        await asyncio.wait_for(start_barrier.wait(), timeout=barrier_timeout)
 
-        # 2. Verify all 25 active connections initially
+        # 2. Verify all active connections initially
         snap_initial = server_ctx.controller.snapshot()
         achieved_active = snap_initial.active_connections
         if achieved_active != concurrency:
@@ -1518,9 +1719,12 @@ async def run_sustained_soak_stage(
 
     except (TimeoutError, asyncio.BrokenBarrierError) as b_err:
         stage_error = f"Start barrier alignment failed: {b_err}"
-        await start_barrier.abort()
+        with contextlib.suppress(Exception):
+            await start_barrier.abort()
     finally:
         hold_event.set()
+        with contextlib.suppress(Exception):
+            await start_barrier.abort()
         if sampler_task is not None:
             await sampler_task
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1562,8 +1766,8 @@ async def run_sustained_soak_stage(
         "total_duration": compute_metric_summary([r.total_duration_ms for r in records]),
     }
 
-    total_events = len(records) * (6 + int(duration / ping_interval) * 2)
-    eps = (total_events / duration_sec) if duration_sec > 0 else 0.0
+    observed_events = sum(r.observed_events for r in records)
+    eps = round(observed_events / duration_sec, 1) if duration_sec > 0 else 0.0
 
     return StageResult(
         scenario=f"sustained_soak_{concurrency}",
@@ -1581,10 +1785,11 @@ async def run_sustained_soak_stage(
         active_leases_after_cleanup=server_ctx.coordinator.active_connections_count,
         duration_seconds=round(duration_sec, 3),
         configured_duration_seconds=duration,
-        events_per_second=round(eps, 1),
+        events_per_second=eps,
         latencies=latencies,
         capacity_before=cap_before,
         capacity_after=cap_after,
+        observed_events=observed_events,
         min_active_connections=min_sampled,
         max_active_connections=max_sampled,
         sustained_holding_seconds=round(sustained_holding_sec, 3),
@@ -1690,11 +1895,17 @@ async def execute_soak_suite(
                     all_passed = False
 
         if scenario == "sustained":
+            # GATE A: Pre-flight validation of distribution BEFORE ephemeral server start
+            resolved_dist = resolve_sustained_tenant_distribution(
+                concurrency=concurrency,
+                tenant_distribution=None,
+            )
             async with start_ephemeral_soak_server(port=port, log_level=log_level) as s_ctx:
                 r_sustained = await run_sustained_soak_stage(
                     s_ctx,
                     concurrency=concurrency,
                     duration=duration,
+                    tenant_distribution=resolved_dist,
                 )
                 report.stages.append(r_sustained)
                 if r_sustained.status != "PASS":
@@ -1717,7 +1928,7 @@ def render_console_report(report: SoakReport, out: TextIO) -> None:
     subsep = "-" * 80
 
     out.write(f"\n{sep}\n")
-    out.write("  KAIWEN GATEWAY — SYNTHETIC LOAD & SOAK TEST REPORT (M3.3B)\n")
+    out.write("  KAIWEN GATEWAY -- SYNTHETIC LOAD & SOAK TEST REPORT (M3.3B)\n")
     out.write(f"{sep}\n")
     out.write(f"Runner Version    : {report.runner_version}\n")
     out.write(f"Gateway Version   : {report.gateway_version} (commit: {report.git_commit[:10]})\n")
@@ -1866,16 +2077,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(f"Error: Invalid --port {args.port}. Must be between 0 and 65535.\n")
         return 1
 
-    report = asyncio.run(
-        execute_soak_suite(
-            scenario=args.scenario,
-            concurrency=args.concurrency,
-            duration=args.duration,
-            iterations=args.iterations,
-            port=args.port,
-            log_level=args.log_level,
+    try:
+        report = asyncio.run(
+            execute_soak_suite(
+                scenario=args.scenario,
+                concurrency=args.concurrency,
+                duration=args.duration,
+                iterations=args.iterations,
+                port=args.port,
+                log_level=args.log_level,
+            )
         )
-    )
+    except ValueError as val_err:
+        sys.stderr.write(f"Configuration error: {val_err}\n")
+        return 1
 
     render_console_report(report, sys.stdout)
 
