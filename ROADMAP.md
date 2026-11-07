@@ -1,9 +1,9 @@
 # Kaiwen Gateway — Development Roadmap
 
-> **Status:** Active roadmap — M0 Complete (2026-11-01); M1 Complete (2026-11-01; M1.1–M1.4 verified); M2 Complete; M3 Complete; M4 In progress (M4.1 Complete — PR #20 / `577e6b9`; M4.2A Complete — PR #21 / `df28327`; M4.2B.1 Draft PR pending review; M4.2B.2 Not started; M5 Not started)
-> **Project phase:** Design / pre-implementation
+> **Status:** Active roadmap — M0 Complete (2026-11-01); M1 Complete (2026-11-01; M1.1–M1.4 verified); M2 Complete; M3 Complete; M4 In progress (M4.1 Complete — PR #20 / `577e6b9`; M4.2A Complete — PR #21 / `df28327`; M4.2B.1 Complete — PR #22 / `e457f8f`; M4.2B.2 Complete — PR #23 / `a3528ea`; external AI integration pending); M5 In progress (M5.1A provider-independent Voice Bridge observability foundation)
+> **Project phase:** Pre-alpha implementation
 > **Initial target release:** `0.1.0a1` (synthetic-environment alpha)
-> **Last reviewed:** 2026-11-01
+> **Last reviewed:** 2026-11-07
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
 > **Primary scope:** Reusable Python library and optional ASGI service; **Voice is the only V1 functional module**.
 
@@ -62,8 +62,8 @@ Use only these milestone status values:
 | **M1** | Python package and CI foundation | `Complete` (M1.1 merged in `#1` / `b0a666e`; M1.2 merged in `#2` / `9c0293c`; M1.3 merged in `#3` / `1355b0c` & verified on `main` run `41263309448`; M1.4A merged in `#4` / `32111a4` & verified on `main` run `41264905664` + Dependabot runs `41264912866`, `41264912883`; M1.4B.1 `main` branch protection enabled & verified via GitHub API) | M0 |
 | **M2** | Core contracts, identity and security/admission | `In progress` (M2.1 merged in `#9` / `68030a0`; M2.2A merged in `#10` / `f65ad6d`; M2.2B merged in `#11` / `705091e`; M2.3 merged in `#12` / `192ec9b`; M2.4A merged in `#13` / `cd835bf`; M2.4B merged in `#14` / `ade73ec`; remaining M2 exit criteria under evaluation) | M1 |
 | **M3** | ASGI/WSS ingress and synthetic telephony adapter | `Complete` (M3.1 merged in `#15` / `224284f`; M3.2A merged in `#16` / `558bd95`; M3.2B merged in `#17` / `7a28c40`; M3.3A merged in `#18` / `d347eae`; M3.3B merged in `#19` / `4fa9a18` & verified on `main` run `42289608463`) | M2 |
-| **M4** | Voice audio bridge and Kaiwen Agent integration | `In progress` (M4.1 Complete — PR #20 / `577e6b9`; M4.2A Complete — PR #21 / `df28327`; M4.2B.1 Draft PR pending review; M4.2B.2 Not started) | M3 |
-| **M5** | Resilience, simulation, security and load evidence | `Not started` | M4 |
+| **M4** | Voice audio bridge and Kaiwen Agent integration | `In progress` (synthetic Voice Bridge foundation complete: M4.1 merged in `#20` / `577e6b9`; M4.2A merged in `#21` / `df28327`; M4.2B.1 merged in `#22` / `e457f8f`; M4.2B.2 merged in `#23` / `a3528ea` & verified on `main` run `42398851469`; full M4 external AI integration remains pending — Kaiwen Agent integration deferred while upstream public API is under active development, OpenAI Live unverified) | M3 |
+| **M5** | Resilience, simulation, security and load evidence | `In progress` (M5.1A provider-independent Voice Bridge observability foundation; full M5 depends on M4 completion) | M4 |
 | **M6** | Alpha packaging and release-readiness review | `Not started` | M5 |
 | **M7** | Conditional Verimor pilot | `Blocked` (official protocol and authorizations) | M6 + `OPEN-*` dependencies |
 | **M8** | Production-readiness decision (separate track) | `Not started` | M7 evidence and separately approved operations plan |
@@ -172,9 +172,9 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - [x] Bounded per-call Fake AI echo port and backpressure enforcement (M4.2A Complete — PR #21 / `df28327`).
 - [ ] Provider-specific codec negotiation/conversion **only when evidence requires it**; validate frame formats/order/timing.
 - [x] Bounded media queues/backpressure, precise cancellation and idempotent cleanup (M4.1 Complete; M4.2A verified over loopback WebSocket).
-- [ ] Barge-in/unplayed-output handling according to **verified adapter capabilities** (M4.2B.1 in-process turn control Complete — PR #22 / `e457f8f`; M4.2B.2 synthetic WebSocket interruption vertical slice in progress).
+- [x] Barge-in/unplayed-output handling according to **verified adapter capabilities** (M4.2B.1 in-process turn control Complete — PR #22 / `e457f8f`; M4.2B.2 synthetic WebSocket interruption vertical slice Complete — PR #23 / `a3528ea`).
 - [x] Fake AI adapter and independent per-call session state; concurrency/isolation fixtures (M4.1 Complete; M4.2A multi-tenant isolation verified).
-- [ ] Kaiwen Agent integration adapter using **public, compatible APIs**; no duplicate agent runtime.
+- [ ] Kaiwen Agent integration adapter using **public, compatible APIs**; no duplicate agent runtime (explicitly deferred while `kaiwen-agent` public realtime API is under active parallel development).
 - [ ] OpenAI Live contract review against current official docs; an authorized sandbox smoke test if credentials/approval are available.
 - [ ] Clear capability matrix distinguishing synthetic operation, reviewed contract and real provider-verified behavior.
 
@@ -195,7 +195,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - [ ] Controlled fallback or clean termination. Human transfer only if actually supported and separately verified.
 - [ ] Replay/duplicate-start handling appropriate to the initial process model; defer distributed atomic storage to the live pilot gate where allowed.
 - [ ] No-storage-by-default and redaction tests for logs, traces, errors and CI artifacts.
-- [ ] In-process performance instrumentation (queue duration, bridge processing latency, connection counts, rejects, provider errors).
+- [ ] In-process performance instrumentation (queue duration, bridge processing latency, connection counts, rejects, provider errors; M5.1A provider-independent Voice Bridge telemetry foundation implemented for synthetic Voice paths).
 - [ ] Reproducible synthetic load tests at **1 → 5 → 25 → 50 → 100** concurrent calls as environment/capacity permits, measuring p50/p95/p99, CPU, memory, queue growth and failure rate.
 - [ ] Scheduled/manual benchmark workflow when stable; security and dependency scans without leaking test data.
 

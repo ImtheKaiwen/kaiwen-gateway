@@ -272,11 +272,13 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
             if ai_port_factory is not None
             else BoundedInterruptibleFakeAIEchoPort()
         )
+        telemetry_sink = getattr(app_state, "voice_telemetry_sink", None)
         voice_bridge = VoiceBridgeSession(
             call_id=verified_context.call_id,
             tenant_id=verified_context.tenant_id,
             telephony_port=telephony_adapter,
             ai_port=ai_port,
+            telemetry_sink=telemetry_sink,
         )
     except Exception:
         try:
