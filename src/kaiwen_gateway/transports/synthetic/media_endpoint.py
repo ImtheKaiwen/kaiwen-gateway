@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import uuid
 from collections.abc import Callable
 from typing import Any, Final
@@ -54,6 +55,19 @@ except ImportError:  # pragma: no cover
 DEFAULT_IDLE_TIMEOUT_SECONDS: Final[float] = 60.0
 DEFAULT_DRAIN_TIMEOUT_SECONDS: Final[float] = 2.0
 REQUIRED_SYNTHETIC_SCOPE: Final[str] = "voice.stream"
+
+
+def _resolve_positive_float(value: Any, default: float) -> float:
+    """Resolve a timeout setting to a positive finite float, falling back to default."""
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        val = float(value)
+        if not math.isfinite(val) or val <= 0.0:
+            return default
+        return val
+    except (TypeError, ValueError):
+        return default
 
 
 async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
@@ -182,10 +196,25 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
             active_call_registered = False
 
         if voice_bridge is not None:
+            if voice_bridge.state == VoiceBridgeState.FAILED:
+                err = voice_bridge.error
+                if isinstance(err, Exception):
+                    cleanup_errors.append(err)
+                else:
+                    cleanup_errors.append(
+                        VoiceDomainError(f"Voice bridge ended in FAILED state: {err}")
+                    )
             try:
                 await voice_bridge.close()
             except Exception as exc:
                 cleanup_errors.append(exc)
+
+            if voice_bridge.state == VoiceBridgeState.FAILED:
+                err = voice_bridge.error
+                if isinstance(err, Exception) and err not in cleanup_errors:
+                    cleanup_errors.append(err)
+                elif err is None and not cleanup_errors:
+                    cleanup_errors.append(VoiceDomainError("Voice bridge ended in FAILED state"))
 
         if telephony_adapter is not None:
             try:
@@ -201,11 +230,24 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
 
         try:
             accepted_flag = _is_wire_accepted()
-            close_code = 1000 if accepted_flag else 1011
-            close_reason = "Server shutting down" if accepted_flag else "Initialization failed"
+            is_failed = bool(
+                (voice_bridge is not None and voice_bridge.state == VoiceBridgeState.FAILED)
+                or bool(cleanup_errors)
+            )
+            close_code = 1011 if (not accepted_flag or is_failed) else 1000
+            close_reason = (
+                "Internal server error"
+                if is_failed
+                else ("Server shutting down" if accepted_flag else "Initialization failed")
+            )
             await _close_socket(code=close_code, reason=close_reason)
         except Exception as exc:
             cleanup_errors.append(exc)
+
+        if cleanup_errors:
+            if len(cleanup_errors) == 1:
+                raise cleanup_errors[0]
+            raise ExceptionGroup("Media session cleanup failed", cleanup_errors)
 
     try:
         supervisor.register_resource(_cleanup_media_session)
@@ -266,11 +308,13 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
             return
 
         # 9. Supervised session worker with single ingress read-loop
-        idle_timeout = float(
-            getattr(app_state, "synthetic_idle_timeout", DEFAULT_IDLE_TIMEOUT_SECONDS)
+        idle_timeout = _resolve_positive_float(
+            getattr(app_state, "synthetic_idle_timeout", None),
+            DEFAULT_IDLE_TIMEOUT_SECONDS,
         )
-        drain_timeout = float(
-            getattr(app_state, "synthetic_drain_timeout", DEFAULT_DRAIN_TIMEOUT_SECONDS)
+        drain_timeout = _resolve_positive_float(
+            getattr(app_state, "synthetic_drain_timeout", None),
+            DEFAULT_DRAIN_TIMEOUT_SECONDS,
         )
 
         async def _media_session_worker() -> None:
@@ -282,6 +326,8 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
             call_active = False
             call_started_once = False
             inbound_seq = 0
+            receive_task: asyncio.Task[Any] | None = None
+            bridge_waiter_task: asyncio.Task[None] | None = None
 
             try:
                 # Send session.ready greeting
@@ -299,10 +345,59 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
 
                 # Single ingress read-loop demuxing control frames and binary audio
                 while True:
-                    try:
-                        message = await asyncio.wait_for(websocket.receive(), timeout=idle_timeout)
-                    except TimeoutError:
+                    if receive_task is None or receive_task.done():
+                        receive_task = asyncio.create_task(websocket.receive())
+
+                    tasks_to_wait: list[asyncio.Task[Any]] = [receive_task]
+                    if bridge_waiter_task is not None and not bridge_waiter_task.done():
+                        tasks_to_wait.append(bridge_waiter_task)
+
+                    done, _ = await asyncio.wait(
+                        tasks_to_wait,
+                        timeout=idle_timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+
+                    if not done:
                         await _close_socket(code=1000, reason="Session idle timeout")
+                        break
+
+                    # 1. Proactive observation of upstream bridge failure
+                    if bridge_waiter_task is not None and bridge_waiter_task in done:
+                        if voice_bridge.state == VoiceBridgeState.FAILED:
+                            await _close_socket(
+                                code=1011,
+                                reason="Upstream media bridge failed",
+                            )
+                            break
+                        if call_active and voice_bridge.state == VoiceBridgeState.CLOSED:
+                            await _close_socket(
+                                code=1011,
+                                reason="Upstream media bridge closed prematurely",
+                            )
+                            break
+
+                    # 2. Check if receive_task completed
+                    if receive_task not in done:
+                        continue
+
+                    try:
+                        message = receive_task.result()
+                    except WebSocketDisconnect:
+                        socket_disconnected = True
+                        break
+                    except Exception:
+                        await _close_socket(code=1011, reason="Transport receive error")
+                        break
+                    finally:
+                        receive_task = None
+
+                    # If the bridge has failed, reject further traffic immediately
+                    if call_started_once and voice_bridge.state == VoiceBridgeState.FAILED:
+                        await _close_socket(
+                            code=1011,
+                            reason="Upstream media bridge failed",
+                        )
                         break
 
                     msg_type = message.get("type")
@@ -376,6 +471,13 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
 
                     elif event_name == EVENT_SESSION_END:
                         call_active = False
+                        if bridge_waiter_task is not None and not bridge_waiter_task.done():
+                            bridge_waiter_task.cancel()
+                            try:
+                                await bridge_waiter_task
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                            bridge_waiter_task = None
                         telephony_adapter.push_inbound_eof_nowait()
                         if hasattr(ai_port, "push_eof_nowait"):
                             ai_port.push_eof_nowait()
@@ -404,6 +506,10 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
                         call_started_once = True
                         # Start VoiceBridgeSession pumps
                         await voice_bridge.start()
+                        bridge_waiter_task = asyncio.create_task(
+                            voice_bridge.wait_until_closed(propagate_error=False),
+                            name=f"voice-bridge-waiter-{verified_context.call_id}",
+                        )
 
                         started_response = {
                             "event": EVENT_CALL_STARTED,
@@ -435,6 +541,15 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
 
                         # 1. Stop new inbound audio acceptance
                         call_active = False
+
+                        # Stop bridge waiter task so drain sequence owns waiting for bridge close
+                        if bridge_waiter_task is not None and not bridge_waiter_task.done():
+                            bridge_waiter_task.cancel()
+                            try:
+                                await bridge_waiter_task
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                            bridge_waiter_task = None
 
                         # 2-6. Lossless bounded drain sequence
                         drain_success = False
@@ -509,6 +624,18 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
                     pass
                 raise
             finally:
+                if receive_task is not None and not receive_task.done():
+                    receive_task.cancel()
+                    try:
+                        await receive_task
+                    except (asyncio.CancelledError, WebSocketDisconnect, Exception):
+                        pass
+                if bridge_waiter_task is not None and not bridge_waiter_task.done():
+                    bridge_waiter_task.cancel()
+                    try:
+                        await bridge_waiter_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
                 if telephony_adapter is not None:
                     telephony_adapter.push_inbound_eof_nowait()
                 if ai_port is not None and hasattr(ai_port, "push_eof_nowait"):

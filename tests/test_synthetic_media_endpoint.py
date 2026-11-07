@@ -34,7 +34,11 @@ from kaiwen_gateway.core.draining import InstanceDrainCoordinator
 from kaiwen_gateway.core.identity import (
     VerifiedConnectionContext,
 )
-from kaiwen_gateway.core.lifecycle import ConnectionSupervisor
+from kaiwen_gateway.core.lifecycle import (
+    ConnectionState,
+    ConnectionSupervisor,
+    TerminalReason,
+)
 from kaiwen_gateway.modules.voice.adapters.fake_ai import BoundedFakeAIEchoPort
 from kaiwen_gateway.modules.voice.bridge import VoiceBridgeSession
 from kaiwen_gateway.modules.voice.domain import (
@@ -67,8 +71,27 @@ from kaiwen_gateway.transports.synthetic import (
     WebSocketTelephonyMediaAdapter,
     validate_pcm16le_binary_frame,
 )
+from kaiwen_gateway.transports.synthetic.media_endpoint import _resolve_positive_float
 
 TEST_SECRET_KEY: Final[bytes] = b"synthetic_media_test_secret_32bytes!"
+
+
+class CapturingCoordinator(InstanceDrainCoordinator):
+    """Subclass capturing supervisors admitted through the coordinator."""
+
+    def __init__(self, controller: AdmissionController) -> None:
+        super().__init__(controller=controller)
+        self.captured: list[ConnectionSupervisor] = []
+
+    async def admit_connection(
+        self,
+        context: VerifiedConnectionContext,
+        *,
+        supervisor_policy: Any = None,
+    ) -> ConnectionSupervisor:
+        sup = await super().admit_connection(context, supervisor_policy=supervisor_policy)
+        self.captured.append(sup)
+        return sup
 
 
 def _get_free_port() -> int:
@@ -2098,3 +2121,321 @@ def test_gate_d_voice_bridge_failure_closes_with_1011_no_call_ended() -> None:
         assert len(auth_bridge._active_calls) == 0
 
     asyncio.run(_test())
+
+
+def test_gate_a_upstream_bridge_failure_proactively_terminates_without_client_call_end() -> None:
+    """Gate A: Upstream bridge failure during streaming terminates transport with 1011 without client call.end."""
+
+    async def _test() -> None:
+        port_num = _get_free_port()
+        config = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
+        admission = AdmissionController(config)
+        verifier = SyntheticTokenVerifier(secret_key=TEST_SECRET_KEY)
+        auth_bridge = SyntheticAuthBridge(verifier=verifier)
+
+        class ExplodingSendAIPort(BoundedFakeAIEchoPort):
+            async def send_frame(self, frame: AudioFrame) -> None:
+                raise VoiceDomainError("Simulated upstream backend crash")
+
+        coordinator = CapturingCoordinator(admission)
+        app = create_gateway_app(
+            config=config,
+            admission_controller=admission,
+            drain_coordinator=coordinator,
+            synthetic_auth_bridge=auth_bridge,
+            enable_synthetic_media=True,
+            ai_media_port_factory=ExplodingSendAIPort,
+        )
+
+        async with _run_test_server(app, port_num) as base_ws_url:
+            uri = f"{base_ws_url}{SYNTHETIC_MEDIA_WS_ENDPOINT_PATH}"
+            token = verifier.issue_token(
+                provider_id="smoke_provider",
+                tenant_id="tenant_gate_a",
+                call_id="call_gate_a_01",
+                allowed_scopes=["voice.stream"],
+            )
+
+            async with websockets.connect(
+                uri, additional_headers={"Authorization": f"Bearer {token}"}
+            ) as ws:
+                await ws.recv()  # session.ready
+                await ws.send(json.dumps({"event": EVENT_CALL_START, "call_id": "call_gate_a_01"}))
+                await ws.recv()  # call.started
+
+                # Send 1 audio frame to trigger the AI backend crash
+                await ws.send(b"\x00" * PCM16LE_FRAME_BYTES)
+
+                # Client does NOT send call.end! Server must proactively terminate.
+                received_items: list[str | bytes] = []
+                close_code: int | None = None
+                while True:
+                    try:
+                        msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                        received_items.append(msg)
+                    except websockets.exceptions.ConnectionClosed as exc:
+                        close_code = exc.rcvd.code if exc.rcvd else exc.code
+                        break
+
+                has_ended = any(isinstance(m, str) and "call.ended" in m for m in received_items)
+                assert has_ended is False
+                assert close_code == 1011
+
+        await asyncio.sleep(0.05)
+        # All capacity and active call registration must be recovered
+        assert admission.snapshot().active_connections == 0
+        assert len(auth_bridge._active_calls) == 0
+
+        # Supervisor must report FAILED / CLEANUP_FAILED
+        assert len(coordinator.captured) == 1
+        sup = coordinator.captured[0]
+        assert sup.outcome is not None
+        assert sup.outcome.state == ConnectionState.FAILED
+        assert sup.outcome.reason == TerminalReason.CLEANUP_FAILED
+
+    asyncio.run(_test())
+
+
+def test_gate_a_session_ping_rejected_after_bridge_failure_no_pong() -> None:
+    """Gate A: Client sends session.ping after bridge failure; server rejects with 1011 and never sends pong."""
+
+    async def _test() -> None:
+        port_num = _get_free_port()
+        config = CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC)
+        admission = AdmissionController(config)
+        verifier = SyntheticTokenVerifier(secret_key=TEST_SECRET_KEY)
+        auth_bridge = SyntheticAuthBridge(verifier=verifier)
+
+        class ExplodingSendAIPort(BoundedFakeAIEchoPort):
+            async def send_frame(self, frame: AudioFrame) -> None:
+                raise VoiceDomainError("Simulated upstream backend crash")
+
+        app = create_gateway_app(
+            config=config,
+            admission_controller=admission,
+            synthetic_auth_bridge=auth_bridge,
+            enable_synthetic_media=True,
+            ai_media_port_factory=ExplodingSendAIPort,
+        )
+
+        async with _run_test_server(app, port_num) as base_ws_url:
+            uri = f"{base_ws_url}{SYNTHETIC_MEDIA_WS_ENDPOINT_PATH}"
+            token = verifier.issue_token(
+                provider_id="smoke_provider",
+                tenant_id="tenant_gate_a_ping",
+                call_id="call_gate_a_ping_01",
+                allowed_scopes=["voice.stream"],
+            )
+
+            async with websockets.connect(
+                uri, additional_headers={"Authorization": f"Bearer {token}"}
+            ) as ws:
+                await ws.recv()  # session.ready
+                await ws.send(
+                    json.dumps({"event": EVENT_CALL_START, "call_id": "call_gate_a_ping_01"})
+                )
+                await ws.recv()  # call.started
+
+                # Send frame causing bridge failure
+                await ws.send(b"\x00" * PCM16LE_FRAME_BYTES)
+
+                # Wait 50ms for failure to propagate in bridge
+                await asyncio.sleep(0.05)
+
+                # Attempt to keep session alive by sending session.ping
+                try:
+                    await ws.send(json.dumps({"event": EVENT_SESSION_PING, "seq": 999}))
+                except websockets.exceptions.ConnectionClosed:
+                    pass
+
+                received_items: list[str | bytes] = []
+                close_code: int | None = None
+                while True:
+                    try:
+                        msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                        received_items.append(msg)
+                    except websockets.exceptions.ConnectionClosed as exc:
+                        close_code = exc.rcvd.code if exc.rcvd else exc.code
+                        break
+                    except TimeoutError:
+                        break
+
+                has_pong = any(isinstance(m, str) and "session.pong" in m for m in received_items)
+                has_ended = any(isinstance(m, str) and "call.ended" in m for m in received_items)
+                assert has_pong is False
+                assert has_ended is False
+                assert close_code == 1011
+
+        await asyncio.sleep(0.05)
+        assert admission.snapshot().active_connections == 0
+        assert len(auth_bridge._active_calls) == 0
+
+    asyncio.run(_test())
+
+
+def test_gate_b_ai_port_cleanup_error_propagates_to_core_supervisor() -> None:
+    """Gate B: Exception in AI port close() propagates to Core supervisor as CLEANUP_FAILED."""
+    verifier = SyntheticTokenVerifier(secret_key=TEST_SECRET_KEY)
+    auth_bridge = SyntheticAuthBridge(verifier=verifier)
+    admission = AdmissionController(CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC))
+
+    class ExplodingCloseAIPort(BoundedFakeAIEchoPort):
+        async def close(self) -> None:
+            await super().close()
+            raise RuntimeError("AI port close exploded intentionally")
+
+    coordinator = CapturingCoordinator(admission)
+    app = create_gateway_app(
+        config=CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC),
+        admission_controller=admission,
+        drain_coordinator=coordinator,
+        synthetic_auth_bridge=auth_bridge,
+        enable_synthetic_media=True,
+        ai_media_port_factory=ExplodingCloseAIPort,
+    )
+
+    client = TestClient(app)
+    token = verifier.issue_token(
+        provider_id="smoke_provider",
+        tenant_id="tenant_cleanup_ai_err",
+        call_id="call_clean_ai_01",
+        allowed_scopes=["voice.stream"],
+    )
+
+    with client.websocket_connect(
+        SYNTHETIC_MEDIA_WS_ENDPOINT_PATH,
+        headers={"Authorization": f"Bearer {token}"},
+    ) as ws:
+        ws.receive_json()  # session.ready
+        ws.send_json({"event": EVENT_CALL_START, "call_id": "call_clean_ai_01"})
+        ws.receive_json()  # call.started
+        ws.send_json({"event": EVENT_CALL_END, "call_id": "call_clean_ai_01"})
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 1011
+
+    assert admission.snapshot().active_connections == 0
+    assert len(auth_bridge._active_calls) == 0
+
+    assert len(coordinator.captured) == 1
+    sup = coordinator.captured[0]
+    assert sup.outcome is not None
+    assert sup.outcome.state == ConnectionState.FAILED
+    assert sup.outcome.reason == TerminalReason.CLEANUP_FAILED
+
+
+def test_gate_b_telephony_adapter_cleanup_error_propagates_to_core_supervisor() -> None:
+    """Gate B: Exception in telephony adapter close() propagates to Core supervisor as CLEANUP_FAILED."""
+    verifier = SyntheticTokenVerifier(secret_key=TEST_SECRET_KEY)
+    auth_bridge = SyntheticAuthBridge(verifier=verifier)
+    admission = AdmissionController(CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC))
+
+    coordinator = CapturingCoordinator(admission)
+    app = create_gateway_app(
+        config=CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC),
+        admission_controller=admission,
+        drain_coordinator=coordinator,
+        synthetic_auth_bridge=auth_bridge,
+        enable_synthetic_media=True,
+    )
+
+    orig_adapter_close = WebSocketTelephonyMediaAdapter.close
+
+    async def _exploding_close(self: WebSocketTelephonyMediaAdapter) -> None:
+        await orig_adapter_close(self)
+        raise RuntimeError("Telephony adapter close exploded intentionally")
+
+    WebSocketTelephonyMediaAdapter.close = _exploding_close  # type: ignore[method-assign]
+
+    try:
+        client = TestClient(app)
+        token = verifier.issue_token(
+            provider_id="smoke_provider",
+            tenant_id="tenant_cleanup_tel_err",
+            call_id="call_clean_tel_01",
+            allowed_scopes=["voice.stream"],
+        )
+
+        with client.websocket_connect(
+            SYNTHETIC_MEDIA_WS_ENDPOINT_PATH,
+            headers={"Authorization": f"Bearer {token}"},
+        ) as ws:
+            ws.receive_json()  # session.ready
+            ws.send_json({"event": EVENT_CALL_START, "call_id": "call_clean_tel_01"})
+            ws.receive_json()  # call.started
+            ws.send_json({"event": EVENT_CALL_END, "call_id": "call_clean_tel_01"})
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+            assert exc.value.code == 1011
+    finally:
+        WebSocketTelephonyMediaAdapter.close = orig_adapter_close  # type: ignore[method-assign]
+
+    assert admission.snapshot().active_connections == 0
+    assert len(auth_bridge._active_calls) == 0
+
+    assert len(coordinator.captured) == 1
+    sup = coordinator.captured[0]
+    assert sup.outcome is not None
+    assert sup.outcome.state == ConnectionState.FAILED
+    assert sup.outcome.reason == TerminalReason.CLEANUP_FAILED
+
+
+def test_gate_d_timeout_sanitization_helper() -> None:
+    """Gate D: _resolve_positive_float sanitizes non-finite, non-positive, or invalid values."""
+    default = 10.0
+    assert _resolve_positive_float(float("nan"), default) == default
+    assert _resolve_positive_float(float("inf"), default) == default
+    assert _resolve_positive_float(float("-inf"), default) == default
+    assert _resolve_positive_float(-5.0, default) == default
+    assert _resolve_positive_float(0.0, default) == default
+    assert _resolve_positive_float(-0.0, default) == default
+    assert _resolve_positive_float(None, default) == default
+    assert _resolve_positive_float(True, default) == default
+    assert _resolve_positive_float(False, default) == default
+    assert _resolve_positive_float("invalid", default) == default
+    assert _resolve_positive_float(25.5, default) == 25.5
+    assert _resolve_positive_float(1, default) == 1.0
+
+
+def test_gate_d_invalid_timeouts_fall_back_safely_in_endpoint() -> None:
+    """Gate D: Non-finite / non-positive timeouts fall back to defaults and allow normal completion."""
+    verifier = SyntheticTokenVerifier(secret_key=TEST_SECRET_KEY)
+    auth_bridge = SyntheticAuthBridge(verifier=verifier)
+    admission = AdmissionController(CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC))
+
+    app = create_gateway_app(
+        config=CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC),
+        admission_controller=admission,
+        synthetic_auth_bridge=auth_bridge,
+        enable_synthetic_media=True,
+    )
+    # Inject invalid timeouts on app.state
+    app.state.synthetic_drain_timeout = float("nan")
+    app.state.synthetic_idle_timeout = -15.0
+
+    client = TestClient(app)
+    token = verifier.issue_token(
+        provider_id="smoke_provider",
+        tenant_id="tenant_timeout_nan",
+        call_id="call_timeout_nan_01",
+        allowed_scopes=["voice.stream"],
+    )
+
+    with client.websocket_connect(
+        SYNTHETIC_MEDIA_WS_ENDPOINT_PATH,
+        headers={"Authorization": f"Bearer {token}"},
+    ) as ws:
+        ready = ws.receive_json()
+        assert ready["event"] == EVENT_SESSION_READY
+        ws.send_json({"event": EVENT_CALL_START, "call_id": "call_timeout_nan_01"})
+        started = ws.receive_json()
+        assert started["event"] == EVENT_CALL_STARTED
+        ws.send_bytes(b"\x00" * PCM16LE_FRAME_BYTES)
+        echoed = ws.receive_bytes()
+        assert len(echoed) == PCM16LE_FRAME_BYTES
+        ws.send_json({"event": EVENT_CALL_END, "call_id": "call_timeout_nan_01"})
+        ended = ws.receive_json()
+        assert ended["event"] == EVENT_CALL_ENDED
+
+    assert admission.snapshot().active_connections == 0
+    assert len(auth_bridge._active_calls) == 0
