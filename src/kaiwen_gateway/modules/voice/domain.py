@@ -27,6 +27,7 @@ __all__ = [
     "MediaPortError",
     "MediaPortClosedError",
     "VoiceBridgeSessionClosedError",
+    "UnsupportedInterruptionCapabilityError",
     "create_synthetic_pcm16le_frame",
 ]
 
@@ -71,6 +72,10 @@ class VoiceBridgeSessionClosedError(VoiceDomainError):
     """Raised when an operation is attempted on a closed voice bridge session."""
 
 
+class UnsupportedInterruptionCapabilityError(VoiceDomainError):
+    """Raised when an unsupported interruption or playback control capability is requested."""
+
+
 @dataclass(frozen=True, slots=True)
 class AudioFrame:
     """Immutable provider-neutral audio frame envelope.
@@ -82,6 +87,7 @@ class AudioFrame:
         channels: Channel count (1 for mono, 2 for stereo).
         sequence: Monotonically increasing sequence number (>= 0).
         timestamp_ms: Monotonic or relative timing offset in milliseconds (finite, >= 0.0).
+        turn_id: Optional monotonically increasing response generation / turn identifier.
     """
 
     payload: bytes
@@ -90,6 +96,7 @@ class AudioFrame:
     channels: int
     sequence: int
     timestamp_ms: float
+    turn_id: int | None = None
 
     def __post_init__(self) -> None:
         # 1. Payload validation
@@ -160,6 +167,15 @@ class AudioFrame:
             raise InvalidAudioFrameError(f"timestamp_ms must be non-negative, got {ts_float}")
         object.__setattr__(self, "timestamp_ms", ts_float)
 
+        # 7. Turn identity validation (optional)
+        if self.turn_id is not None:
+            if not isinstance(self.turn_id, int) or isinstance(self.turn_id, bool):
+                raise InvalidAudioFrameError(
+                    f"turn_id must be int or None, got {type(self.turn_id).__name__}"
+                )
+            if self.turn_id < 0:
+                raise InvalidAudioFrameError(f"turn_id must be non-negative, got {self.turn_id}")
+
 
 def create_synthetic_pcm16le_frame(
     payload: bytes,
@@ -168,6 +184,7 @@ def create_synthetic_pcm16le_frame(
     timestamp_ms: float = 0.0,
     sample_rate: int = 16_000,
     channels: int = 1,
+    turn_id: int | None = None,
 ) -> AudioFrame:
     """Create a verified synthetic PCM16LE audio frame for testing and bridge demonstration."""
     return AudioFrame(
@@ -177,4 +194,5 @@ def create_synthetic_pcm16le_frame(
         channels=channels,
         sequence=sequence,
         timestamp_ms=timestamp_ms,
+        turn_id=turn_id,
     )

@@ -22,11 +22,15 @@ from kaiwen_gateway.modules.voice.domain import (
     InvalidAudioFrameError,
     MediaBackpressureOverflowError,
     OutOfOrderAudioFrameError,
+    UnsupportedInterruptionCapabilityError,
     VoiceBridgeSessionClosedError,
     VoiceDomainError,
 )
 from kaiwen_gateway.modules.voice.ports import (
     AIRealtimeMediaPort,
+    InterruptibleAIPort,
+    InterruptibleTelephonyPort,
+    InterruptionOutcome,
     TelephonyMediaPort,
 )
 
@@ -127,6 +131,13 @@ class VoiceBridgeSession:
         self._expected_inbound_seq: int = 0
         self._expected_outbound_seq: int = 0
 
+        # Interruption and turn control tracking
+        self._current_turn_id: int = 1
+        self._interruption_count: int = 0
+        self._stale_frames_suppressed: int = 0
+        self._locally_discarded_frames: int = 0
+        self._interruption_lock: asyncio.Lock = asyncio.Lock()
+
     @property
     def state(self) -> VoiceBridgeState:
         """Current lifecycle state of the bridge session."""
@@ -166,6 +177,196 @@ class VoiceBridgeSession:
     def outbound_completed(self) -> bool:
         """Return True if the outbound media leg completed cleanly on EOF."""
         return self._outbound_completed
+
+    @property
+    def current_turn_id(self) -> int:
+        """Current logical AI response generation / turn index (starts at 1)."""
+        return self._current_turn_id
+
+    @property
+    def interruption_count(self) -> int:
+        """Total number of successful interruptions performed during this session."""
+        return self._interruption_count
+
+    @property
+    def stale_frames_suppressed(self) -> int:
+        """Total frames from superseded turns suppressed by the outbound pump."""
+        return self._stale_frames_suppressed
+
+    @property
+    def locally_discarded_frames(self) -> int:
+        """Total buffered frames dropped from the outbound queue during interruptions."""
+        return self._locally_discarded_frames
+
+    async def interrupt(
+        self,
+        *,
+        turn_id: int | None = None,
+        require_future_generation_cancellation: bool = False,
+        require_playback_clear: bool = False,
+    ) -> InterruptionOutcome:
+        """Interrupt current AI playback, purge unsent output, and advance turn identity.
+
+        Args:
+            turn_id: Optional turn index to interrupt. If specified and less than
+                current_turn_id, the request is treated as an idempotent no-op.
+            require_future_generation_cancellation: If True, raises
+                UnsupportedInterruptionCapabilityError if the AI port cannot cancel generation.
+            require_playback_clear: If True, raises UnsupportedInterruptionCapabilityError
+                if the telephony port cannot clear remote provider playback.
+
+        Returns:
+            InterruptionOutcome detailing discarded frames and provider actions.
+
+        Raises:
+            VoiceBridgeSessionClosedError: If session is closed, closing, or failed.
+            VoiceDomainError: If turn_id is invalid or refers to an unreached future turn.
+            UnsupportedInterruptionCapabilityError: If required capabilities are unsupported.
+        """
+        if (
+            self._state
+            in (
+                VoiceBridgeState.CLOSING,
+                VoiceBridgeState.CLOSED,
+                VoiceBridgeState.FAILED,
+            )
+            or self._closed_event.is_set()
+        ):
+            raise VoiceBridgeSessionClosedError(
+                f"Cannot interrupt VoiceBridgeSession in state {self._state.value}"
+            )
+
+        if turn_id is not None:
+            if not isinstance(turn_id, int) or isinstance(turn_id, bool):
+                raise VoiceDomainError(f"turn_id must be int or None, got {type(turn_id).__name__}")
+            if turn_id < 0:
+                raise VoiceDomainError(f"turn_id must be non-negative, got {turn_id}")
+            if turn_id > self._current_turn_id:
+                raise VoiceDomainError(
+                    f"Cannot interrupt future turn {turn_id} (current turn is {self._current_turn_id})"
+                )
+            if turn_id < self._current_turn_id:
+                # Turn already interrupted / superseded: idempotent return
+                return InterruptionOutcome(
+                    call_id=self.call_id,
+                    interrupted_turn_id=turn_id,
+                    new_turn_id=self._current_turn_id,
+                    locally_discarded_frames=0,
+                    stale_frames_suppressed=self._stale_frames_suppressed,
+                    future_generation_cancelled=False,
+                    transport_pending_cancelled=False,
+                    provider_playback_cleared=False,
+                    playback_confirmed=False,
+                )
+
+        async with self._interruption_lock:
+            if (
+                self._state
+                in (
+                    VoiceBridgeState.CLOSING,
+                    VoiceBridgeState.CLOSED,
+                    VoiceBridgeState.FAILED,
+                )
+                or self._closed_event.is_set()
+            ):
+                raise VoiceBridgeSessionClosedError(
+                    f"Cannot interrupt VoiceBridgeSession in state {self._state.value}"
+                )
+
+            if turn_id is not None and turn_id < self._current_turn_id:
+                return InterruptionOutcome(
+                    call_id=self.call_id,
+                    interrupted_turn_id=turn_id,
+                    new_turn_id=self._current_turn_id,
+                    locally_discarded_frames=0,
+                    stale_frames_suppressed=self._stale_frames_suppressed,
+                    future_generation_cancelled=False,
+                    transport_pending_cancelled=False,
+                    provider_playback_cleared=False,
+                    playback_confirmed=False,
+                )
+
+            # Check capability requirements before mutating state
+            if require_future_generation_cancellation:
+                if (
+                    not isinstance(self._ai_port, InterruptibleAIPort)
+                    or not self._ai_port.interruption_capabilities.can_cancel_future_generation
+                ):
+                    raise UnsupportedInterruptionCapabilityError(
+                        "AI port does not support future generation cancellation"
+                    )
+
+            if require_playback_clear:
+                if (
+                    not isinstance(self._telephony_port, InterruptibleTelephonyPort)
+                    or not self._telephony_port.interruption_capabilities.can_clear_provider_playback
+                ):
+                    raise UnsupportedInterruptionCapabilityError(
+                        "Telephony port does not support clearing provider playback"
+                    )
+
+            interrupted_turn = self._current_turn_id
+            self._current_turn_id += 1
+            self._interruption_count += 1
+
+            # Purge unsent outbound frames from queue
+            discarded_count = 0
+            preserved_items: list[AudioFrame | None] = []
+            while not self._outbound_queue.empty():
+                try:
+                    item = self._outbound_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                self._outbound_queue.task_done()
+                if item is None:
+                    preserved_items.append(None)
+                else:
+                    discarded_count += 1
+            for item in preserved_items:
+                self._outbound_queue.put_nowait(item)
+            self._locally_discarded_frames += discarded_count
+
+            # Cancel upstream generation
+            future_cancelled = False
+            if isinstance(self._ai_port, InterruptibleAIPort):
+                if self._ai_port.interruption_capabilities.can_cancel_future_generation:
+                    try:
+                        await self._ai_port.cancel_turn(interrupted_turn)
+                        future_cancelled = True
+                    except Exception:
+                        if require_future_generation_cancellation:
+                            raise
+                        future_cancelled = False
+
+            # Clear transport / provider pending playback
+            transport_pending_cancelled = False
+            provider_playback_cleared = False
+            playback_confirmed = False
+            if isinstance(self._telephony_port, InterruptibleTelephonyPort):
+                caps = self._telephony_port.interruption_capabilities
+                try:
+                    await self._telephony_port.clear_pending_output()
+                    if caps.can_cancel_transport_pending:
+                        transport_pending_cancelled = True
+                    if caps.can_clear_provider_playback:
+                        provider_playback_cleared = True
+                    if caps.can_observe_playback_acks and not caps.cannot_confirm_playback:
+                        playback_confirmed = True
+                except Exception:
+                    if require_playback_clear:
+                        raise
+
+            return InterruptionOutcome(
+                call_id=self.call_id,
+                interrupted_turn_id=interrupted_turn,
+                new_turn_id=self._current_turn_id,
+                locally_discarded_frames=discarded_count,
+                stale_frames_suppressed=self._stale_frames_suppressed,
+                future_generation_cancelled=future_cancelled,
+                transport_pending_cancelled=transport_pending_cancelled,
+                provider_playback_cleared=provider_playback_cleared,
+                playback_confirmed=playback_confirmed,
+            )
 
     async def start(self) -> None:
         """Start the bidirectional media pumps under task supervision."""
@@ -471,6 +672,14 @@ class VoiceBridgeSession:
                         )
                     self._expected_outbound_seq += 1
 
+                # Stale frame suppression: drop frames belonging to older turns
+                # or untagged frames received after an interruption has occurred
+                if (frame.turn_id is not None and frame.turn_id < self._current_turn_id) or (
+                    frame.turn_id is None and self._current_turn_id > 1
+                ):
+                    self._stale_frames_suppressed += 1
+                    continue
+
                 if self._backpressure_timeout is not None:
                     try:
                         await asyncio.wait_for(
@@ -491,6 +700,15 @@ class VoiceBridgeSession:
                 if item is None:
                     self._outbound_queue.task_done()
                     break
+
+                # Stale frame suppression: drop frames belonging to older turns
+                # or untagged frames popped after an interruption has occurred
+                if (item.turn_id is not None and item.turn_id < self._current_turn_id) or (
+                    item.turn_id is None and self._current_turn_id > 1
+                ):
+                    self._stale_frames_suppressed += 1
+                    self._outbound_queue.task_done()
+                    continue
 
                 await self._telephony_port.send_frame(item)
                 self._outbound_frames_transferred += 1
