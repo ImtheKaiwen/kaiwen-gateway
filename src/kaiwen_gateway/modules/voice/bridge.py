@@ -1096,7 +1096,7 @@ class VoiceBridgeSession:
                             ) from err
                     else:
                         await self._inbound_queue.put(frame)
-                except BaseException:
+                except (asyncio.CancelledError, Exception):
                     self._unforwarded_inbound_frames += 1
                     raise
 
@@ -1110,41 +1110,44 @@ class VoiceBridgeSession:
             while not self._closing_event.is_set():
                 self._update_inbound_hwm()
                 item = await self._inbound_queue.get()
-                t_dequeued = time.perf_counter()
-                if item is None:
-                    self._inbound_queue.task_done()
-                    break
-
-                t_received = t_dequeued
-                t_pre_enqueue = t_dequeued
-                t_enqueued = t_dequeued
-                while self._inbound_timing_queue:
-                    entry_id, entry_recv, entry_pre_enq, entry_enq = (
-                        self._inbound_timing_queue.popleft()
-                    )
-                    if entry_id == id(item):
-                        t_received = entry_recv
-                        t_pre_enqueue = entry_pre_enq
-                        t_enqueued = entry_enq
+                try:
+                    t_dequeued = time.perf_counter()
+                    if item is None:
                         break
 
-                try:
-                    await self._ai_port.send_frame(item)
-                except BaseException:
-                    self._unforwarded_inbound_frames += 1
-                    self._inbound_queue.task_done()
-                    raise
+                    t_received = t_dequeued
+                    t_pre_enqueue = t_dequeued
+                    t_enqueued = t_dequeued
+                    while self._inbound_timing_queue:
+                        entry_id, entry_recv, entry_pre_enq, entry_enq = (
+                            self._inbound_timing_queue.popleft()
+                        )
+                        if entry_id == id(item):
+                            t_received = entry_recv
+                            t_pre_enqueue = entry_pre_enq
+                            t_enqueued = entry_enq
+                            break
 
-                t_forwarded = time.perf_counter()
-                self._inbound_frames_transferred += 1
-                self._inbound_bytes_transferred += len(item.payload)
-                self._inbound_queue_wait_latency.record(
-                    max(0.0, (t_dequeued - t_enqueued) * 1000.0)
-                )
-                self._inbound_processing_latency.record(
-                    max(0.0, ((t_pre_enqueue - t_received) + (t_forwarded - t_dequeued)) * 1000.0)
-                )
-                self._inbound_queue.task_done()
+                    try:
+                        await self._ai_port.send_frame(item)
+                    except (asyncio.CancelledError, Exception):
+                        self._unforwarded_inbound_frames += 1
+                        raise
+
+                    t_forwarded = time.perf_counter()
+                    self._inbound_frames_transferred += 1
+                    self._inbound_bytes_transferred += len(item.payload)
+                    self._inbound_queue_wait_latency.record(
+                        max(0.0, (t_dequeued - t_enqueued) * 1000.0)
+                    )
+                    self._inbound_processing_latency.record(
+                        max(
+                            0.0,
+                            ((t_pre_enqueue - t_received) + (t_forwarded - t_dequeued)) * 1000.0,
+                        )
+                    )
+                finally:
+                    self._inbound_queue.task_done()
 
         rec_task = asyncio.create_task(receiver())
         fwd_task = asyncio.create_task(forwarder())
@@ -1236,7 +1239,7 @@ class VoiceBridgeSession:
                             ) from err
                     else:
                         await self._outbound_queue.put(frame)
-                except BaseException:
+                except (asyncio.CancelledError, Exception):
                     self._unforwarded_outbound_frames += 1
                     raise
 
@@ -1250,73 +1253,82 @@ class VoiceBridgeSession:
             while not self._closing_event.is_set():
                 self._update_outbound_hwm()
                 item = await self._outbound_queue.get()
-                t_dequeued = time.perf_counter()
-                if item is None:
-                    self._outbound_queue.task_done()
-                    break
-
-                t_received = t_dequeued
-                t_pre_enqueue = t_dequeued
-                t_enqueued = t_dequeued
-                while self._outbound_timing_queue:
-                    entry_id, entry_recv, entry_pre_enq, entry_enq = (
-                        self._outbound_timing_queue.popleft()
-                    )
-                    if entry_id == id(item):
-                        t_received = entry_recv
-                        t_pre_enqueue = entry_pre_enq
-                        t_enqueued = entry_enq
+                try:
+                    t_dequeued = time.perf_counter()
+                    if item is None:
                         break
 
-                # Future turn rejection: fail-closed if queue item references an unreached future turn
-                if item.turn_id is not None and item.turn_id > self._current_turn_id:
-                    self._unforwarded_outbound_frames += 1
-                    self._outbound_queue.task_done()
-                    raise FutureTurnAudioFrameError(
-                        f"Outbound queue item references future turn {item.turn_id} "
-                        f"(current active turn is {self._current_turn_id})"
+                    t_received = t_dequeued
+                    t_pre_enqueue = t_dequeued
+                    t_enqueued = t_dequeued
+                    while self._outbound_timing_queue:
+                        entry_id, entry_recv, entry_pre_enq, entry_enq = (
+                            self._outbound_timing_queue.popleft()
+                        )
+                        if entry_id == id(item):
+                            t_received = entry_recv
+                            t_pre_enqueue = entry_pre_enq
+                            t_enqueued = entry_enq
+                            break
+
+                    # Future turn rejection: fail-closed if queue item references an unreached future turn
+                    if item.turn_id is not None and item.turn_id > self._current_turn_id:
+                        self._unforwarded_outbound_frames += 1
+                        raise FutureTurnAudioFrameError(
+                            f"Outbound queue item references future turn {item.turn_id} "
+                            f"(current active turn is {self._current_turn_id})"
+                        )
+
+                    # Stale frame suppression: drop frames belonging to older turns,
+                    # currently fenced turns, or untagged frames popped after interruption
+                    if self._is_outbound_frame_stale(item):
+                        self._stale_frames_suppressed += 1
+                        continue
+
+                    try:
+                        await self._telephony_port.send_frame(item)
+                    except (asyncio.CancelledError, Exception):
+                        self._unforwarded_outbound_frames += 1
+                        raise
+
+                    t_forwarded = time.perf_counter()
+                    self._outbound_frames_transferred += 1
+                    self._outbound_bytes_sent += len(item.payload)
+
+                    net_ms: object = None
+                    try:
+                        consume_fn = getattr(
+                            self._telephony_port, "consume_last_send_duration_ms", None
+                        )
+                        if callable(consume_fn):
+                            net_ms = consume_fn(item)
+                    except Exception:
+                        self._telemetry_sink_errors += 1
+                        net_ms = None
+
+                    send_total_ms = max(0.0, (t_forwarded - t_dequeued) * 1000.0)
+                    if (
+                        isinstance(net_ms, (int, float))
+                        and not isinstance(net_ms, bool)
+                        and math.isfinite(net_ms)
+                        and net_ms >= 0.0
+                    ):
+                        net_float = float(net_ms)
+                        self._network_transport_latency.record(net_float)
+                        send_processing_ms = max(0.0, send_total_ms - net_float)
+                    else:
+                        if net_ms is not None:
+                            self._telemetry_sink_errors += 1
+                        send_processing_ms = send_total_ms
+
+                    self._outbound_queue_wait_latency.record(
+                        max(0.0, (t_dequeued - t_enqueued) * 1000.0)
                     )
-
-                # Stale frame suppression: drop frames belonging to older turns,
-                # currently fenced turns, or untagged frames popped after interruption
-                if self._is_outbound_frame_stale(item):
-                    self._stale_frames_suppressed += 1
+                    self._outbound_processing_latency.record(
+                        max(0.0, (t_pre_enqueue - t_received) * 1000.0 + send_processing_ms)
+                    )
+                finally:
                     self._outbound_queue.task_done()
-                    continue
-
-                try:
-                    await self._telephony_port.send_frame(item)
-                except BaseException:
-                    self._unforwarded_outbound_frames += 1
-                    self._outbound_queue.task_done()
-                    raise
-
-                t_forwarded = time.perf_counter()
-                self._outbound_frames_transferred += 1
-                self._outbound_bytes_sent += len(item.payload)
-
-                consume_fn = getattr(self._telephony_port, "consume_last_send_duration_ms", None)
-                net_ms = consume_fn(item) if callable(consume_fn) else None
-                send_total_ms = max(0.0, (t_forwarded - t_dequeued) * 1000.0)
-                if (
-                    isinstance(net_ms, (int, float))
-                    and not isinstance(net_ms, bool)
-                    and math.isfinite(net_ms)
-                    and net_ms >= 0.0
-                ):
-                    net_float = float(net_ms)
-                    self._network_transport_latency.record(net_float)
-                    send_processing_ms = max(0.0, send_total_ms - net_float)
-                else:
-                    send_processing_ms = send_total_ms
-
-                self._outbound_queue_wait_latency.record(
-                    max(0.0, (t_dequeued - t_enqueued) * 1000.0)
-                )
-                self._outbound_processing_latency.record(
-                    max(0.0, (t_pre_enqueue - t_received) * 1000.0 + send_processing_ms)
-                )
-                self._outbound_queue.task_done()
 
         rec_task = asyncio.create_task(receiver())
         fwd_task = asyncio.create_task(forwarder())

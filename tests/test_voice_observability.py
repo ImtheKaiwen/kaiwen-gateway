@@ -1590,3 +1590,232 @@ def test_gate_d_same_frame_transport_correlation_and_duplicate_frame_references(
         assert tel.sent_frames[0] is shared_turn2
 
     asyncio.run(_run())
+
+
+def test_outbound_transport_timing_hook_fail_open_and_queue_accounting() -> None:
+    """Verify optional transport timing hook failures never fail media delivery or unbalance queue.join()."""
+
+    class FailingTimingHookTelephonyPort(FakeTelephonyMediaAdapter):
+        def consume_last_send_duration_ms(self, frame: AudioFrame) -> float | None:
+            raise RuntimeError("timing hook exploded with secret=sk-live-99999")
+
+    class SuccessfulTimingHookTelephonyPort(FakeTelephonyMediaAdapter):
+        def __init__(self, duration_ms: float = 1.75) -> None:
+            super().__init__()
+            self._duration_ms = duration_ms
+            self._last_frame_id: int | None = None
+
+        async def send_frame(self, frame: AudioFrame) -> None:
+            await super().send_frame(frame)
+            self._last_frame_id = id(frame)
+
+        def consume_last_send_duration_ms(self, frame: AudioFrame) -> float | None:
+            if self._last_frame_id == id(frame):
+                self._last_frame_id = None
+                return self._duration_ms
+            return None
+
+    class InvalidValueTimingHookTelephonyPort(FakeTelephonyMediaAdapter):
+        def __init__(self, invalid_value: object) -> None:
+            super().__init__()
+            self._invalid_value = invalid_value
+
+        def consume_last_send_duration_ms(self, frame: AudioFrame) -> Any:
+            return self._invalid_value
+
+    class CancelledTimingHookTelephonyPort(FakeTelephonyMediaAdapter):
+        def consume_last_send_duration_ms(self, frame: AudioFrame) -> float | None:
+            raise asyncio.CancelledError()
+
+    async def _run() -> None:
+        baseline_tasks = {
+            t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()
+        }
+        shared_sink = InMemoryVoiceTelemetrySink()
+
+        # 1. Mandatory regression: consume_last_send_duration_ms() raises RuntimeError
+        #    while a second session runs concurrently on the same event loop and sink.
+        expected_frame = _make_frame(sequence=0, turn_id=1)
+        other_frame = _make_frame(sequence=0, turn_id=1)
+
+        failing_hook_tel = FailingTimingHookTelephonyPort()
+        failing_hook_tel.push_eof()
+        ai_for_failing = _make_ai_port([expected_frame])
+
+        healthy_tel = SuccessfulTimingHookTelephonyPort(duration_ms=1.25)
+        healthy_tel.push_eof()
+        ai_for_healthy = _make_ai_port([other_frame])
+
+        session_failing_hook = VoiceBridgeSession(
+            call_id="call_timing_hook_runtime_error",
+            tenant_id="tenant_isolation",
+            telephony_port=failing_hook_tel,
+            ai_port=ai_for_failing,
+            telemetry_sink=shared_sink,
+        )
+        session_healthy = VoiceBridgeSession(
+            call_id="call_timing_hook_healthy_peer",
+            tenant_id="tenant_isolation",
+            telephony_port=healthy_tel,
+            ai_port=ai_for_healthy,
+            telemetry_sink=shared_sink,
+        )
+
+        await session_failing_hook.start()
+        await session_healthy.start()
+        await asyncio.gather(
+            session_failing_hook.wait_until_closed(propagate_error=True),
+            session_healthy.wait_until_closed(propagate_error=True),
+        )
+
+        # (1) Frame payload was successfully sent
+        assert len(failing_hook_tel.sent_frames) == 1
+        assert failing_hook_tel.sent_frames[0] is expected_frame
+        assert failing_hook_tel.sent_frames[0].payload == expected_frame.payload
+
+        # (2) Session completed cleanly
+        assert session_failing_hook.state == VoiceBridgeState.CLOSED
+        assert session_failing_hook.error is None
+        snap_err = session_failing_hook.metrics_snapshot()
+        assert snap_err.session_state == VoiceBridgeState.CLOSED.value
+        assert snap_err.cleanup_state == VoiceTerminalCleanupState.COMPLETED_CLEAN
+        assert snap_err.terminal_error_category is None
+
+        # (3) Outbound transferred/sent count is exactly one
+        assert session_failing_hook.outbound_frames_transferred == 1
+        assert snap_err.outbound_frames_sent == 1
+        assert snap_err.outbound_bytes_sent == PCM16LE_FRAME_BYTES
+
+        # (4) Unforwarded outbound count remains zero
+        assert snap_err.unforwarded_outbound_frames == 0
+        assert snap_err.dropped_frames_total == 0
+        _assert_conservation_identities(snap_err)
+
+        # (5) await _outbound_queue.join() completes under a bounded timeout
+        await asyncio.wait_for(session_failing_hook._inbound_queue.join(), timeout=0.2)
+        await asyncio.wait_for(session_failing_hook._outbound_queue.join(), timeout=0.2)
+
+        # (7) No false transport latency sample is recorded; hook error counted safely
+        assert snap_err.network_transport_ms.available is False
+        assert (
+            snap_err.network_transport_ms.availability_reason == MetricAvailabilityReason.NO_SAMPLES
+        )
+        assert snap_err.network_transport_ms.sample_count == 0
+        assert snap_err.network_transport_ms.min_ms is None
+        assert snap_err.network_transport_ms.p50_ms is None
+        assert snap_err.outbound_processing_ms.available is True
+        assert snap_err.outbound_processing_ms.sample_count == 1
+        assert snap_err.telemetry_sink_errors == 1
+        assert "sk-live-99999" not in json.dumps(snap_err.to_dict())
+
+        # (8) Another session remains completely unaffected
+        snap_peer = session_healthy.metrics_snapshot()
+        assert session_healthy.state == VoiceBridgeState.CLOSED
+        assert len(healthy_tel.sent_frames) == 1
+        assert snap_peer.outbound_frames_sent == 1
+        assert snap_peer.unforwarded_outbound_frames == 0
+        assert snap_peer.telemetry_sink_errors == 0
+        assert snap_peer.network_transport_ms.available is True
+        assert snap_peer.network_transport_ms.sample_count == 1
+        assert snap_peer.network_transport_ms.min_ms == pytest.approx(1.25)
+        _assert_conservation_identities(snap_peer)
+        await asyncio.wait_for(session_healthy._outbound_queue.join(), timeout=0.2)
+
+        # 2. Scenario variants: timing hook absent, successful, and returning invalid values
+        # 2a. Hook absent (standard FakeTelephonyMediaAdapter has no consume_last_send_duration_ms)
+        absent_tel = FakeTelephonyMediaAdapter()
+        assert not hasattr(absent_tel, "consume_last_send_duration_ms")
+        absent_tel.push_eof()
+        s_absent = VoiceBridgeSession(
+            call_id="call_hook_absent",
+            tenant_id="tenant_variants",
+            telephony_port=absent_tel,
+            ai_port=_make_ai_port([_make_frame(sequence=0, turn_id=1)]),
+        )
+        await s_absent.start()
+        await s_absent.wait_until_closed(propagate_error=True)
+        await asyncio.wait_for(s_absent._outbound_queue.join(), timeout=0.2)
+        snap_absent = s_absent.metrics_snapshot()
+        assert len(absent_tel.sent_frames) == 1
+        assert snap_absent.outbound_frames_sent == 1
+        assert snap_absent.unforwarded_outbound_frames == 0
+        assert snap_absent.telemetry_sink_errors == 0
+        assert snap_absent.network_transport_ms.available is False
+        assert (
+            snap_absent.network_transport_ms.availability_reason
+            == MetricAvailabilityReason.NO_SAMPLES
+        )
+        _assert_conservation_identities(snap_absent)
+
+        # 2b. Hook returning None (valid "no measurement for frame" return)
+        none_tel = InvalidValueTimingHookTelephonyPort(None)
+        none_tel.push_eof()
+        s_none = VoiceBridgeSession(
+            call_id="call_hook_none",
+            tenant_id="tenant_variants",
+            telephony_port=none_tel,
+            ai_port=_make_ai_port([_make_frame(sequence=0, turn_id=1)]),
+        )
+        await s_none.start()
+        await s_none.wait_until_closed(propagate_error=True)
+        await asyncio.wait_for(s_none._outbound_queue.join(), timeout=0.2)
+        snap_none = s_none.metrics_snapshot()
+        assert snap_none.outbound_frames_sent == 1
+        assert snap_none.unforwarded_outbound_frames == 0
+        assert snap_none.telemetry_sink_errors == 0
+        assert snap_none.network_transport_ms.available is False
+
+        # 2c. Hook returning invalid non-None values (-1.0, nan, inf, bool, str)
+        for idx, bad_val in enumerate([-1.0, float("nan"), float("inf"), True, "invalid"]):
+            bad_tel = InvalidValueTimingHookTelephonyPort(bad_val)
+            bad_tel.push_eof()
+            s_bad = VoiceBridgeSession(
+                call_id=f"call_hook_bad_{idx}",
+                tenant_id="tenant_variants",
+                telephony_port=bad_tel,
+                ai_port=_make_ai_port([_make_frame(sequence=0, turn_id=1)]),
+            )
+            await s_bad.start()
+            await s_bad.wait_until_closed(propagate_error=True)
+            await asyncio.wait_for(s_bad._outbound_queue.join(), timeout=0.2)
+            snap_bad = s_bad.metrics_snapshot()
+            assert len(bad_tel.sent_frames) == 1
+            assert snap_bad.session_state == VoiceBridgeState.CLOSED.value
+            assert snap_bad.outbound_frames_sent == 1
+            assert snap_bad.unforwarded_outbound_frames == 0
+            assert snap_bad.telemetry_sink_errors == 1
+            assert snap_bad.network_transport_ms.available is False
+            assert snap_bad.network_transport_ms.sample_count == 0
+            assert snap_bad.outbound_processing_ms.available is True
+            assert snap_bad.outbound_processing_ms.sample_count == 1
+            _assert_conservation_identities(snap_bad)
+
+        # 3. Cancellation during timing collection preserves CancelledError propagation,
+        #    does not double-count sent frame as unforwarded, and keeps queue.join() balanced.
+        cancel_tel = CancelledTimingHookTelephonyPort()
+        cancel_tel.push_eof()
+        s_cancel = VoiceBridgeSession(
+            call_id="call_hook_cancelled",
+            tenant_id="tenant_variants",
+            telephony_port=cancel_tel,
+            ai_port=_make_ai_port([_make_frame(sequence=0, turn_id=1)]),
+        )
+        await s_cancel.start()
+        with pytest.raises(asyncio.CancelledError):
+            await s_cancel.wait_until_closed(propagate_error=True)
+        await asyncio.wait_for(s_cancel._inbound_queue.join(), timeout=0.2)
+        await asyncio.wait_for(s_cancel._outbound_queue.join(), timeout=0.2)
+        snap_cancel = s_cancel.metrics_snapshot()
+        assert len(cancel_tel.sent_frames) == 1
+        assert snap_cancel.outbound_frames_sent == 1
+        assert snap_cancel.unforwarded_outbound_frames == 0
+        assert snap_cancel.network_transport_ms.available is False
+        _assert_conservation_identities(snap_cancel)
+
+        # (6) No orphan tasks remain after all scenarios complete
+        remaining_tasks = {
+            t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()
+        }
+        assert remaining_tasks <= baseline_tasks
+
+    asyncio.run(_run())
