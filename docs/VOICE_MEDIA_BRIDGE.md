@@ -1,9 +1,9 @@
-# Voice Media Bridge, Turn Interruption & Audio Contracts (M4.1 / M4.2)
+# Voice Media Bridge, Turn Interruption, Observability & Audio Contracts (M4.1 / M4.2 / M5.1A)
 
-> **Status:** M4.1 Complete (PR #20 / `577e6b9`); M4.2A Complete (PR #21 / `df28327`); M4.2B.1 Complete (PR #22 / `e457f8f`); M4.2B.2 Local implementation (synthetic WebSocket turn interruption vertical slice)
-> **Document version:** 1.3
+> **Status:** M4.1 Complete (PR #20 / `577e6b9`); M4.2A Complete (PR #21 / `df28327`); M4.2B.1 Complete (PR #22 / `e457f8f`); M4.2B.2 Complete (PR #23 / `a3528ea`); M5.1A In progress (provider-independent Voice Bridge observability foundation)
+> **Document version:** 1.4
 > **Last updated:** 2026-11-07
-> **Scope:** Voice-local media domain contracts, provider-neutral media ports, bounded bidirectional bridge, turn identity, stale frame suppression, interruption capability protocol, and synthetic binary WebSocket transport.
+> **Scope:** Voice-local media domain contracts, provider-neutral media ports, bounded bidirectional bridge, turn identity, stale frame suppression, interruption capability protocol, synthetic binary WebSocket transport, and provider-independent in-memory telemetry.
 
 ---
 
@@ -11,16 +11,18 @@
 
 Kaiwen Gateway V1 architecture separates the **control plane** (call signaling, lifecycle, authentication, admission) from the **media plane** (high-frequency streaming audio frames).
 
-In milestone M4.1, the voice media subsystem is introduced under `kaiwen_gateway.modules.voice`:
+In milestones M4.1–M4.2 and M5.1A, the voice media subsystem is organized under `kaiwen_gateway.modules.voice`:
 ```text
 src/kaiwen_gateway/modules/voice/
-  ├── __init__.py           # Public exports (AudioFrame, VoiceBridgeSession, ports, adapters)
+  ├── __init__.py           # Public exports (AudioFrame, VoiceBridgeSession, ports, adapters, telemetry)
   ├── domain.py             # Pure immutable AudioFrame contract and domain error types
   ├── ports.py              # Provider-neutral async media port protocols
-  ├── bridge.py             # Supervised bidirectional VoiceBridgeSession with bounded queues
+  ├── bridge.py             # Supervised bidirectional VoiceBridgeSession with bounded queues & telemetry
+  ├── telemetry.py          # Bounded, privacy-safe in-memory session & aggregate telemetry (M5.1A)
   └── adapters/
       ├── __init__.py
-      └── fake.py           # Deterministic fake adapters for telephony & AI media
+      ├── fake.py           # Deterministic fake adapters for telephony & AI media
+      └── fake_ai.py        # Bounded interruptible fake AI echo ports
 ```
 
 ### Architectural Invariants:
@@ -45,6 +47,7 @@ class AudioFrame:
     channels: int
     sequence: int
     timestamp_ms: float
+    turn_id: int | None = None
 ```
 
 ### Validation Invariants:
@@ -167,26 +170,62 @@ class InterruptionOutcome:
 
 ---
 
-## 6. Verification and Deterministic Testing
+## 6. Provider-Independent Voice Bridge Observability (M5.1A)
+
+`kaiwen_gateway.modules.voice.telemetry` provides a bounded, privacy-safe, in-memory telemetry layer for `VoiceBridgeSession` and the synthetic binary WebSocket media path without coupling to Kaiwen Agent, OpenAI, Verimor, or external telemetry SDKs.
+
+### Separated Latency Dimensions & Unavailable Semantics:
+Each `VoiceSessionMetricsSnapshot` reports separated latency distributions (`LatencyDistributionSummary`):
+- `inbound_processing_ms`: Monotonic per-frame duration covering Gateway inbound receiver validation plus forwarder dispatch and `AIRealtimeMediaPort.send_frame()` await time (excluding `_inbound_queue` waiting time and producer queue-put backpressure wait).
+- `outbound_processing_ms`: Monotonic per-frame duration covering Gateway outbound receiver validation/turn-fencing plus forwarder dispatch and `TelephonyMediaPort.send_frame()` await time (excluding `_outbound_queue` waiting time, producer queue-put backpressure wait, and any consumed `network_transport_ms`).
+- `inbound_queue_wait_ms` & `outbound_queue_wait_ms`: Time each transferred/sent frame waits inside the bounded internal media queues (`_inbound_queue` and `_outbound_queue`).
+- `network_transport_ms`: Per-frame ASGI `websocket.send_bytes(frame.payload)` await duration when using `WebSocketTelephonyMediaAdapter`, correlated to the exact frame via `consume_last_send_duration_ms(frame)`; explicitly `available=False` (`MetricAvailabilityReason.NO_SAMPLES`) for in-process ports. **Important:** `websocket.send_bytes` await duration measures the local ASGI send call only and is not proof of physical wire propagation, socket flush, client reception, or remote speaker playback.
+- `upstream_ai_generation_ms`: Always `available=False` (`MetricAvailabilityReason.UNKNOWN_WITHOUT_PROVIDER_INSTRUMENTATION`) until an instrumented AI provider adapter is attached.
+- `remote_playback_latency_ms`: Always `available=False` (`MetricAvailabilityReason.UNKNOWN_WITHOUT_PLAYBACK_ACKNOWLEDGMENT`) when the telephony provider does not emit playback acknowledgments.
+
+When `sample_count == 0`, `LatencyDistributionSummary.available` is `False` and all duration fields (`min_ms`, `max_ms`, `mean_ms`, `p50_ms`, `p95_ms`, `p99_ms`) are `None` (never fabricated as `0.0`). Running `sample_count`, `min_ms`, `max_ms`, and `mean_ms` are tracked over the lifetime of the aggregator, whereas `p50_ms`, `p95_ms`, and `p99_ms` use linear interpolation over the bounded sliding window (`window_capacity = 256`).
+
+### Frame & Interruption Accounting Identities:
+For frames received through the bridge media ports, terminal session snapshots satisfy strict conservation identities:
+- **Inbound Conservation:** `inbound_frames_received == inbound_frames_transferred + unforwarded_inbound_frames`
+- **Outbound Conservation:** `outbound_frames_received == outbound_frames_sent + locally_discarded_frames + stale_frames_suppressed + unforwarded_outbound_frames`
+- **Dropped Frame Total:** `dropped_frames_total == locally_discarded_frames + unforwarded_inbound_frames + unforwarded_outbound_frames` (`stale_frames_suppressed` is tracked as a separate, mutually exclusive counter for frames belonging to already-superseded turns).
+- **Interruption Accounting:** `interruptions_requested == interruptions_completed + interruptions_noop + interruptions_failed`
+
+### Synthetic Baseline Workload Classification:
+Synthetic 25-frame baseline tests (25 frames $\times$ 20 ms = 500 ms of represented audio at 16 kHz mono PCM16LE, 640 B/frame) execute in **unpaced burst mode** (~0.5–5 ms wall-clock runtime) to deterministically exercise queue, turn-barrier, and loopback WebSocket paths. Burst-mode runtime must not be interpreted as real-time 20 ms pacing, production throughput capacity, or end-to-end conversational SLA compliance.
+
+### Bounded Memory & Privacy Guarantees:
+- **Bounded Latency Windows:** `BoundedLatencyAggregator` retains at most `DEFAULT_LATENCY_WINDOW_SIZE = 256` recent samples in a `deque(maxlen=256)` while tracking exact running `sample_count`, `min_ms`, `max_ms`, and `mean_ms`.
+- **Bounded Session Retention:** `InMemoryVoiceTelemetrySink` retains at most `DEFAULT_MAX_RETAINED_SESSIONS = 64` immutable `VoiceSessionMetricsSnapshot` objects in a ring buffer and never holds references to `VoiceBridgeSession`, ports, queues, or `AudioFrame` instances.
+- **Terminal Queue Draining:** On session closure, `VoiceBridgeSession` drains any unforwarded `AudioFrame` items from its internal queues and counts them under `unforwarded_inbound_frames` / `unforwarded_outbound_frames` (`dropped_frames_total`), ensuring zero retained audio frames after cleanup.
+- **Strict Redaction:** Telemetry snapshots never include `call_id`, `tenant_id`, raw audio bytes, transcripts, tokens, phone numbers, prompts, or raw exception messages. Errors are aggregated strictly by the bounded `VoiceErrorCategory` enum.
+- **Best-Effort Sink Isolation:** Exceptions raised by a `VoiceTelemetrySink` are caught and counted in `telemetry_sink_errors` so a faulty sink can never disrupt active media streaming or abort terminal cleanup.
+
+---
+
+## 7. Verification and Deterministic Testing
 
 The test suite validates:
 - **Byte Order & Integrity:** 100% identical byte matching between transmitted and received frames.
 - **Two-Call Isolation:** Parallel calls (Call A and Call B) with distinct marker bytes show zero cross-call contamination; interrupting Call A has zero impact on Call B.
 - **Cross-Tenant Isolation:** Sessions strictly fence tenant and call contexts.
-- **Deterministic Fakes:** `InterruptibleFakeTelephonyAdapter` and `InterruptibleFakeAIPort` support delay simulation, fault injection, and EOF signaling without fragile sleep timing.
-- **15 Required Interruption Scenarios:** All edge cases covered, including queue backpressure relief, duplicate/idempotent interrupts, race conditions with close, provider failure degradation, and task leak absence.
-- **Runnable In-Process Smoke:** Executable via `python -m tools.voice_smoke` or `python tools/voice_smoke.py`.
+- **Deterministic Fakes:** `InterruptibleFakeTelephonyAdapter`, `BoundedInterruptibleFakeAIEchoPort`, and `InterruptibleFakeAIPort` support delay simulation, fault injection, and EOF signaling without fragile sleep timing.
+- **Interruption & WebSocket Conformance:** In-process (`tests/test_voice_interruption.py`) and real loopback WebSocket (`tests/test_synthetic_media_interruption.py`) verification of turn interruption, outbound ordering barriers, and stale frame suppression.
+- **Observability & Privacy Verification:** `tests/test_voice_observability.py` verifies bounded latency windows, unavailable/None semantics, zero PII/audio leakage, sink failure isolation, and reproducible synthetic baseline latency measurements.
+- **Runnable Smoke Scripts:** Executable via `python -m tools.voice_smoke` and `python -m tools.synthetic_media_smoke`.
 
 ---
 
-## 7. Scope & Milestone Status
+## 8. Scope & Milestone Status
 
 ### Current Project Milestone Status:
 - **M4.1:** Complete (Merged in PR #20 / `577e6b9`).
 - **M4.2A:** Complete (Protected squash merged in PR #21 / `df28327`).
-- **M4.2B.1:** In progress (Turn interruption contracts, in-process turn control, stale suppression).
-- **M4.2B.2:** Not started (WebSocket wire event integration for interruption).
-- **M5:** Not started (Resilience, fault simulation, soak evidence).
+- **M4.2B.1:** Complete (Protected squash merged in PR #22 / `e457f8f`).
+- **M4.2B.2:** Complete (Protected squash merged in PR #23 / `a3528ea`).
+- **M4 External AI Integration:** Pending (`KaiwenAgentRealtimeAdapter` deferred while `kaiwen-agent` public realtime API is under active upstream development; OpenAI Live unverified).
+- **M5.1A:** In progress (Provider-independent Voice Bridge observability foundation).
 
 ### Explicit Boundaries & Non-Goals:
 - **No Real Verimor Integration:** Fictional synthetic test adapters do not constitute Verimor protocol compatibility (`OPEN-001`).

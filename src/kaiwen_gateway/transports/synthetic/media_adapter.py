@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from typing import Any, Final
 
 from kaiwen_gateway.core.identity import VerifiedConnectionContext
@@ -83,6 +84,9 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
         self._bytes_received: int = 0
         self._bytes_sent: int = 0
         self._reject_count: int = 0
+        self._inbound_queue_high_water_mark: int = 0
+        self._last_send_duration_ms: float | None = None
+        self._last_send_frame_id: int | None = None
 
     @property
     def is_closed(self) -> bool:
@@ -124,6 +128,24 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
         """Current number of audio frames waiting in the inbound buffer."""
         return self._inbound_queue.qsize()
 
+    @property
+    def inbound_queue_high_water_mark(self) -> int:
+        """Maximum observed inbound buffer depth during the session."""
+        return self._inbound_queue_high_water_mark
+
+    @property
+    def last_send_duration_ms(self) -> float | None:
+        """Duration in milliseconds of the most recent binary WebSocket send_bytes call."""
+        return self._last_send_duration_ms
+
+    def consume_last_send_duration_ms(self, frame: AudioFrame) -> float | None:
+        """Consume and return the most recent send_bytes duration if it belongs to `frame`."""
+        if self._last_send_frame_id == id(frame) and self._last_send_duration_ms is not None:
+            duration = self._last_send_duration_ms
+            self._last_send_frame_id = None
+            return duration
+        return None
+
     def record_reject(self) -> None:
         """Increment count of rejected frames or malformed messages."""
         self._reject_count += 1
@@ -160,6 +182,9 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
                     await self._inbound_queue.put(frame)
             else:
                 await self._inbound_queue.put(frame)
+            depth = self._inbound_queue.qsize()
+            if depth > self._inbound_queue_high_water_mark:
+                self._inbound_queue_high_water_mark = depth
         except TimeoutError as exc:
             raise MediaBackpressureOverflowError(
                 f"Inbound media buffer overflowed (capacity={self._queue_capacity}) "
@@ -255,11 +280,15 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
         async with self._send_lock:
             if self._is_closed:
                 raise MediaPortClosedError("WebSocketTelephonyMediaAdapter is closed")
+            self._last_send_frame_id = None
+            t_send_start = time.perf_counter()
             try:
                 await self._websocket.send_bytes(frame.payload)
             except Exception as exc:
                 self._is_closed = True
                 raise MediaPortClosedError("WebSocket connection closed or write failed") from exc
+            self._last_send_duration_ms = max(0.0, (time.perf_counter() - t_send_start) * 1000.0)
+            self._last_send_frame_id = id(frame)
 
         self._frames_sent += 1
         self._bytes_sent += len(frame.payload)
