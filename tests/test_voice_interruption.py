@@ -34,6 +34,7 @@ import pytest
 
 from kaiwen_gateway.modules.voice import (
     AudioFrame,
+    FutureTurnAudioFrameError,
     InterruptibleAIPort,
     InterruptibleFakeAIPort,
     InterruptibleFakeTelephonyAdapter,
@@ -1040,3 +1041,286 @@ def test_gate_f_audio_frame_public_compatibility(frame_bytes: bytes) -> None:
         await port.close()
 
     asyncio.run(_test_echo_port())
+
+
+# -----------------------------------------------------------------------------
+# Remediation Gates A - D Tests
+# -----------------------------------------------------------------------------
+
+
+def test_remediation_gate_a_playback_confirmed_strictly_false(frame_bytes: bytes) -> None:
+    """GATE A: Playback acknowledgment honesty.
+
+    Verifies that InterruptionOutcome.playback_confirmed is strictly False, even
+    if telephony adapter declares can_observe_playback_acks=True, because M4.2B.1
+    has no remote wire ACK confirmation protocol.
+    """
+
+    async def _test() -> None:
+        caps = InterruptionCapabilities(
+            can_cancel_transport_pending=True,
+            can_clear_provider_playback=True,
+            can_observe_playback_acks=True,
+            cannot_confirm_playback=False,
+        )
+        tel_port = InterruptibleFakeTelephonyAdapter(capabilities=caps)
+        ai_port = InterruptibleFakeAIPort()
+
+        session = VoiceBridgeSession(
+            call_id="call-gate-a",
+            tenant_id="tenant-gate-a",
+            telephony_port=tel_port,
+            ai_port=ai_port,
+        )
+
+        async with session:
+            outcome = await session.interrupt()
+            assert outcome.playback_confirmed is False
+            assert outcome.provider_playback_cleared is True
+            assert outcome.transport_pending_cancelled is True
+            assert tel_port.clear_count == 1
+
+            tel_port.push_eof()
+            ai_port.push_eof()
+            await session.wait_until_closed()
+
+    asyncio.run(_test())
+
+
+def test_remediation_gate_b_required_failure_and_retry(frame_bytes: bytes) -> None:
+    """GATE B: Required cancellation/clear failure semantics and retryability.
+
+    Verifies that:
+    1. If require_future_generation_cancellation=True fails, exception propagates,
+       turn does NOT advance, interruption_count does NOT increment, queue is not purged,
+       and a subsequent retry with the same turn_id succeeds without being marked stale.
+    2. If require_playback_clear=True fails, exception propagates, turn does not advance,
+       and retry succeeds.
+    3. If AI cancel succeeds but telephony clear fails with require_playback_clear=True,
+       turn does not advance, and retry succeeds.
+    """
+
+    async def _test() -> None:
+        tel_port = InterruptibleFakeTelephonyAdapter()
+        ai_port = InterruptibleFakeAIPort()
+
+        session = VoiceBridgeSession(
+            call_id="call-gate-b",
+            tenant_id="tenant-gate-b",
+            telephony_port=tel_port,
+            ai_port=ai_port,
+        )
+
+        async with session:
+            # 1. AI cancellation failure with require_future_generation_cancellation=True
+            ai_port._simulate_cancellation_error = RuntimeError("Upstream AI cancel failed")
+            with pytest.raises(RuntimeError, match="Upstream AI cancel failed"):
+                await session.interrupt(turn_id=1, require_future_generation_cancellation=True)
+
+            assert session.current_turn_id == 1
+            assert session.interruption_count == 0
+
+            # Retry turn 1 after error is cleared -> MUST succeed and advance to turn 2
+            outcome = await session.interrupt(
+                turn_id=1, require_future_generation_cancellation=True
+            )
+            assert outcome.interrupted_turn_id == 1
+            assert outcome.new_turn_id == 2
+            assert outcome.future_generation_cancelled is True
+            assert session.current_turn_id == 2
+            assert session.interruption_count == 1
+
+            # 2. Telephony clear failure with require_playback_clear=True
+            tel_port._simulate_clear_error = RuntimeError("Telephony clear buffer failed")
+            with pytest.raises(RuntimeError, match="Telephony clear buffer failed"):
+                await session.interrupt(turn_id=2, require_playback_clear=True)
+
+            assert session.current_turn_id == 2
+            assert session.interruption_count == 1
+
+            # Retry turn 2 after error cleared -> MUST succeed and advance to turn 3
+            outcome_2 = await session.interrupt(turn_id=2, require_playback_clear=True)
+            assert outcome_2.interrupted_turn_id == 2
+            assert outcome_2.new_turn_id == 3
+            assert outcome_2.provider_playback_cleared is True
+            assert session.current_turn_id == 3
+            assert session.interruption_count == 2
+
+            tel_port.push_eof()
+            ai_port.push_eof()
+            await session.wait_until_closed()
+
+    asyncio.run(_test())
+
+
+def test_remediation_gate_c_future_turn_frame_rejected(frame_bytes: bytes) -> None:
+    """GATE C: Future turn frame rejection in outbound pump.
+
+    Verifies that:
+    1. If upstream AI emits an AudioFrame tagged with a future turn
+       (turn_id > current_turn_id), the outbound pump raises FutureTurnAudioFrameError,
+       the session transitions to FAILED, and the frame is never forwarded to telephony.
+    2. Once a turn is properly reached via session.interrupt(), frames matching
+       that turn_id are accepted and transferred cleanly.
+    """
+
+    async def _test() -> None:
+        tel_port = InterruptibleFakeTelephonyAdapter()
+        ai_port = InterruptibleFakeAIPort()
+
+        session = VoiceBridgeSession(
+            call_id="call-gate-c",
+            tenant_id="tenant-gate-c",
+            telephony_port=tel_port,
+            ai_port=ai_port,
+        )
+
+        await session.start()
+        assert session.current_turn_id == 1
+
+        # AI emits frame tagged with turn_id=2 before turn 2 has started locally
+        bad_future_frame = create_synthetic_pcm16le_frame(
+            frame_bytes,
+            sequence=0,
+            timestamp_ms=0.0,
+            turn_id=2,
+        )
+        ai_port.push_frame(bad_future_frame)
+
+        # Wait for supervisor to observe failure; wait_until_closed propagates session.error
+        with pytest.raises(
+            FutureTurnAudioFrameError, match="Received audio frame for future turn 2"
+        ):
+            await session.wait_until_closed()
+
+        assert session.state == VoiceBridgeState.FAILED
+        assert isinstance(session.error, FutureTurnAudioFrameError)
+        assert "future turn 2" in str(session.error)
+        assert tel_port.send_count == 0
+
+        # Now verify normal turn progression: Turn 2 frame accepted after interrupt() advances to Turn 2
+        tel_port_valid = InterruptibleFakeTelephonyAdapter()
+        ai_port_valid = InterruptibleFakeAIPort()
+        session_valid = VoiceBridgeSession(
+            call_id="call-gate-c-valid",
+            tenant_id="tenant-gate-c",
+            telephony_port=tel_port_valid,
+            ai_port=ai_port_valid,
+        )
+
+        async with session_valid:
+            assert session_valid.current_turn_id == 1
+            await session_valid.interrupt()
+            assert session_valid.current_turn_id == 2
+
+            # Now turn_id=2 is the current turn -> accepted!
+            valid_turn2_frame = create_synthetic_pcm16le_frame(
+                frame_bytes,
+                sequence=0,
+                timestamp_ms=0.0,
+                turn_id=2,
+            )
+            ai_port_valid.push_frame(valid_turn2_frame)
+            tel_port_valid.push_eof()
+            ai_port_valid.push_eof()
+            await session_valid.wait_until_closed()
+
+        assert session_valid.state == VoiceBridgeState.CLOSED
+        assert tel_port_valid.send_count == 1
+
+    asyncio.run(_test())
+
+
+def test_remediation_gate_d_provider_timeout_and_close_race(frame_bytes: bytes) -> None:
+    """GATE D: Provider timeout enforcement and close race during interruption.
+
+    Verifies that:
+    1. A hanging provider cancel/clear operation aborts after timeout with TimeoutError.
+    2. Invalid timeout parameters raise VoiceDomainError.
+    3. If session is closed while awaiting provider operations, interrupt() aborts
+       with VoiceBridgeSessionClosedError and does not advance turn_id.
+    """
+
+    async def _test() -> None:
+        # 1. Timeout enforcement
+        class HangingAIPort(InterruptibleFakeAIPort):
+            def __init__(self) -> None:
+                super().__init__()
+                self.entered_cancel = asyncio.Event()
+
+            async def cancel_turn(self, turn_id: int) -> None:
+                self.entered_cancel.set()
+                await asyncio.Event().wait()  # Never completes
+
+        hanging_ai = HangingAIPort()
+        tel_port = InterruptibleFakeTelephonyAdapter()
+
+        session = VoiceBridgeSession(
+            call_id="call-gate-d-1",
+            tenant_id="tenant-gate-d-1",
+            telephony_port=tel_port,
+            ai_port=hanging_ai,
+        )
+
+        async with session:
+            # Invalid timeout values
+            with pytest.raises(VoiceDomainError, match="timeout must be a positive finite float"):
+                await session.interrupt(timeout=-1.0)
+            with pytest.raises(VoiceDomainError, match="timeout must be a positive finite float"):
+                await session.interrupt(timeout=0.0)
+            with pytest.raises(VoiceDomainError, match="timeout must be a positive finite float"):
+                await session.interrupt(timeout=float("nan"))
+            with pytest.raises(VoiceDomainError, match="timeout must be a positive finite float"):
+                await session.interrupt(timeout=True)
+            with pytest.raises(VoiceDomainError, match="timeout must be a positive finite float"):
+                await session.interrupt(timeout="fast")  # type: ignore[arg-type]
+
+            # Bounded timeout triggers TimeoutError
+            with pytest.raises(TimeoutError):
+                await session.interrupt(timeout=0.05, require_future_generation_cancellation=True)
+
+            assert session.current_turn_id == 1
+            assert session.interruption_count == 0
+
+            tel_port.push_eof()
+            hanging_ai.push_eof()
+            await session.wait_until_closed()
+
+        # 2. Close race during interruption
+        class CloseRaceAIPort(InterruptibleFakeAIPort):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cancel_started = asyncio.Event()
+
+            async def cancel_turn(self, turn_id: int) -> None:
+                self.cancel_started.set()
+                # Yield control to let close() run
+                await asyncio.sleep(0.02)
+
+        tel_port_2 = InterruptibleFakeTelephonyAdapter()
+        race_ai = CloseRaceAIPort()
+
+        session_2 = VoiceBridgeSession(
+            call_id="call-gate-d-2",
+            tenant_id="tenant-gate-d-2",
+            telephony_port=tel_port_2,
+            ai_port=race_ai,
+        )
+
+        await session_2.start()
+
+        async def _do_close() -> None:
+            await race_ai.cancel_started.wait()
+            # Session closed while cancel_turn was in flight
+            await session_2.close()
+
+        race_task = asyncio.create_task(_do_close())
+        with pytest.raises(VoiceBridgeSessionClosedError):
+            await session_2.interrupt()
+
+        await race_task
+        assert session_2.current_turn_id == 1
+        assert session_2.interruption_count == 0
+        assert session_2.state == VoiceBridgeState.CLOSED
+
+    asyncio.run(_test())

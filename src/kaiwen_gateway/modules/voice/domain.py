@@ -28,6 +28,7 @@ __all__ = [
     "MediaPortClosedError",
     "VoiceBridgeSessionClosedError",
     "UnsupportedInterruptionCapabilityError",
+    "FutureTurnAudioFrameError",
     "create_synthetic_pcm16le_frame",
 ]
 
@@ -74,6 +75,10 @@ class VoiceBridgeSessionClosedError(VoiceDomainError):
 
 class UnsupportedInterruptionCapabilityError(VoiceDomainError):
     """Raised when an unsupported interruption or playback control capability is requested."""
+
+
+class FutureTurnAudioFrameError(VoiceDomainError):
+    """Raised when an audio frame references an unreached future turn."""
 
 
 @dataclass(frozen=True, slots=True)
