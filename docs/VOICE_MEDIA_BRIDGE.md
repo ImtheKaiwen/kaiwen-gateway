@@ -1,9 +1,9 @@
 # Voice Media Bridge & In-Process Audio Contracts (M4.1)
 
-> **Status:** Implemented locally (M4.1) — pending review  
-> **Document version:** 1.0  
-> **Last updated:** 2026-11-06  
-> **Scope:** Voice-local media domain contracts, provider-neutral media ports, bounded bidirectional bridge, and deterministic in-process execution.
+> **Status:** Complete (M4.1 merged in PR #20 / commit `577e6b9`; M4.2A implemented locally)
+> **Document version:** 1.1
+> **Last updated:** 2026-11-07
+> **Scope:** Voice-local media domain contracts, provider-neutral media ports, bounded bidirectional bridge, deterministic in-process execution, and synthetic binary WebSocket transport (M4.2A).
 
 ---
 

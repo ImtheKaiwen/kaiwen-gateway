@@ -20,6 +20,25 @@ from kaiwen_gateway.transports.synthetic.auth import (
     SyntheticProviderAuthenticator,
 )
 from kaiwen_gateway.transports.synthetic.endpoint import synthetic_websocket_endpoint
+from kaiwen_gateway.transports.synthetic.media_adapter import (
+    WebSocketTelephonyMediaAdapter,
+)
+from kaiwen_gateway.transports.synthetic.media_endpoint import (
+    synthetic_media_websocket_endpoint,
+)
+from kaiwen_gateway.transports.synthetic.media_protocol import (
+    PCM16LE_CHANNELS,
+    PCM16LE_FRAME_BYTES,
+    PCM16LE_FRAME_MS,
+    PCM16LE_SAMPLE_RATE,
+    SYNTHETIC_MEDIA_PROTOCOL_VERSION,
+    SYNTHETIC_MEDIA_WS_ENDPOINT_PATH,
+    InvalidAudioFrameSizeError,
+    MediaAfterTerminationError,
+    MediaBeforeActivationError,
+    SyntheticMediaError,
+    validate_pcm16le_binary_frame,
+)
 from kaiwen_gateway.transports.synthetic.protocol import (
     EVENT_CALL_END,
     EVENT_CALL_ENDED,
@@ -53,15 +72,25 @@ __all__ = [
     "EVENT_SESSION_PING",
     "EVENT_SESSION_PONG",
     "EVENT_SESSION_READY",
+    "InvalidAudioFrameSizeError",
     "InvalidJsonError",
     "InvalidMessageFormatError",
     "MAX_FRAME_SIZE_BYTES",
+    "MediaAfterTerminationError",
+    "MediaBeforeActivationError",
     "OversizedMessageError",
+    "PCM16LE_CHANNELS",
+    "PCM16LE_FRAME_BYTES",
+    "PCM16LE_FRAME_MS",
+    "PCM16LE_SAMPLE_RATE",
     "SUPPORTED_TELEPHONY_CAPABILITIES",
+    "SYNTHETIC_MEDIA_PROTOCOL_VERSION",
+    "SYNTHETIC_MEDIA_WS_ENDPOINT_PATH",
     "SYNTHETIC_PROTOCOL_VERSION",
     "SYNTHETIC_WS_ENDPOINT_PATH",
     "SyntheticAuthBridge",
     "SyntheticCallAuthorizer",
+    "SyntheticMediaError",
     "SyntheticProtocolError",
     "SyntheticProviderAuthenticator",
     "SyntheticTelephonyAdapter",
@@ -69,6 +98,9 @@ __all__ = [
     "SyntheticTokenVerifier",
     "UNSUPPORTED_TELEPHONY_CAPABILITIES",
     "UnsupportedEventError",
+    "WebSocketTelephonyMediaAdapter",
     "parse_and_validate_client_frame",
+    "synthetic_media_websocket_endpoint",
     "synthetic_websocket_endpoint",
+    "validate_pcm16le_binary_frame",
 ]
