@@ -15,6 +15,7 @@ import asyncio
 import math
 from typing import Final
 
+from kaiwen_gateway.modules.voice.adapters.fake import FakeAIMediaAdapter
 from kaiwen_gateway.modules.voice.domain import (
     AudioFormat,
     AudioFrame,
@@ -22,10 +23,15 @@ from kaiwen_gateway.modules.voice.domain import (
     MediaPortClosedError,
     VoiceDomainError,
 )
-from kaiwen_gateway.modules.voice.ports import AIRealtimeMediaPort
+from kaiwen_gateway.modules.voice.ports import (
+    AIRealtimeMediaPort,
+    InterruptibleAIPort,
+    InterruptionCapabilities,
+)
 
 __all__ = [
     "BoundedFakeAIEchoPort",
+    "InterruptibleFakeAIPort",
 ]
 
 _CLOSE_SENTINEL: Final[object] = object()
@@ -131,6 +137,7 @@ class BoundedFakeAIEchoPort(AIRealtimeMediaPort):
             channels=frame.channels,
             sequence=frame.sequence,
             timestamp_ms=frame.timestamp_ms,
+            turn_id=frame.turn_id,
         )
 
         # Enqueue with bounded backpressure
@@ -218,3 +225,75 @@ class BoundedFakeAIEchoPort(AIRealtimeMediaPort):
                 self._output_queue.put_nowait(_CLOSE_SENTINEL)
             except asyncio.QueueFull:
                 pass
+
+
+class InterruptibleFakeAIPort(FakeAIMediaAdapter, InterruptibleAIPort):
+    """Fake AI realtime media adapter supporting turn cancellation and tagged turn generation."""
+
+    def __init__(
+        self,
+        *,
+        name: str = "interruptible-fake-ai",
+        capabilities: InterruptionCapabilities | None = None,
+        simulate_cancellation_error: Exception | None = None,
+        echo: bool = False,
+        echo_turn_id: int = 1,
+    ) -> None:
+        super().__init__(name=name)
+        self._capabilities: Final[InterruptionCapabilities] = (
+            capabilities
+            if capabilities is not None
+            else InterruptionCapabilities(
+                can_cancel_future_generation=True,
+                can_discard_local_output=True,
+            )
+        )
+        self._simulate_cancellation_error: Exception | None = simulate_cancellation_error
+        self._cancelled_turns: list[int] = []
+        self._echo: bool = bool(echo)
+        self._echo_turn_id: int = int(echo_turn_id)
+
+    @property
+    def interruption_capabilities(self) -> InterruptionCapabilities:
+        """Return declared interruption capabilities for this AI port."""
+        return self._capabilities
+
+    @property
+    def cancelled_turns(self) -> list[int]:
+        """List of turn IDs that have been cancelled via cancel_turn."""
+        return list(self._cancelled_turns)
+
+    def set_echo_turn_id(self, turn_id: int) -> None:
+        """Configure turn_id for subsequent echoed frames when echo=True."""
+        if not isinstance(turn_id, int) or isinstance(turn_id, bool) or turn_id < 0:
+            raise VoiceDomainError(f"echo_turn_id must be a non-negative int, got {turn_id}")
+        self._echo_turn_id = turn_id
+
+    async def cancel_turn(self, turn_id: int) -> None:
+        """Cancel future generation for the specified turn on the simulated AI backend."""
+        if self._is_closed:
+            raise MediaPortClosedError(f"{self.name} port is closed")
+
+        if self._simulate_cancellation_error is not None:
+            err = self._simulate_cancellation_error
+            self._simulate_cancellation_error = None
+            raise err
+
+        self._cancelled_turns.append(turn_id)
+
+    async def send_frame(self, frame: AudioFrame) -> None:
+        """Receive an inbound frame from telephony and optionally echo it tagged with turn_id."""
+        await super().send_frame(frame)
+        if self._echo and not self._is_closed:
+            echo_frame = AudioFrame(
+                payload=frame.payload,
+                format=frame.format
+                if isinstance(frame.format, AudioFormat)
+                else AudioFormat(str(frame.format)),
+                sample_rate=frame.sample_rate,
+                channels=frame.channels,
+                sequence=frame.sequence,
+                timestamp_ms=frame.timestamp_ms,
+                turn_id=self._echo_turn_id,
+            )
+            self.push_frame(echo_frame)

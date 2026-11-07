@@ -18,12 +18,15 @@ from kaiwen_gateway.modules.voice.domain import (
 )
 from kaiwen_gateway.modules.voice.ports import (
     AIRealtimeMediaPort,
+    InterruptibleTelephonyPort,
+    InterruptionCapabilities,
     TelephonyMediaPort,
 )
 
 __all__ = [
     "FakeTelephonyMediaAdapter",
     "FakeAIMediaAdapter",
+    "InterruptibleFakeTelephonyAdapter",
 ]
 
 _CLOSE_SENTINEL: Final[object] = object()
@@ -170,3 +173,50 @@ class FakeAIMediaAdapter(_BaseFakeMediaAdapter, AIRealtimeMediaPort):
 
     def __init__(self, *, name: str = "fake-ai") -> None:
         super().__init__(name=name)
+
+
+class InterruptibleFakeTelephonyAdapter(FakeTelephonyMediaAdapter, InterruptibleTelephonyPort):
+    """Fake telephony adapter supporting interruption capabilities and clearing pending output."""
+
+    def __init__(
+        self,
+        *,
+        name: str = "interruptible-fake-telephony",
+        capabilities: InterruptionCapabilities | None = None,
+        simulate_clear_error: Exception | None = None,
+    ) -> None:
+        super().__init__(name=name)
+        self._capabilities: Final[InterruptionCapabilities] = (
+            capabilities
+            if capabilities is not None
+            else InterruptionCapabilities(
+                can_cancel_transport_pending=True,
+                can_clear_provider_playback=True,
+                can_observe_playback_acks=False,
+                cannot_confirm_playback=True,
+            )
+        )
+        self._simulate_clear_error: Exception | None = simulate_clear_error
+        self._clear_count: int = 0
+
+    @property
+    def interruption_capabilities(self) -> InterruptionCapabilities:
+        """Return declared interruption capabilities for this telephony adapter."""
+        return self._capabilities
+
+    @property
+    def clear_count(self) -> int:
+        """Number of times clear_pending_output has been invoked."""
+        return self._clear_count
+
+    async def clear_pending_output(self) -> None:
+        """Clear any buffered unplayed frames within the telephony transport adapter."""
+        if self._is_closed:
+            raise MediaPortClosedError(f"{self.name} port is closed")
+
+        if self._simulate_clear_error is not None:
+            err = self._simulate_clear_error
+            self._simulate_clear_error = None
+            raise err
+
+        self._clear_count += 1

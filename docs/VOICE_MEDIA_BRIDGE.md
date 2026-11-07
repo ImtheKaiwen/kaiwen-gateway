@@ -1,9 +1,9 @@
-# Voice Media Bridge & In-Process Audio Contracts (M4.1)
+# Voice Media Bridge, Turn Interruption & Audio Contracts (M4.1 / M4.2)
 
-> **Status:** Complete (M4.1 merged in PR #20 / commit `577e6b9`; M4.2A implemented locally)
-> **Document version:** 1.1
+> **Status:** M4.1 Complete (PR #20 / `577e6b9`); M4.2A Complete (PR #21 / `df28327`); M4.2B.1 In progress (turn interruption & in-process playback control)
+> **Document version:** 1.2
 > **Last updated:** 2026-11-07
-> **Scope:** Voice-local media domain contracts, provider-neutral media ports, bounded bidirectional bridge, deterministic in-process execution, and synthetic binary WebSocket transport (M4.2A).
+> **Scope:** Voice-local media domain contracts, provider-neutral media ports, bounded bidirectional bridge, turn identity, stale frame suppression, interruption capability protocol, and synthetic binary WebSocket transport.
 
 ---
 
@@ -123,28 +123,73 @@ Media Port     │                             │                │     Media 
 
 ---
 
-## 5. Verification and In-Process Smoke
+## 5. Turn Identity, Interruption & Playback Control (M4.2B.1)
+
+In conversational voice streaming, user speech interruptions (barge-in) require immediate cessation of stale AI audio output and synchronization between the client, Gateway, and upstream AI models.
+
+### Decoupled Turn Identity vs. Transport Sequence:
+- **`AudioFrame.sequence` (Transport Level):** Monotonically increasing counter per transport leg verifying that frames arrive without transport loss or reordering.
+- **`AudioFrame.turn_id` / `session.current_turn_id` (Logical Turn Generation):** Monotonically increasing identifier distinguishing successive AI responses. Starting at turn `1`, each interruption advances `current_turn_id` by 1.
+
+### Two-Level Stale Frame Defense:
+1. **Immediate Outbound Queue Purge:** When `session.interrupt()` is called, all unwritten frames currently residing in `_outbound_queue` are instantly dequeued and dropped, releasing backpressure and preventing outdated frames from reaching the telephony forwarder. EOF sentinels are strictly preserved.
+2. **Ingress & Forwarder Stale Frame Suppression:**
+   - In `_run_outbound_pump.receiver`: Any frame yielded by the AI port with `frame.turn_id < current_turn_id` is dropped prior to queueing and increments `stale_frames_suppressed`.
+   - In `_run_outbound_pump.forwarder`: Any frame popped with `frame.turn_id < current_turn_id` is dropped and increments `stale_frames_suppressed`.
+
+### Playback Honesty & Capability Protocols:
+The subsystem defines explicit provider capability protocols (`ports.py`):
+- `InterruptibleAIPort`: Declares `interruption_capabilities` and async `cancel_turn(turn_id: int)`.
+- `InterruptibleTelephonyPort`: Declares `interruption_capabilities` and async `clear_pending_output()`.
+- `InterruptionCapabilities`:
+  - `can_cancel_future_generation`: Whether backend supports cancelling in-flight generation.
+  - `can_discard_local_output`: Always True for Gateway's internal queue.
+  - `can_cancel_transport_pending`: Whether transport driver can clear buffered socket bytes.
+  - `can_clear_provider_playback`: Whether remote PSTN/telephony provider supports clearing playback.
+  - `can_observe_playback_acks`: Whether provider sends frame-level playback confirmation.
+  - `cannot_confirm_playback`: True by default. Enforces that Gateway **never claims audio was played** unless actual provider acknowledgments exist.
+
+### Interruption Outcome Contract:
+`VoiceBridgeSession.interrupt()` returns an immutable `InterruptionOutcome`:
+```python
+@dataclass(frozen=True, slots=True)
+class InterruptionOutcome:
+    call_id: str
+    interrupted_turn_id: int
+    new_turn_id: int
+    locally_discarded_frames: int
+    stale_frames_suppressed: int
+    future_generation_cancelled: bool
+    transport_pending_cancelled: bool
+    provider_playback_cleared: bool
+    playback_confirmed: bool = False
+```
+
+---
+
+## 6. Verification and Deterministic Testing
 
 The test suite validates:
 - **Byte Order & Integrity:** 100% identical byte matching between transmitted and received frames.
-- **Two-Call Isolation:** Parallel calls (Call A and Call B) with distinct marker bytes show zero cross-call contamination.
+- **Two-Call Isolation:** Parallel calls (Call A and Call B) with distinct marker bytes show zero cross-call contamination; interrupting Call A has zero impact on Call B.
 - **Cross-Tenant Isolation:** Sessions strictly fence tenant and call contexts.
-- **Deterministic Fakes:** `FakeTelephonyMediaAdapter` and `FakeAIMediaAdapter` support delay simulation, fault injection, and EOF signaling.
+- **Deterministic Fakes:** `InterruptibleFakeTelephonyAdapter` and `InterruptibleFakeAIPort` support delay simulation, fault injection, and EOF signaling without fragile sleep timing.
+- **15 Required Interruption Scenarios:** All edge cases covered, including queue backpressure relief, duplicate/idempotent interrupts, race conditions with close, provider failure degradation, and task leak absence.
 - **Runnable In-Process Smoke:** Executable via `python -m tools.voice_smoke` or `python tools/voice_smoke.py`.
 
 ---
 
-## 6. Scope & Milestone Status
+## 7. Scope & Milestone Status
 
 ### Current Project Milestone Status:
-- **M3.3B:** Complete (Squash merge in PR #19 / `4fa9a18`).
-- **M4.1:** Draft PR / pending maintainer review (Voice-local media contracts, bounded bridge, fake adapters, in-process smoke).
-- **M4.2:** Not started (Realtime AI adapter, turn/interruption handling, playback cancellation).
+- **M4.1:** Complete (Merged in PR #20 / `577e6b9`).
+- **M4.2A:** Complete (Protected squash merged in PR #21 / `df28327`).
+- **M4.2B.1:** In progress (Turn interruption contracts, in-process turn control, stale suppression).
+- **M4.2B.2:** Not started (WebSocket wire event integration for interruption).
 - **M5:** Not started (Resilience, fault simulation, soak evidence).
 
-### Explicit Boundaries & Non-Goals for M4.1:
-- **No Real WSS Binary Media:** M4.1 does not modify or attach binary media frames to the `/ws/synthetic/v1` control endpoint.
-- **No Verimor Integration:** Fictional synthetic test adapters do not constitute Verimor protocol compatibility (`OPEN-001`).
+### Explicit Boundaries & Non-Goals:
+- **No Real Verimor Integration:** Fictional synthetic test adapters do not constitute Verimor protocol compatibility (`OPEN-001`).
 - **No OpenAI Live Integration:** Does not connect to live OpenAI Live API endpoints (`OPEN-003`).
 - **No Audio Codecs:** Opus, G.711, AAC, resampling, or audio encoding algorithms are not implemented.
 - **No End-to-End Latency Guarantee:** In-process sub-millisecond memory queue transfers do not demonstrate network latency or production performance.
