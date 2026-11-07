@@ -10,9 +10,16 @@ Invariants:
 
 from __future__ import annotations
 
-from typing import Final
+import re
+from typing import Any, Final
 
-from kaiwen_gateway.transports.synthetic.protocol import SyntheticProtocolError
+from kaiwen_gateway.transports.synthetic.protocol import (
+    SUPPORTED_CLIENT_EVENTS,
+    SUPPORTED_SERVER_EVENTS,
+    InvalidMessageFormatError,
+    SyntheticProtocolError,
+    parse_and_validate_client_frame,
+)
 
 __all__ = [
     "SYNTHETIC_MEDIA_WS_ENDPOINT_PATH",
@@ -21,15 +28,40 @@ __all__ = [
     "PCM16LE_CHANNELS",
     "PCM16LE_FRAME_MS",
     "PCM16LE_FRAME_BYTES",
+    "EVENT_CALL_INTERRUPT",
+    "EVENT_CALL_INTERRUPTED",
+    "SUPPORTED_MEDIA_CLIENT_EVENTS",
+    "SUPPORTED_MEDIA_SERVER_EVENTS",
     "SyntheticMediaError",
     "InvalidAudioFrameSizeError",
     "MediaBeforeActivationError",
     "MediaAfterTerminationError",
     "validate_pcm16le_binary_frame",
+    "parse_and_validate_media_control_frame",
 ]
 
 SYNTHETIC_MEDIA_WS_ENDPOINT_PATH: Final[str] = "/ws/synthetic-media/v1"
 SYNTHETIC_MEDIA_PROTOCOL_VERSION: Final[str] = "v1"
+
+EVENT_CALL_INTERRUPT: Final[str] = "call.interrupt"
+EVENT_CALL_INTERRUPTED: Final[str] = "call.interrupted"
+
+SUPPORTED_MEDIA_CLIENT_EVENTS: Final[frozenset[str]] = frozenset(
+    SUPPORTED_CLIENT_EVENTS | {EVENT_CALL_INTERRUPT}
+)
+SUPPORTED_MEDIA_SERVER_EVENTS: Final[frozenset[str]] = frozenset(
+    SUPPORTED_SERVER_EVENTS | {EVENT_CALL_INTERRUPTED}
+)
+
+ALLOWED_CALL_INTERRUPT_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "event",
+        "call_id",
+        "turn_id",
+        "request_id",
+    }
+)
+REQUEST_ID_REGEX: Final[re.Pattern[str]] = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 # Audio format profile constants
 PCM16LE_SAMPLE_RATE: Final[int] = 16_000
@@ -82,3 +114,59 @@ def validate_pcm16le_binary_frame(payload: bytes) -> None:
         raise TypeError(f"Audio frame payload must be bytes, got {type(payload).__name__}")
     if len(payload) != PCM16LE_FRAME_BYTES:
         raise InvalidAudioFrameSizeError(len(payload), PCM16LE_FRAME_BYTES)
+
+
+def parse_and_validate_media_control_frame(raw_text: str) -> dict[str, Any]:
+    """Parse and validate an inbound client control frame for the media endpoint.
+
+    Extends standard synthetic client frame validation with media-specific event
+    support, notably `call.interrupt`.
+
+    Raises:
+        OversizedMessageError: If frame byte length exceeds 64 KiB.
+        InvalidJsonError: If frame cannot be parsed as valid JSON.
+        InvalidMessageFormatError: If frame schema violates protocol rules or contains unknown fields.
+        UnsupportedEventError: If event name is not recognized in synthetic media protocol.
+    """
+    payload = parse_and_validate_client_frame(
+        raw_text,
+        allowed_events=SUPPORTED_MEDIA_CLIENT_EVENTS,
+    )
+
+    event = payload["event"]
+    if event == EVENT_CALL_INTERRUPT:
+        unknown_fields = set(payload.keys()) - ALLOWED_CALL_INTERRUPT_FIELDS
+        if unknown_fields:
+            unknown_name = sorted(unknown_fields)[0]
+            raise InvalidMessageFormatError(
+                f"Unknown field in {EVENT_CALL_INTERRUPT}: {unknown_name!r}"
+            )
+
+        if "call_id" not in payload:
+            raise InvalidMessageFormatError(f"Missing required 'call_id' in {EVENT_CALL_INTERRUPT}")
+        call_id = payload["call_id"]
+        if not isinstance(call_id, str) or not call_id or len(call_id) > 128:
+            raise InvalidMessageFormatError(
+                "'call_id' must be a non-empty string <= 128 characters"
+            )
+
+        if "turn_id" not in payload:
+            raise InvalidMessageFormatError(f"Missing required 'turn_id' in {EVENT_CALL_INTERRUPT}")
+        turn_id = payload["turn_id"]
+        if isinstance(turn_id, bool) or not isinstance(turn_id, int) or turn_id < 1:
+            raise InvalidMessageFormatError("'turn_id' must be a positive integer >= 1")
+
+        if "request_id" in payload:
+            request_id = payload["request_id"]
+            if (
+                isinstance(request_id, bool)
+                or not isinstance(request_id, str)
+                or not request_id
+                or len(request_id) > 64
+                or not REQUEST_ID_REGEX.match(request_id)
+            ):
+                raise InvalidMessageFormatError(
+                    "'request_id' must be a string <= 64 characters matching [a-zA-Z0-9_-]"
+                )
+
+    return payload

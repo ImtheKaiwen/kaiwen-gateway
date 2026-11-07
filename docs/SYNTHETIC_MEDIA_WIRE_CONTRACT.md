@@ -121,7 +121,49 @@ Clients may send periodic keep-alive pings:
 }
 ```
 
-### 3.5 Graceful Termination (`call.end` / `call.ended`)
+### 3.5 Turn Interruption (`call.interrupt` / `call.interrupted`)
+
+Clients issue turn interruption to cancel current generation (barge-in):
+
+**Client -> Server:**
+```json
+{
+  "event": "call.interrupt",
+  "call_id": "call_sample",
+  "turn_id": 1,
+  "request_id": "optional-client-req-id"
+}
+```
+
+- `call_id` (string, required): Must match verified connection context.
+- `turn_id` (integer, required): Positive integer >= 1 indicating the active turn to interrupt. Cannot reference unreached future turns (`turn_id > current_turn_id` fails closed with close code `1008`).
+- `request_id` (string, optional): ASCII alphanumeric/hyphen/underscore identifier up to 64 chars, echoed back in response.
+- Unknown fields are strictly rejected fail-closed with close code `1007`.
+
+**Server -> Client:**
+```json
+{
+  "event": "call.interrupted",
+  "call_id": "call_sample",
+  "interrupted_turn_id": 1,
+  "new_turn_id": 2,
+  "locally_discarded_frames": 0,
+  "stale_frames_suppressed": 0,
+  "future_generation_cancelled": true,
+  "transport_pending_cancelled": false,
+  "provider_playback_cleared": false,
+  "playback_confirmed": false,
+  "request_id": "optional-client-req-id"
+}
+```
+
+#### Turn & Ingress Ordering Invariants:
+1. **Outbound Ordering Barrier:** An internal turn barrier ensures `call.interrupted` is transmitted over the WebSocket before any Turn T+1 binary media frames reach the client.
+2. **Ingress Turn Tagging:** The single ingress reader stamps newly received binary audio frames with the current turn ID (`ingress_turn_id`), preventing stale frame suppression on Turn 2 audio.
+3. **Stale Turn Idempotence:** If a client re-sends `call.interrupt` for an already-interrupted older turn (`turn_id < current_turn_id`), the server returns an idempotent `call.interrupted` with `locally_discarded_frames: 0` without advancing turn or closing the connection.
+4. **Playback Acknowledgment Honesty:** `playback_confirmed` is strictly `false` because synthetic WebSocket transport cannot observe remote acoustic reception.
+
+### 3.6 Graceful Termination (`call.end` / `call.ended`)
 
 When speech streaming ends, the client issues a clean termination:
 
@@ -183,7 +225,14 @@ stateDiagram-v2
 | Binary before `call.start` | `1008` | `Binary media received before call.start` |
 | Invalid binary frame size | `1003` | `Invalid audio frame size: expected 640 bytes, got <len>` |
 | Malformed JSON control | `1007` | `Malformed control message` |
+| Unknown / invalid field in control | `1007` | `Malformed control message: Unknown field in call.interrupt: ...` |
+| Missing / invalid `turn_id` in interrupt | `1007` | `Malformed control message: 'turn_id' must be a positive integer >= 1` |
 | Call ID mismatch in control | `1008` | `Call ID in payload does not match connection context` |
+| Interruption of future turn | `1008` | `Cannot interrupt future turn <turn_id> (current turn is <current>)` |
+| `call.interrupt` when call inactive | `1008` | `call.interrupt received but call is not active` |
+| `call.interrupt` on text-only endpoint | `1008` | `Unsupported event type` |
+| Oversized control payload (>64 KiB) | `1009` | `Message size (...) exceeds maximum limit of 65536 bytes` |
+| Upstream interruption failure | `1011` | `Upstream media interruption failed` |
 | Session idle timeout | `1000` | `Session idle timeout` |
 | Lifecycle init failure | `1011` | `Lifecycle initialization failed` |
 | Drain failure or timeout | `1011` | `Call drain failed or timed out` |

@@ -11,6 +11,7 @@ from kaiwen_gateway.modules.voice.adapters.fake import (
 )
 from kaiwen_gateway.modules.voice.adapters.fake_ai import (
     BoundedFakeAIEchoPort,
+    BoundedInterruptibleFakeAIEchoPort,
     InterruptibleFakeAIPort,
 )
 from kaiwen_gateway.modules.voice.bridge import (
@@ -69,5 +70,6 @@ __all__ = [
     "FakeAIMediaAdapter",
     "InterruptibleFakeTelephonyAdapter",
     "BoundedFakeAIEchoPort",
+    "BoundedInterruptibleFakeAIEchoPort",
     "InterruptibleFakeAIPort",
 ]

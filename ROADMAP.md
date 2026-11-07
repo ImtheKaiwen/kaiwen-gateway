@@ -168,11 +168,11 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 - [x] Voice-local media/domain contracts and provider-neutral telephony/AI adapter interfaces (M4.1 Complete — PR #20 / `577e6b9`).
 - [x] Two lifetime-bound concurrent audio pumps: telephony → AI and AI → telephony (M4.1 Complete — PR #20 / `577e6b9`).
-- [x] Synthetic binary WebSocket media vertical slice: `/ws/synthetic-media/v1` with PCM16LE 20ms framing and single read-loop demux (M4.2A Local implementation / In progress).
-- [x] Bounded per-call Fake AI echo port and backpressure enforcement (M4.2A Local implementation / In progress).
+- [x] Synthetic binary WebSocket media vertical slice: `/ws/synthetic-media/v1` with PCM16LE 20ms framing and single read-loop demux (M4.2A Complete — PR #21 / `df28327`).
+- [x] Bounded per-call Fake AI echo port and backpressure enforcement (M4.2A Complete — PR #21 / `df28327`).
 - [ ] Provider-specific codec negotiation/conversion **only when evidence requires it**; validate frame formats/order/timing.
 - [x] Bounded media queues/backpressure, precise cancellation and idempotent cleanup (M4.1 Complete; M4.2A verified over loopback WebSocket).
-- [ ] Barge-in/unplayed-output handling according to **verified adapter capabilities** (M4.2B).
+- [ ] Barge-in/unplayed-output handling according to **verified adapter capabilities** (M4.2B.1 in-process turn control Complete — PR #22 / `e457f8f`; M4.2B.2 synthetic WebSocket interruption vertical slice in progress).
 - [x] Fake AI adapter and independent per-call session state; concurrency/isolation fixtures (M4.1 Complete; M4.2A multi-tenant isolation verified).
 - [ ] Kaiwen Agent integration adapter using **public, compatible APIs**; no duplicate agent runtime.
 - [ ] OpenAI Live contract review against current official docs; an authorized sandbox smoke test if credentials/approval are available.
