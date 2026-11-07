@@ -1324,3 +1324,478 @@ def test_remediation_gate_d_provider_timeout_and_close_race(frame_bytes: bytes) 
         assert session_2.state == VoiceBridgeState.CLOSED
 
     asyncio.run(_test())
+
+
+# -----------------------------------------------------------------------------
+# Final Reliability Gates: Local Output Fence, Partial Retry & Boundaries
+# -----------------------------------------------------------------------------
+
+
+def test_gate_a_immediate_local_output_fence_deterministic_reproduction(
+    frame_bytes: bytes,
+) -> None:
+    """GATE A: Immediate local output fence prevents forwarding buffered frames during slow AI cancellation.
+
+    Verifies the 9-step deterministic barrier reproduction:
+    1. Start Turn 1.
+    2. Hold Frame 0 in telephony send_frame().
+    3. Place additional Turn 1 frames (Frame 1, Frame 2) in outbound queue.
+    4. Start interrupt(turn_id=1).
+    5. Block AI cancel_turn() with an Event barrier.
+    6. Release in-flight Frame 0 send.
+    7. Observe that NO buffered Turn 1 frames (Frame 1, 2) are forwarded while cancel_turn() remains blocked.
+    8. Release cancel_turn().
+    9. Complete interruption; verify only the non-retractable in-flight Frame 0 was sent,
+       while buffered frames were discarded and suppressed.
+    """
+
+    async def _test() -> None:
+        send_entered = asyncio.Event()
+        send_release = asyncio.Event()
+
+        class BarrierTelephony(InterruptibleFakeTelephonyAdapter):
+            async def send_frame(self, frame: AudioFrame) -> None:
+                if frame.sequence == 0:
+                    send_entered.set()
+                    await send_release.wait()
+                await super().send_frame(frame)
+
+        ai_cancel_entered = asyncio.Event()
+        ai_cancel_release = asyncio.Event()
+
+        class BlockingAIPort(InterruptibleFakeAIPort):
+            async def cancel_turn(self, turn_id: int) -> None:
+                ai_cancel_entered.set()
+                await ai_cancel_release.wait()
+                await super().cancel_turn(turn_id)
+
+        tel_port = BarrierTelephony()
+        ai_port = BlockingAIPort()
+
+        session = VoiceBridgeSession(
+            call_id="call-gate-a-repro",
+            tenant_id="tenant-test",
+            telephony_port=tel_port,
+            ai_port=ai_port,
+            queue_capacity=8,
+        )
+
+        await session.start()
+        try:
+            # 1. Start Turn 1, push Frame 0 (will block in send_frame)
+            f0 = create_synthetic_pcm16le_frame(frame_bytes, sequence=0, turn_id=1)
+            ai_port.push_frame(f0)
+            await send_entered.wait()
+            # Frame 0 is in-flight in telephony transport
+
+            # 2. Place additional Turn 1 frames in _outbound_queue
+            f1 = create_synthetic_pcm16le_frame(frame_bytes, sequence=1, turn_id=1)
+            f2 = create_synthetic_pcm16le_frame(frame_bytes, sequence=2, turn_id=1)
+            ai_port.push_frame(f1)
+            ai_port.push_frame(f2)
+
+            # Wait briefly to ensure f1 and f2 are queued in outbound_queue
+            while session.outbound_queue_depth < 2:
+                await asyncio.sleep(0.005)
+
+            assert session.outbound_queue_depth == 2
+
+            # 4. Start interrupt(turn_id=1) as a concurrent task
+            interrupt_task = asyncio.create_task(
+                session.interrupt(turn_id=1, require_future_generation_cancellation=True)
+            )
+
+            # 5. Wait until AI cancel_turn() is entered and blocked
+            await ai_cancel_entered.wait()
+
+            # At this point, the immediate fence is active and outbound queue was purged!
+            assert session.fenced_turn_id == 1
+            assert session.outbound_queue_depth == 0
+
+            # 6. Release in-flight send
+            send_release.set()
+
+            # 7. Yield event loop and verify NO buffered Turn 1 frames are sent while cancellation remains blocked
+            await asyncio.sleep(0.02)
+            assert tel_port.send_count == 1
+            assert [f.sequence for f in tel_port.sent_frames] == [0]
+
+            # Even if AI emits more Turn 1 frames while cancellation is blocked:
+            f3 = create_synthetic_pcm16le_frame(frame_bytes, sequence=3, turn_id=1)
+            ai_port.push_frame(f3)
+            await asyncio.sleep(0.02)
+            assert tel_port.send_count == 1  # Still only Frame 0!
+
+            # 8. Release cancellation
+            ai_cancel_release.set()
+
+            # 9. Complete interruption
+            outcome = await interrupt_task
+            assert outcome.interrupted_turn_id == 1
+            assert outcome.new_turn_id == 2
+            assert outcome.future_generation_cancelled is True
+            assert outcome.locally_discarded_frames >= 2  # f1 and f2 discarded from queue
+
+            # Post-interruption: new turn (Turn 2) frame is delivered cleanly
+            f4 = create_synthetic_pcm16le_frame(frame_bytes, sequence=4, turn_id=2)
+            ai_port.push_frame(f4)
+
+            tel_port.push_eof()
+            ai_port.push_eof()
+            await session.wait_until_closed()
+
+            assert session.state == VoiceBridgeState.CLOSED
+            # Only Frame 0 (in-flight non-retractable) and Frame 4 (Turn 2) reached telephony!
+            assert [f.sequence for f in tel_port.sent_frames] == [0, 4]
+            assert [f.turn_id for f in tel_port.sent_frames] == [1, 2]
+        finally:
+            send_release.set()
+            ai_cancel_release.set()
+            await session.close()
+
+    asyncio.run(_test())
+
+
+def test_gate_b_partial_provider_success_and_retry_with_non_idempotent_provider(
+    frame_bytes: bytes,
+) -> None:
+    """GATE B: Partial provider success, non-duplicate cancellation on retry, and local fence retention."""
+
+    async def _test() -> None:
+        class NonIdempotentAIPort(InterruptibleFakeAIPort):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cancel_call_count = 0
+
+            async def cancel_turn(self, turn_id: int) -> None:
+                self.cancel_call_count += 1
+                if self.cancel_call_count > 1:
+                    raise RuntimeError(
+                        f"Duplicate cancel_turn({turn_id}) rejected by non-idempotent AI provider"
+                    )
+                await super().cancel_turn(turn_id)
+
+        tel_port = InterruptibleFakeTelephonyAdapter()
+        ai_port = NonIdempotentAIPort()
+
+        session = VoiceBridgeSession(
+            call_id="call-gate-b-partial",
+            tenant_id="tenant-test",
+            telephony_port=tel_port,
+            ai_port=ai_port,
+            queue_capacity=8,
+        )
+
+        await session.start()
+        try:
+            # Queue Turn 1 frames
+            ai_port.push_frame(create_synthetic_pcm16le_frame(frame_bytes, sequence=0, turn_id=1))
+            ai_port.push_frame(create_synthetic_pcm16le_frame(frame_bytes, sequence=1, turn_id=1))
+
+            # Simulate telephony clear failure on first attempt
+            tel_port._simulate_clear_error = RuntimeError(
+                "Telephony clear provider playback failed"
+            )
+
+            with pytest.raises(RuntimeError, match="Telephony clear provider playback failed"):
+                await session.interrupt(
+                    turn_id=1,
+                    require_future_generation_cancellation=True,
+                    require_playback_clear=True,
+                )
+
+            # Assert partial state:
+            # 1. AI cancel was called once and recorded as partial success
+            assert ai_port.cancel_call_count == 1
+            # 2. Turn did NOT advance (no false-success)
+            assert session.current_turn_id == 1
+            assert session.interruption_count == 0
+            # 3. Local fence remains active throughout partial failure
+            assert session.fenced_turn_id == 1
+            # 4. Outbound queue was purged: no stale audio sent to telephony
+            assert session.outbound_queue_depth == 0
+            assert tel_port.send_count == 0
+
+            # 5. AI pushing more Turn 1 frames during partial failure state: suppressed by fence!
+            ai_port.push_frame(create_synthetic_pcm16le_frame(frame_bytes, sequence=2, turn_id=1))
+            await asyncio.sleep(0.02)
+            assert tel_port.send_count == 0
+
+            # 6. Caller retries interruption of the exact same turn (turn_id=1)
+            # Telephony error was cleared automatically by _simulate_clear_error
+            outcome = await session.interrupt(
+                turn_id=1,
+                require_future_generation_cancellation=True,
+                require_playback_clear=True,
+            )
+
+            # 7. Verified: AI cancel was NOT repeated (cancel_call_count is still 1)
+            assert ai_port.cancel_call_count == 1
+            # 8. Interruption now succeeds and advances turn
+            assert outcome.interrupted_turn_id == 1
+            assert outcome.new_turn_id == 2
+            assert outcome.future_generation_cancelled is True
+            assert outcome.provider_playback_cleared is True
+            assert session.current_turn_id == 2
+            assert session.interruption_count == 1
+
+            # 9. Deliver Turn 2 frame
+            ai_port.push_frame(create_synthetic_pcm16le_frame(frame_bytes, sequence=3, turn_id=2))
+            tel_port.push_eof()
+            ai_port.push_eof()
+            await session.wait_until_closed()
+
+            assert session.state == VoiceBridgeState.CLOSED
+            assert [f.turn_id for f in tel_port.sent_frames] == [2]
+        finally:
+            await session.close()
+
+    asyncio.run(_test())
+
+
+def test_gate_b_required_ai_cancel_failure_before_success(frame_bytes: bytes) -> None:
+    """GATE B: Required AI cancellation failure before success allows retry once healed."""
+
+    async def _test() -> None:
+        tel_port = InterruptibleFakeTelephonyAdapter()
+        ai_port = InterruptibleFakeAIPort()
+
+        session = VoiceBridgeSession(
+            call_id="call-gate-b-ai-fail",
+            tenant_id="tenant-test",
+            telephony_port=tel_port,
+            ai_port=ai_port,
+        )
+
+        async with session:
+            ai_port._simulate_cancellation_error = RuntimeError("AI backend unavailable")
+            with pytest.raises(RuntimeError, match="AI backend unavailable"):
+                await session.interrupt(turn_id=1, require_future_generation_cancellation=True)
+
+            assert session.current_turn_id == 1
+            assert session.interruption_count == 0
+            assert session.fenced_turn_id == 1
+
+            # Retry after AI recovers
+            outcome = await session.interrupt(
+                turn_id=1, require_future_generation_cancellation=True
+            )
+            assert outcome.interrupted_turn_id == 1
+            assert outcome.new_turn_id == 2
+            assert outcome.future_generation_cancelled is True
+            assert session.current_turn_id == 2
+
+            tel_port.push_eof()
+            ai_port.push_eof()
+            await session.wait_until_closed()
+
+    asyncio.run(_test())
+
+
+def test_gate_c_caller_cancellation_and_timeout_boundaries(frame_bytes: bytes) -> None:
+    """GATE C: Caller cancellation, shared timeout after partial success, and concurrent close."""
+
+    async def _test() -> None:
+        # 1. Caller cancellation during AI cancel
+        cancel_started = asyncio.Event()
+
+        class CancellableAIPort(InterruptibleFakeAIPort):
+            async def cancel_turn(self, turn_id: int) -> None:
+                cancel_started.set()
+                await asyncio.sleep(10.0)  # Long wait
+
+        tel_1 = InterruptibleFakeTelephonyAdapter()
+        ai_1 = CancellableAIPort()
+        session_1 = VoiceBridgeSession(
+            call_id="call-c-cancel-1",
+            tenant_id="tenant-test",
+            telephony_port=tel_1,
+            ai_port=ai_1,
+        )
+
+        await session_1.start()
+        try:
+            task = asyncio.create_task(
+                session_1.interrupt(turn_id=1, require_future_generation_cancellation=True)
+            )
+            await cancel_started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            assert session_1.current_turn_id == 1
+            assert session_1.fenced_turn_id == 1
+        finally:
+            await session_1.close()
+
+        # 2. Caller cancellation after AI cancel but before telephony clear
+        ai_done = asyncio.Event()
+        tel_hold = asyncio.Event()
+
+        class SteppedTelPort(InterruptibleFakeTelephonyAdapter):
+            async def clear_pending_output(self) -> None:
+                ai_done.set()
+                await tel_hold.wait()
+                await super().clear_pending_output()
+
+        class NonIdempotentAI2(InterruptibleFakeAIPort):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            async def cancel_turn(self, turn_id: int) -> None:
+                self.calls += 1
+                if self.calls > 1:
+                    raise RuntimeError("Duplicate cancel_turn")
+                await super().cancel_turn(turn_id)
+
+        tel_2 = SteppedTelPort()
+        ai_2 = NonIdempotentAI2()
+        session_2 = VoiceBridgeSession(
+            call_id="call-c-cancel-2",
+            tenant_id="tenant-test",
+            telephony_port=tel_2,
+            ai_port=ai_2,
+        )
+
+        await session_2.start()
+        try:
+            task2 = asyncio.create_task(
+                session_2.interrupt(
+                    turn_id=1,
+                    require_future_generation_cancellation=True,
+                    require_playback_clear=True,
+                )
+            )
+            await ai_done.wait()
+            # AI cancel completed, now task is waiting inside clear_pending_output
+            task2.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task2
+
+            assert ai_2.calls == 1
+            assert session_2.current_turn_id == 1
+            assert session_2.fenced_turn_id == 1
+
+            # Retrying the interruption: AI cancel is not repeated!
+            tel_hold.set()
+            outcome = await session_2.interrupt(
+                turn_id=1,
+                require_future_generation_cancellation=True,
+                require_playback_clear=True,
+            )
+            assert ai_2.calls == 1  # No duplicate cancel!
+            assert outcome.interrupted_turn_id == 1
+            assert outcome.new_turn_id == 2
+        finally:
+            tel_hold.set()
+            await session_2.close()
+
+        # 3. Provider timeout under shared deadline after partial success
+        class HangingTelPort(InterruptibleFakeTelephonyAdapter):
+            async def clear_pending_output(self) -> None:
+                await asyncio.sleep(10.0)
+
+        ai_3 = NonIdempotentAI2()
+        tel_3 = HangingTelPort()
+        session_3 = VoiceBridgeSession(
+            call_id="call-c-timeout-shared",
+            tenant_id="tenant-test",
+            telephony_port=tel_3,
+            ai_port=ai_3,
+        )
+
+        await session_3.start()
+        try:
+            # AI cancel takes ~0s, telephony clear hangs -> overall timeout 0.05s triggers TimeoutError
+            with pytest.raises(TimeoutError):
+                await session_3.interrupt(turn_id=1, require_playback_clear=True, timeout=0.05)
+
+            assert ai_3.calls == 1  # AI cancel completed before timeout
+            assert session_3.current_turn_id == 1
+            assert session_3.fenced_turn_id == 1
+        finally:
+            await session_3.close()
+
+        # 4. Concurrent close during partial failure leaves zero orphan tasks
+        tel_4 = InterruptibleFakeTelephonyAdapter()
+        ai_4 = InterruptibleFakeAIPort()
+        session_4 = VoiceBridgeSession(
+            call_id="call-c-close-leak",
+            tenant_id="tenant-test",
+            telephony_port=tel_4,
+            ai_port=ai_4,
+        )
+        await session_4.start()
+        # Cause partial failure
+        tel_4._simulate_clear_error = RuntimeError("Clear failed")
+        with pytest.raises(RuntimeError):
+            await session_4.interrupt(require_playback_clear=True)
+        # Close session
+        await session_4.close()
+        assert session_4.state == VoiceBridgeState.CLOSED
+
+        # Check for orphan background tasks
+        all_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        voice_tasks = [t for t in all_tasks if "voice-" in t.get_name()]
+        assert len(voice_tasks) == 0
+
+    asyncio.run(_test())
+
+
+def test_gate_c_duplicate_interrupt_concurrency_and_eof(frame_bytes: bytes) -> None:
+    """GATE C: Duplicate concurrent interrupt requests and EOF during interruption."""
+
+    async def _test() -> None:
+        ai_cancel_barrier = asyncio.Event()
+
+        class SlowAIPort(InterruptibleFakeAIPort):
+            async def cancel_turn(self, turn_id: int) -> None:
+                await ai_cancel_barrier.wait()
+                await super().cancel_turn(turn_id)
+
+        tel = InterruptibleFakeTelephonyAdapter()
+        ai = SlowAIPort()
+        session = VoiceBridgeSession(
+            call_id="call-c-dup-eof",
+            tenant_id="tenant-test",
+            telephony_port=tel,
+            ai_port=ai,
+        )
+
+        await session.start()
+        try:
+            # Task 1 starts interruption
+            task1 = asyncio.create_task(session.interrupt(turn_id=1))
+            # Yield so task1 acquires _interruption_lock and blocks on cancel_turn
+            await asyncio.sleep(0.01)
+
+            # AI pushes EOF sentinel during interruption
+            ai.push_eof()
+
+            # Task 2 calls interrupt for the same turn concurrently (will await lock)
+            task2 = asyncio.create_task(session.interrupt(turn_id=1))
+
+            # Unblock AI cancellation
+            ai_cancel_barrier.set()
+
+            res1 = await task1
+            res2 = await task2
+
+            # Task 1 executed the interruption and advanced turn to 2
+            assert res1.interrupted_turn_id == 1
+            assert res1.new_turn_id == 2
+            # Task 2 saw turn 1 was already completed, returned idempotent result
+            assert res2.interrupted_turn_id == 1
+            assert res2.new_turn_id == 2
+            assert res2.locally_discarded_frames == 0
+
+            # EOF is preserved and session finishes cleanly
+            tel.push_eof()
+            await session.wait_until_closed()
+            assert session.state == VoiceBridgeState.CLOSED
+        finally:
+            ai_cancel_barrier.set()
+            await session.close()
+
+    asyncio.run(_test())
