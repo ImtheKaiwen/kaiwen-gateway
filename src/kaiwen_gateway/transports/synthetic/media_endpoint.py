@@ -17,8 +17,8 @@ from kaiwen_gateway.core.exceptions import (
 )
 from kaiwen_gateway.core.lifecycle import ConnectionState, ConnectionSupervisor, TerminalReason
 from kaiwen_gateway.modules.voice.adapters.fake_ai import BoundedFakeAIEchoPort
-from kaiwen_gateway.modules.voice.bridge import VoiceBridgeSession
-from kaiwen_gateway.modules.voice.domain import AudioFormat, AudioFrame
+from kaiwen_gateway.modules.voice.bridge import VoiceBridgeSession, VoiceBridgeState
+from kaiwen_gateway.modules.voice.domain import AudioFormat, AudioFrame, VoiceDomainError
 from kaiwen_gateway.modules.voice.ports import AIRealtimeMediaPort
 from kaiwen_gateway.transports.synthetic.auth import SyntheticAuthBridge
 from kaiwen_gateway.transports.synthetic.media_adapter import WebSocketTelephonyMediaAdapter
@@ -52,6 +52,7 @@ except ImportError:  # pragma: no cover
     WebSocketDisconnect = Any  # type: ignore[assignment,misc]
 
 DEFAULT_IDLE_TIMEOUT_SECONDS: Final[float] = 60.0
+DEFAULT_DRAIN_TIMEOUT_SECONDS: Final[float] = 2.0
 REQUIRED_SYNTHETIC_SCOPE: Final[str] = "voice.stream"
 
 
@@ -156,55 +157,79 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
         if socket_closed or socket_disconnected:
             return
         safe_reason = reason.encode("utf-8")[:123].decode("utf-8", "ignore")
-        await websocket.close(code=code, reason=safe_reason)
-        socket_closed = True
+        try:
+            await websocket.close(code=code, reason=safe_reason)
+        except Exception:
+            pass
+        finally:
+            socket_closed = True
 
-    # Telephony adapter, AI port, and VoiceBridgeSession composition
-    telephony_adapter = WebSocketTelephonyMediaAdapter(
-        websocket=websocket,
-        context=verified_context,
-    )
-    ai_port_factory: Callable[[], AIRealtimeMediaPort] | None = getattr(
-        app_state, "ai_media_port_factory", None
-    )
-    ai_port: AIRealtimeMediaPort = (
-        ai_port_factory() if ai_port_factory is not None else BoundedFakeAIEchoPort()
-    )
-    voice_bridge = VoiceBridgeSession(
-        call_id=verified_context.call_id,
-        tenant_id=verified_context.tenant_id,
-        telephony_port=telephony_adapter,
-        ai_port=ai_port,
-    )
+    telephony_adapter: WebSocketTelephonyMediaAdapter | None = None
+    ai_port: AIRealtimeMediaPort | None = None
+    voice_bridge: VoiceBridgeSession | None = None
 
     # Register resource cleanup callback so supervisor owns all leg resources
     async def _cleanup_media_session() -> None:
-        try:
-            if active_call_registered:
+        nonlocal active_call_registered
+        cleanup_errors: list[Exception] = []
+        if active_call_registered:
+            try:
                 await auth_bridge.unregister_active_call(
                     connection_id, verified_context.tenant_id, verified_context.call_id
                 )
-        finally:
+            except Exception as exc:
+                cleanup_errors.append(exc)
+            active_call_registered = False
+
+        if voice_bridge is not None:
             try:
                 await voice_bridge.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                cleanup_errors.append(exc)
+
+        if telephony_adapter is not None:
             try:
                 await telephony_adapter.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                cleanup_errors.append(exc)
+
+        if ai_port is not None:
             try:
                 await ai_port.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                cleanup_errors.append(exc)
+
+        try:
             accepted_flag = _is_wire_accepted()
-            close_code = 1000 if accepted_flag else 1008
-            close_reason = "Server shutting down" if accepted_flag else "Handshake aborted"
+            close_code = 1000 if accepted_flag else 1011
+            close_reason = "Server shutting down" if accepted_flag else "Initialization failed"
             await _close_socket(code=close_code, reason=close_reason)
+        except Exception as exc:
+            cleanup_errors.append(exc)
 
     try:
         supervisor.register_resource(_cleanup_media_session)
+
+        # Telephony adapter, AI port, and VoiceBridgeSession composition
+        telephony_adapter = WebSocketTelephonyMediaAdapter(
+            websocket=websocket,
+            context=verified_context,
+        )
+        ai_port_factory: Callable[[], AIRealtimeMediaPort] | None = getattr(
+            app_state, "ai_media_port_factory", None
+        )
+        ai_port = ai_port_factory() if ai_port_factory is not None else BoundedFakeAIEchoPort()
+        voice_bridge = VoiceBridgeSession(
+            call_id=verified_context.call_id,
+            tenant_id=verified_context.tenant_id,
+            telephony_port=telephony_adapter,
+            ai_port=ai_port,
+        )
     except Exception:
+        try:
+            await _cleanup_media_session()
+        except Exception:
+            pass
         try:
             await _close_socket(code=1011, reason="Lifecycle initialization failed")
         except Exception:
@@ -244,9 +269,16 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
         idle_timeout = float(
             getattr(app_state, "synthetic_idle_timeout", DEFAULT_IDLE_TIMEOUT_SECONDS)
         )
+        drain_timeout = float(
+            getattr(app_state, "synthetic_drain_timeout", DEFAULT_DRAIN_TIMEOUT_SECONDS)
+        )
 
         async def _media_session_worker() -> None:
             nonlocal socket_disconnected
+            assert telephony_adapter is not None
+            assert ai_port is not None
+            assert voice_bridge is not None
+
             call_active = False
             call_started_once = False
             inbound_seq = 0
@@ -297,7 +329,7 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
                         if len(payload) != PCM16LE_FRAME_BYTES:
                             telephony_adapter.record_reject()
                             await _close_socket(
-                                code=1008,
+                                code=1003,
                                 reason=(
                                     f"Invalid audio frame size: expected {PCM16LE_FRAME_BYTES} bytes, "
                                     f"got {len(payload)}"
@@ -344,7 +376,9 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
 
                     elif event_name == EVENT_SESSION_END:
                         call_active = False
-                        telephony_adapter.push_inbound_eof()
+                        telephony_adapter.push_inbound_eof_nowait()
+                        if hasattr(ai_port, "push_eof_nowait"):
+                            ai_port.push_eof_nowait()
                         await _close_socket(code=1000, reason="Session ended by client")
                         break
 
@@ -399,25 +433,70 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
                             )
                             break
 
+                        # 1. Stop new inbound audio acceptance
                         call_active = False
-                        ended_response = {
-                            "event": EVENT_CALL_ENDED,
-                            "call_id": verified_context.call_id,
-                        }
-                        await telephony_adapter.send_control_text(
-                            json.dumps(ended_response, separators=(",", ":"))
-                        )
-                        # Signal clean EOF to the inbound pump
-                        telephony_adapter.push_inbound_eof()
-                        if hasattr(ai_port, "push_eof"):
-                            ai_port.push_eof()
 
-                        # Await clean closure of the bridge with small timeout
+                        # 2-6. Lossless bounded drain sequence
+                        drain_success = False
                         try:
-                            async with asyncio.timeout(2.0):
-                                await voice_bridge.wait_until_closed(propagate_error=False)
+                            # 2. Push clean EOF to telephony inbound queue (FIFO, waits if full)
+                            await telephony_adapter.push_inbound_eof(timeout=drain_timeout)
+
+                            # 3. Wait until the inbound bridge leg has completed (telephony -> AI)
+                            async with asyncio.timeout(drain_timeout):
+                                while not voice_bridge.inbound_completed:
+                                    if voice_bridge.state in (
+                                        VoiceBridgeState.CLOSED,
+                                        VoiceBridgeState.FAILED,
+                                    ):
+                                        break
+                                    await asyncio.sleep(0.005)
+
+                            if voice_bridge.state == VoiceBridgeState.FAILED:
+                                raise VoiceDomainError(
+                                    f"Voice bridge failed during inbound drain: {voice_bridge.error}"
+                                )
+
+                            # 4. Signal EOF to AI port now that all inbound frames have reached AI
+                            if hasattr(ai_port, "push_eof"):
+                                eof_fn = ai_port.push_eof
+                                if asyncio.iscoroutinefunction(eof_fn):
+                                    await eof_fn(timeout=drain_timeout)
+                                else:
+                                    res = eof_fn()
+                                    if asyncio.iscoroutine(res):
+                                        await res
+
+                            # 5-6. Wait for outbound pump to finish emitting all echoed frames
+                            async with asyncio.timeout(drain_timeout):
+                                await voice_bridge.wait_until_closed(propagate_error=True)
+
+                            if voice_bridge.state == VoiceBridgeState.CLOSED:
+                                drain_success = True
+                            else:
+                                raise VoiceDomainError(
+                                    f"Voice bridge ended in state {voice_bridge.state}"
+                                )
+
                         except (TimeoutError, Exception):
-                            pass
+                            drain_success = False
+
+                        if drain_success:
+                            # 7. Send successful terminal acknowledgment
+                            ended_response = {
+                                "event": EVENT_CALL_ENDED,
+                                "call_id": verified_context.call_id,
+                            }
+                            await telephony_adapter.send_control_text(
+                                json.dumps(ended_response, separators=(",", ":")),
+                                allow_when_closed=True,
+                            )
+                            # 8. Server normally closes connection and releases resources
+                            await _close_socket(code=1000, reason="Call ended normally")
+                        else:
+                            # Failed drain: do NOT send call.ended; close with error
+                            await _close_socket(code=1011, reason="Call drain failed or timed out")
+                        break
 
             except asyncio.CancelledError:
                 raise
@@ -430,9 +509,10 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
                     pass
                 raise
             finally:
-                telephony_adapter.push_inbound_eof()
-                if hasattr(ai_port, "push_eof"):
-                    ai_port.push_eof()
+                if telephony_adapter is not None:
+                    telephony_adapter.push_inbound_eof_nowait()
+                if ai_port is not None and hasattr(ai_port, "push_eof_nowait"):
+                    ai_port.push_eof_nowait()
 
         # 10. Start supervised worker and await its termination
         try:

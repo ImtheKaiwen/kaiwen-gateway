@@ -51,7 +51,7 @@ class InvalidAudioFrameSizeError(SyntheticMediaError):
     def __init__(self, actual_size: int, expected_size: int = PCM16LE_FRAME_BYTES) -> None:
         super().__init__(
             f"Invalid audio frame size: expected {expected_size} bytes, got {actual_size}",
-            close_code=1008,
+            close_code=1003,
         )
         self.actual_size = actual_size
         self.expected_size = expected_size

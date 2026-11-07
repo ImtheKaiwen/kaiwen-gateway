@@ -173,13 +173,40 @@ class BoundedFakeAIEchoPort(AIRealtimeMediaPort):
         self._bytes_sent += len(item.payload)
         return item
 
-    def push_eof(self) -> None:
-        """Signal EOF to the outbound pump so receive_frame() returns None."""
-        if not self._is_closed:
-            try:
-                self._output_queue.put_nowait(None)
-            except asyncio.QueueFull:
-                pass
+    async def push_eof(self, *, timeout: float | None = 2.0) -> None:
+        """Signal EOF to the outbound pump, waiting if the output queue is full.
+
+        Guarantees:
+        - FIFO order preserved: EOF is appended after all currently queued echo frames.
+        - Zero frame loss: queued echo frames are preserved.
+        - Bounded wait: fails closed with MediaBackpressureOverflowError on timeout.
+        """
+        if self._is_closed:
+            return
+        try:
+            effective_timeout = timeout if timeout is not None else self._backpressure_timeout
+            if effective_timeout is not None:
+                async with asyncio.timeout(effective_timeout):
+                    await self._output_queue.put(None)
+            else:
+                await self._output_queue.put(None)
+        except TimeoutError as exc:
+            raise MediaBackpressureOverflowError(
+                f"Timed out after {effective_timeout}s waiting to enqueue AI output EOF into full queue"
+            ) from exc
+
+    def push_eof_nowait(self) -> bool:
+        """Attempt to signal EOF immediately without blocking.
+
+        Returns True if EOF was enqueued, False if the queue was full or closed.
+        """
+        if self._is_closed:
+            return False
+        try:
+            self._output_queue.put_nowait(None)
+            return True
+        except asyncio.QueueFull:
+            return False
 
     async def close(self) -> None:
         """Idempotently close the port and wake any pending receivers."""

@@ -149,13 +149,40 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
                 f"after {self._backpressure_timeout}s backpressure timeout"
             ) from exc
 
-    def push_inbound_eof(self) -> None:
-        """Signal clean EOF to the inbound pump."""
-        if not self._is_closed:
-            try:
-                self._inbound_queue.put_nowait(None)
-            except asyncio.QueueFull:
-                pass
+    async def push_inbound_eof(self, *, timeout: float | None = 2.0) -> None:
+        """Signal clean EOF to the inbound pump, waiting if queue is full.
+
+        Guarantees:
+        - FIFO order preserved: EOF is appended after all currently queued frames.
+        - Zero frame loss: no queued frames are dropped or overwritten.
+        - Bounded wait: fails closed with MediaBackpressureOverflowError on timeout.
+        """
+        if self._is_closed:
+            return
+        try:
+            effective_timeout = timeout if timeout is not None else self._backpressure_timeout
+            if effective_timeout is not None:
+                async with asyncio.timeout(effective_timeout):
+                    await self._inbound_queue.put(None)
+            else:
+                await self._inbound_queue.put(None)
+        except TimeoutError as exc:
+            raise MediaBackpressureOverflowError(
+                f"Timed out after {effective_timeout}s waiting to enqueue inbound EOF into full queue"
+            ) from exc
+
+    def push_inbound_eof_nowait(self) -> bool:
+        """Attempt to signal clean EOF immediately without blocking.
+
+        Returns True if EOF was enqueued, False if the queue was full or closed.
+        """
+        if self._is_closed:
+            return False
+        try:
+            self._inbound_queue.put_nowait(None)
+            return True
+        except asyncio.QueueFull:
+            return False
 
     async def receive_frame(self) -> AudioFrame | None:
         """Receive the next audio frame from telephony (called by VoiceBridgeSession inbound pump).
@@ -207,20 +234,21 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
         self._frames_sent += 1
         self._bytes_sent += len(frame.payload)
 
-    async def send_control_text(self, text: str) -> None:
+    async def send_control_text(self, text: str, *, allow_when_closed: bool = False) -> None:
         """Send a JSON control message over WebSocket synchronized with media writes.
 
         Args:
             text: UTF-8 JSON text string.
+            allow_when_closed: If True, allows sending control message even after media port is closed.
 
         Raises:
-            MediaPortClosedError: If the port is closed.
+            MediaPortClosedError: If the port is closed and allow_when_closed is False, or write fails.
         """
-        if self._is_closed:
+        if self._is_closed and not allow_when_closed:
             raise MediaPortClosedError("WebSocketTelephonyMediaAdapter is closed")
 
         async with self._send_lock:
-            if self._is_closed:
+            if self._is_closed and not allow_when_closed:
                 raise MediaPortClosedError("WebSocketTelephonyMediaAdapter is closed")
             try:
                 await self._websocket.send_text(text)

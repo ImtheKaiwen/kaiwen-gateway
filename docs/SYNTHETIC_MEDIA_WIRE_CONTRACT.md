@@ -35,7 +35,8 @@ This specification defines the experimental synthetic binary media WebSocket con
 | **Bytes per Frame** | **640 bytes** | 320 samples * 2 bytes/sample |
 | **Framing** | WebSocket Binary | Direct binary payload |
 
-Any binary WebSocket frame with `len(payload) != 640` is rejected with close code `1008` (Policy Violation) or `1003` (Unsupported Data).
+Any binary WebSocket frame with `len(payload) != 640` is rejected with close code `1003` (`WS_1003_UNSUPPORTED_DATA`).
+Default bounded queue capacity is 8 frames (160 ms of audio at 20 ms/frame) across inbound adapter, Fake AI echo port, and bridge session queues.
 
 ---
 
@@ -140,7 +141,7 @@ When speech streaming ends, the client issues a clean termination:
 }
 ```
 
-The server flushes pending outbound frames, marks the media stream as EOF, and initiates clean close (code `1000`).
+The server halts new inbound audio ingestion, executes a bounded lossless drain of all in-flight frames through the Fake AI echo port to outbound telephony, transmits `call.ended` upon successful drain, and terminates the connection with clean close code `1000`. If drain fails or times out, `call.ended` is not transmitted and the server terminates with close code `1011`.
 
 ---
 
@@ -158,10 +159,11 @@ stateDiagram-v2
     Active --> Streaming: Bidirectional PCM16LE binary frames
     Streaming --> Active: Audio flow
     
-    Active --> Terminating: call.end received -> call.ended
-    Terminating --> Closed: Close code 1000, Capacity Released
+    Active --> Draining: call.end received -> lossless bounded drain
+    Draining --> Closed: call.ended -> Close code 1000, Capacity Released
+    Draining --> Closed: Drain timeout/error -> Close code 1011, Capacity Released
     
-    Streaming --> Closed: Error / Frame Size Mismatch / Disconnect
+    Streaming --> Closed: Error / Frame Size Mismatch (1003) / Disconnect
     Closed --> [*]
 ```
 
@@ -179,8 +181,10 @@ stateDiagram-v2
 | Admission limit exceeded | `1008` | `Admission rejected (capacity exceeded or draining)` |
 | Call exclusivity collision | `1008` | `Call session already active` |
 | Binary before `call.start` | `1008` | `Binary media received before call.start` |
-| Invalid binary frame size | `1008` | `Invalid audio frame size: expected 640 bytes` |
+| Invalid binary frame size | `1003` | `Invalid audio frame size: expected 640 bytes, got <len>` |
 | Malformed JSON control | `1007` | `Malformed control message` |
 | Call ID mismatch in control | `1008` | `Call ID in payload does not match connection context` |
 | Session idle timeout | `1000` | `Session idle timeout` |
+| Lifecycle init failure | `1011` | `Lifecycle initialization failed` |
+| Drain failure or timeout | `1011` | `Call drain failed or timed out` |
 

@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-11-07
 - Decision owners: Maintainer review pending
-- Related requirements: FR-VOICE-01, FR-VOICE-02, SEC-01, SEC-02, NFR-RES-01, NFR-LAT-01
+- Related requirements: FR-VOICE-001, FR-VOICE-002, FR-VOICE-003, FR-VOICE-005, FR-VOICE-008, SEC-001, SEC-002, SEC-003, SEC-004, NFR-PERF-001, NFR-PERF-002, NFR-REL-001
 - Supersedes: None
 
 ## Context and problem
@@ -31,23 +31,36 @@ For Milestone M4.2A, the Gateway requires an end-to-end vertical slice connectin
    - Frame Duration: 20 milliseconds per audio frame.
    - Frame Size: Exactly 640 bytes per binary WebSocket message (16,000 samples/sec * 2 bytes/sample * 0.020 sec = 640 bytes).
    - Zero JSON or Base64 encoding: Audio payloads are transported directly as native WebSocket binary messages.
-   - Binary frame size is strictly validated: frames not matching 640 bytes are rejected with close code 1008/1003.
+   - Binary frame size is strictly validated: frames not matching 640 bytes are rejected with close code 1003 (`WS_1003_UNSUPPORTED_DATA`).
+   - Bounded Buffer Capacity: Default queue capacity is 8 frames (160 ms of audio at 20 ms/frame) across `WebSocketTelephonyMediaAdapter`, `BoundedFakeAIEchoPort`, and `VoiceBridgeSession`.
 
 3. **Control and Media Separation over a Single Ingress Read-Loop:**
    - A single ASGI WebSocket reader task executes `websocket.receive()`.
    - Text messages are parsed and validated as JSON control events (`call.start`, `call.end`, `session.ping`, `session.end`).
    - Binary messages are validated as PCM16LE audio frames and dispatched to the inbound queue of the `WebSocketTelephonyMediaAdapter`.
-   - Binary audio received prior to `call.start` or after `call.end` is rejected immediately.
+   - Binary audio received prior to `call.start` is rejected immediately with close code 1008 (`WS_1008_POLICY_VIOLATION`).
    - Outbound WebSocket writes (text control responses and binary media frames) are synchronized under an `asyncio.Lock` to guarantee frame integrity and avoid interleaved ASGI write corruption.
 
-4. **Security, Admission, and Identity Invariants:**
+4. **Terminal Call-End Semantics & Lossless Drain:**
+   - `call.end` halts new inbound audio ingestion immediately.
+   - Bounded lossless drain sequence:
+     1. Clean EOF is pushed to telephony adapter inbound queue (preserving FIFO ordering without frame loss).
+     2. Inbound bridge leg finishes forwarding all accepted frames to AI.
+     3. Clean EOF is pushed to AI port.
+     4. Outbound bridge leg drains all echoed frames to telephony adapter over WebSocket.
+   - Upon successful drain, server transmits `call.ended` and normally closes the WebSocket connection with code 1000 (`WS_1000_NORMAL_CLOSURE`).
+   - If drain fails or times out, `call.ended` is not sent and server terminates connection with code 1011 (`WS_1011_INTERNAL_ERROR`).
+   - Server-initiated closure immediately cleans up resources and releases Core admission leases without requiring separate client-side socket teardown.
+
+5. **Security, Admission, and Identity Invariants:**
    - Enforces full M3 authentication: Bearer token HMAC signature verification, nonce replay protection, timestamp expiration.
    - Requires verified permission scope `voice.stream`.
    - Enforces Core admission limits (global concurrency and per-tenant concurrency) via `InstanceDrainCoordinator` before allocating any media session or AI buffer.
    - Rejects unauthenticated or over-capacity connections prior to WebSocket upgrade acceptance.
    - Call exclusivity is registered and owned by the connection supervisor.
+   - Loopback boundary: `enable_synthetic_media=True` activates route handling; network loopback binding (`127.0.0.1`) is enforced at the server socket layer. Public network exposure is not supported.
 
-5. **Bounded Fake AI Echo Port:**
+6. **Bounded Fake AI Echo Port:**
    - `BoundedFakeAIEchoPort` implements `AIRealtimeMediaPort` with bounded FIFO queues and backpressure.
    - Operates per-call with zero shared global state and zero unbounded list accumulation.
    - Produces deterministic echo responses matching inbound frame byte contents for verifiable round-trip assertions.
