@@ -75,6 +75,7 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
         self._allowed_outbound_turn: int = 1
         self._outbound_turn_gate: asyncio.Event = asyncio.Event()
         self._outbound_turn_gate.set()
+        self._turn_events: dict[int, asyncio.Event] = {}
 
         # Observable telemetry counters
         self._frames_received: int = 0
@@ -134,6 +135,10 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
     def release_outbound_barrier(self, allowed_turn: int) -> None:
         """Release the outbound turn barrier up to allowed_turn."""
         self._allowed_outbound_turn = max(self._allowed_outbound_turn, allowed_turn)
+        to_notify = [t for t in self._turn_events if t <= self._allowed_outbound_turn]
+        for t in to_notify:
+            ev = self._turn_events.pop(t)
+            ev.set()
         self._outbound_turn_gate.set()
 
     async def push_inbound_frame(self, frame: AudioFrame) -> None:
@@ -238,7 +243,11 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
 
         if frame.turn_id is not None and frame.turn_id > self._allowed_outbound_turn:
             while not self._is_closed and frame.turn_id > self._allowed_outbound_turn:
-                await self._outbound_turn_gate.wait()
+                event = self._turn_events.get(frame.turn_id)
+                if event is None or event.is_set():
+                    event = asyncio.Event()
+                    self._turn_events[frame.turn_id] = event
+                await event.wait()
 
         if self._is_closed:
             raise MediaPortClosedError("WebSocketTelephonyMediaAdapter is closed")
@@ -283,6 +292,9 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
             self._is_closed = True
             self._close_event.set()
             self._outbound_turn_gate.set()
+            for ev in self._turn_events.values():
+                ev.set()
+            self._turn_events.clear()
             try:
                 self._inbound_queue.put_nowait(_CLOSE_SENTINEL)
             except asyncio.QueueFull:

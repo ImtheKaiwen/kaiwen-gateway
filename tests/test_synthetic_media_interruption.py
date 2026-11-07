@@ -269,6 +269,134 @@ def test_gate_c_bounded_interruptible_ai_echo_port() -> None:
     asyncio.run(_test())
 
 
+def test_gate_b_bounded_interruption_history_and_high_water() -> None:
+    """GATE B: Bounded interruption state and high-water mark verification.
+    1. Cancel Turn 1.
+    2. Late Turn 1 audio is discarded.
+    3. Turn 2 audio is accepted.
+    4. Cancel Turn 2.
+    5. Late Turn 1 and Turn 2 audio is discarded.
+    6. Turn 3 audio is accepted.
+    7. Repeat many sequential cancellations.
+    8. Verify retained cancellation state remains bounded.
+    9. Verify membership check is O(1) and suppresses all past turns.
+    10. Verify out-of-order cancellation policy.
+    """
+
+    async def _test() -> None:
+        port = BoundedInterruptibleFakeAIEchoPort(queue_capacity=8)
+
+        # 1. Cancel Turn 1
+        await port.cancel_turn(1)
+        assert port.cancelled_turn_high_water == 1
+
+        # 2. Late Turn 1 audio is discarded
+        f1_late = _make_pcm16le_frame(0x11, sequence=1, turn_id=1)
+        await port.send_frame(f1_late)
+        assert port.queue_depth == 0
+
+        # 3. Turn 2 audio is accepted
+        f2 = _make_pcm16le_frame(0x22, sequence=2, turn_id=2)
+        await port.send_frame(f2)
+        assert port.queue_depth == 1
+        rec2 = await port.receive_frame()
+        assert rec2 is not None and rec2.turn_id == 2
+
+        # 4. Cancel Turn 2
+        await port.cancel_turn(2)
+        assert port.cancelled_turn_high_water == 2
+
+        # 5. Late Turn 1 and Turn 2 audio is discarded
+        await port.send_frame(f1_late)
+        await port.send_frame(f2)
+        assert port.queue_depth == 0
+
+        # 6. Turn 3 audio is accepted
+        f3 = _make_pcm16le_frame(0x33, sequence=3, turn_id=3)
+        await port.send_frame(f3)
+        assert port.queue_depth == 1
+        rec3 = await port.receive_frame()
+        assert rec3 is not None and rec3.turn_id == 3
+
+        # 7. Repeat many sequential cancellations
+        for t in range(4, 500):
+            await port.cancel_turn(t)
+
+        # 8. Verify retained cancellation state remains bounded
+        assert port.cancelled_turn_high_water == 499
+        assert len(port.cancelled_turns) <= 64  # deque maxlen=64 bounds memory
+
+        # 9. Verify membership check is O(1) and suppresses all past turns
+        for check_turn in (1, 2, 50, 499):
+            fc = _make_pcm16le_frame(0xAA, sequence=check_turn, turn_id=check_turn)
+            await port.send_frame(fc)
+            assert port.queue_depth == 0
+
+        # Turn 500 is uncancelled future turn and accepted
+        f500 = _make_pcm16le_frame(0x55, sequence=500, turn_id=500)
+        await port.send_frame(f500)
+        assert port.queue_depth == 1
+        rec500 = await port.receive_frame()
+        assert rec500 is not None and rec500.turn_id == 500
+
+        # 10. Out-of-order cancellation policy:
+        # Calling cancel_turn(450) when high-water is 499 is idempotent (already suppressed)
+        await port.cancel_turn(450)
+        assert port.cancelled_turn_high_water == 499
+        f450 = _make_pcm16le_frame(0x45, sequence=450, turn_id=450)
+        await port.send_frame(f450)
+        assert port.queue_depth == 0
+
+        await port.close()
+
+    asyncio.run(_test())
+
+
+def test_gate_b_blocked_producer_cancellation_purged() -> None:
+    """GATE B: Producer blocked in send_frame() while cancellation occurs.
+    Verifies that after the producer is released, no cancelled-turn audio escapes
+    the complete Gateway path.
+    """
+
+    async def _test() -> None:
+        port = BoundedInterruptibleFakeAIEchoPort(queue_capacity=2, backpressure_timeout=1.0)
+
+        # Fill queue to capacity with Turn 1 frames
+        f1_a = _make_pcm16le_frame(0x11, sequence=1, turn_id=1)
+        f1_b = _make_pcm16le_frame(0x12, sequence=2, turn_id=1)
+        await port.send_frame(f1_a)
+        await port.send_frame(f1_b)
+        assert port.queue_depth == 2
+
+        # Producer task tries to send 3rd frame of Turn 1 and blocks
+        f1_c = _make_pcm16le_frame(0x13, sequence=3, turn_id=1)
+        producer_task = asyncio.create_task(port.send_frame(f1_c))
+
+        await asyncio.sleep(0.01)
+        assert not producer_task.done()
+
+        # Cancellation occurs: cancel Turn 1
+        await port.cancel_turn(1)
+
+        # Wait for producer task to finish putting (unblocked by queue purge)
+        await asyncio.wait_for(producer_task, timeout=0.5)
+
+        # Now send Turn 2 frame
+        f2 = _make_pcm16le_frame(0x21, sequence=4, turn_id=2)
+        await port.send_frame(f2)
+
+        # Receive from port: Turn 1 frames must be completely suppressed!
+        # The first frame received MUST be Turn 2!
+        received = await port.receive_frame()
+        assert received is not None
+        assert received.turn_id == 2
+        assert received.payload == f2.payload
+
+        await port.close()
+
+    asyncio.run(_test())
+
+
 # =============================================================================
 # GATE D: Outbound Turn Ordering Barrier Unit Test
 # =============================================================================
@@ -325,6 +453,168 @@ def test_gate_d_telephony_adapter_outbound_barrier() -> None:
         # Now Turn 2 frame is sent AFTER call.interrupted
         assert len(sent_items) == 3
         assert sent_items[2] == f2.payload
+
+        await adapter.close()
+
+    asyncio.run(_test())
+
+
+def test_gate_a_non_spinning_outbound_gate() -> None:
+    """GATE A: Verify outbound gate does not spin when allowed turn is 2,
+    gate event is set, and a frame belongs to Turn 3.
+    Verifies that:
+    - send_frame suspends cooperatively rather than spinning.
+    - Another independent event loop task continues running without CPU starvation.
+    - Controlled release_outbound_barrier(3) completes the send.
+    """
+
+    async def _test() -> None:
+        sent_items: list[bytes] = []
+
+        class FakeWS:
+            async def send_bytes(self, data: bytes) -> None:
+                sent_items.append(data)
+
+            async def send_text(self, text: str) -> None:
+                pass
+
+        context = VerifiedConnectionContext(
+            provider_id="prov_test",
+            tenant_id="tenant_test",
+            connection_id="conn_test",
+            call_id="call_test",
+            allowed_scopes=frozenset({"voice.stream"}),
+        )
+
+        adapter = WebSocketTelephonyMediaAdapter(websocket=FakeWS(), context=context)
+
+        # Pre-condition: allowed turn is 2, gate event is set
+        adapter.release_outbound_barrier(2)
+        assert adapter._allowed_outbound_turn == 2
+        assert adapter._outbound_turn_gate.is_set()
+
+        # Task 1: Frame belongs to Turn 3
+        f3 = _make_pcm16le_frame(0x33, sequence=1, turn_id=3)
+        send_task = asyncio.create_task(adapter.send_frame(f3))
+
+        # Task 2: Independent event loop task that increments a counter
+        counter = 0
+        for _ in range(10):
+            await asyncio.sleep(0.005)
+            counter += 1
+
+        # Must have completed all 10 ticks (no loop starvation / no spinning)
+        assert counter == 10
+        assert not send_task.done()
+        assert len(sent_items) == 0
+
+        # Now controlled release for Turn 3
+        adapter.release_outbound_barrier(3)
+        await asyncio.wait_for(send_task, timeout=1.0)
+        assert len(sent_items) == 1
+        assert sent_items[0] == f3.payload
+
+        await adapter.close()
+
+    asyncio.run(_test())
+
+
+def test_gate_a_non_spinning_outbound_gate_concurrent_close() -> None:
+    """GATE A: When a frame waits for a future turn and the adapter is closed,
+    the pending send terminates immediately with MediaPortClosedError and no orphan tasks remain.
+    """
+
+    async def _test() -> None:
+        sent_items: list[bytes] = []
+
+        class FakeWS:
+            async def send_bytes(self, data: bytes) -> None:
+                sent_items.append(data)
+
+            async def send_text(self, text: str) -> None:
+                pass
+
+        context = VerifiedConnectionContext(
+            provider_id="prov_test",
+            tenant_id="tenant_test",
+            connection_id="conn_test",
+            call_id="call_test",
+            allowed_scopes=frozenset({"voice.stream"}),
+        )
+
+        adapter = WebSocketTelephonyMediaAdapter(websocket=FakeWS(), context=context)
+        adapter.release_outbound_barrier(2)
+
+        f3 = _make_pcm16le_frame(0x33, sequence=1, turn_id=3)
+        send_task = asyncio.create_task(adapter.send_frame(f3))
+
+        await asyncio.sleep(0.01)
+        assert not send_task.done()
+
+        # Adapter closes concurrently
+        await adapter.close()
+
+        with pytest.raises(MediaPortClosedError):
+            await asyncio.wait_for(send_task, timeout=0.5)
+
+        assert len(sent_items) == 0
+        assert len(adapter._turn_events) == 0
+
+    asyncio.run(_test())
+
+
+def test_gate_a_repeated_interruptions_ordering() -> None:
+    """GATE A: Turn 1 -> Turn 2 -> Turn 3 -> Turn 4 repeated interruptions.
+    Verifies each control response strictly precedes its new-turn binary output.
+    """
+
+    async def _test() -> None:
+        sent_items: list[tuple[str, Any]] = []
+
+        class FakeWS:
+            async def send_bytes(self, data: bytes) -> None:
+                sent_items.append(("bytes", data))
+
+            async def send_text(self, text: str) -> None:
+                sent_items.append(("text", text))
+
+        context = VerifiedConnectionContext(
+            provider_id="prov_test",
+            tenant_id="tenant_test",
+            connection_id="conn_test",
+            call_id="call_test",
+            allowed_scopes=frozenset({"voice.stream"}),
+        )
+
+        adapter = WebSocketTelephonyMediaAdapter(websocket=FakeWS(), context=context)
+
+        for current_turn in range(1, 4):
+            # Send current turn frame
+            fc = _make_pcm16le_frame(current_turn, sequence=current_turn, turn_id=current_turn)
+            await adapter.send_frame(fc)
+
+            # Interrupt current turn -> advance to next_turn
+            next_turn = current_turn + 1
+            adapter.hold_outbound_barrier()
+
+            # Attempt to send next turn audio frame (should be blocked by gate)
+            fn = _make_pcm16le_frame(next_turn, sequence=next_turn, turn_id=next_turn)
+            send_next = asyncio.create_task(adapter.send_frame(fn))
+
+            await asyncio.sleep(0.01)
+            assert not send_next.done()
+
+            # Send call.interrupted response
+            msg = json.dumps({"event": EVENT_CALL_INTERRUPTED, "new_turn_id": next_turn})
+            await adapter.send_control_text(msg)
+
+            # Release barrier
+            adapter.release_outbound_barrier(next_turn)
+            await asyncio.wait_for(send_next, timeout=1.0)
+
+            # Verify order: msg is immediately before fn
+            assert sent_items[-2] == ("text", msg)
+            assert sent_items[-1] == ("bytes", fn.payload)
 
         await adapter.close()
 
