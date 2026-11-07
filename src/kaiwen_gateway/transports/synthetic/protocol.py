@@ -37,6 +37,15 @@ SUPPORTED_CLIENT_EVENTS: Final[frozenset[str]] = frozenset(
     }
 )
 
+SUPPORTED_SERVER_EVENTS: Final[frozenset[str]] = frozenset(
+    {
+        EVENT_SESSION_READY,
+        EVENT_SESSION_PONG,
+        EVENT_CALL_STARTED,
+        EVENT_CALL_ENDED,
+    }
+)
+
 
 class SyntheticProtocolError(Exception):
     """Base exception for synthetic control protocol framing errors."""
@@ -89,7 +98,10 @@ def _strict_parse_float(value_str: str) -> float:
     return val
 
 
-def parse_and_validate_client_frame(raw_text: str) -> dict[str, Any]:
+def parse_and_validate_client_frame(
+    raw_text: str,
+    allowed_events: frozenset[str] | None = None,
+) -> dict[str, Any]:
     """Parse and validate an inbound client control frame against v1 synthetic protocol rules.
 
     Raises:
@@ -118,7 +130,8 @@ def parse_and_validate_client_frame(raw_text: str) -> dict[str, Any]:
     if not isinstance(event, str) or not event:
         raise InvalidMessageFormatError("Frame payload missing non-empty 'event' string")
 
-    if event not in SUPPORTED_CLIENT_EVENTS:
+    effective_events = allowed_events if allowed_events is not None else SUPPORTED_CLIENT_EVENTS
+    if event not in effective_events:
         raise UnsupportedEventError(event)
 
     if event == EVENT_SESSION_PING and "seq" in payload:

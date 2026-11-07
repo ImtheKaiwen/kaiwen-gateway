@@ -35,6 +35,8 @@ from kaiwen_gateway.server import create_gateway_app
 from kaiwen_gateway.transports.synthetic import (
     EVENT_CALL_END,
     EVENT_CALL_ENDED,
+    EVENT_CALL_INTERRUPT,
+    EVENT_CALL_INTERRUPTED,
     EVENT_CALL_START,
     EVENT_CALL_STARTED,
     EVENT_SESSION_READY,
@@ -56,6 +58,7 @@ class SyntheticMediaSmokeResult:
     bytes_received: int
     byte_integrity_verified: bool
     sequence_ordering_verified: bool
+    interruption_verified: bool
     active_calls_recovered: bool
     active_leases_recovered: bool
     duration_seconds: float
@@ -74,6 +77,7 @@ async def run_synthetic_media_smoke(
     frame_count: int = 25,
     tenant_id: str = "tenant_smoke_media",
     call_id: str = "call_smoke_media_001",
+    include_interruption: bool = False,
     verbose: bool = True,
 ) -> SyntheticMediaSmokeResult:
     """Run an end-to-end binary media round-trip over real loopback WebSocket."""
@@ -227,7 +231,46 @@ async def run_synthetic_media_smoke(
                         print(f"[SMOKE] Sequence ordering mismatch at index {idx}")
                     break
 
-            # 7. End call cleanly via call.end
+            # 7. Optionally test in-flight turn interruption: interrupt Turn 1 -> Turn 2
+            interruption_verified = True
+            if include_interruption:
+                interruption_verified = False
+                interrupt_cmd = {
+                    "event": EVENT_CALL_INTERRUPT,
+                    "call_id": call_id,
+                    "turn_id": 1,
+                    "request_id": "smoke-req-turn1",
+                }
+                await ws.send(json.dumps(interrupt_cmd))
+                interrupted_raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                assert isinstance(interrupted_raw, str)
+                interrupted_json = json.loads(interrupted_raw)
+                assert interrupted_json["event"] == EVENT_CALL_INTERRUPTED
+                assert interrupted_json["interrupted_turn_id"] == 1
+                assert interrupted_json["new_turn_id"] == 2
+                assert interrupted_json["playback_confirmed"] is False
+                interruption_verified = True
+                if verbose:
+                    print(
+                        f"[SMOKE] Turn interrupted: received {interrupted_json['event']} "
+                        f"(new_turn_id={interrupted_json['new_turn_id']})"
+                    )
+
+                # Stream and verify Turn 2 audio frame
+                turn2_payload = b"PCM_T2_0000_" + b"\x55" * (PCM16LE_FRAME_BYTES - 12)
+                await ws.send(turn2_payload)
+                frames_sent += 1
+                bytes_sent += len(turn2_payload)
+
+                turn2_echoed = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                assert isinstance(turn2_echoed, bytes)
+                assert turn2_echoed == turn2_payload
+                frames_received += 1
+                bytes_received += len(turn2_echoed)
+                if verbose:
+                    print("[SMOKE] Streamed and verified Turn 2 audio frame")
+
+            # 8. End call cleanly via call.end
             end_cmd = {"event": EVENT_CALL_END, "call_id": call_id}
             await ws.send(json.dumps(end_cmd))
 
@@ -248,7 +291,7 @@ async def run_synthetic_media_smoke(
         except (TimeoutError, asyncio.CancelledError):
             pass
 
-    # 8. Verify capacity recovery
+    # 9. Verify capacity recovery
     await asyncio.sleep(0.05)
     snapshot = admission.snapshot()
     active_leases_recovered = (
@@ -257,11 +300,13 @@ async def run_synthetic_media_smoke(
     active_calls_recovered = (tenant_id, call_id) not in auth_bridge._active_calls
 
     duration = time.perf_counter() - start_time
+    expected_frames = (frame_count + 1) if include_interruption else frame_count
     success = (
-        frames_sent == frame_count
-        and frames_received == frame_count
+        frames_sent == expected_frames
+        and frames_received == expected_frames
         and byte_integrity_verified
         and sequence_ordering_verified
+        and interruption_verified
         and active_leases_recovered
         and active_calls_recovered
     )
@@ -280,6 +325,7 @@ async def run_synthetic_media_smoke(
         bytes_received=bytes_received,
         byte_integrity_verified=byte_integrity_verified,
         sequence_ordering_verified=sequence_ordering_verified,
+        interruption_verified=interruption_verified,
         active_calls_recovered=active_calls_recovered,
         active_leases_recovered=active_leases_recovered,
         duration_seconds=duration,
@@ -288,7 +334,9 @@ async def run_synthetic_media_smoke(
 
 
 if __name__ == "__main__":
-    result = asyncio.run(run_synthetic_media_smoke(frame_count=25, verbose=True))
+    result = asyncio.run(
+        run_synthetic_media_smoke(frame_count=25, include_interruption=True, verbose=True)
+    )
     if not result.success:
         print("[SMOKE] FAILED verification checks!", file=sys.stderr)
         sys.exit(1)

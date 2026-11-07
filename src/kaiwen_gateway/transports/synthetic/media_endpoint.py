@@ -17,18 +17,26 @@ from kaiwen_gateway.core.exceptions import (
     InstanceDrainingError,
 )
 from kaiwen_gateway.core.lifecycle import ConnectionState, ConnectionSupervisor, TerminalReason
-from kaiwen_gateway.modules.voice.adapters.fake_ai import BoundedFakeAIEchoPort
+from kaiwen_gateway.modules.voice.adapters.fake_ai import BoundedInterruptibleFakeAIEchoPort
 from kaiwen_gateway.modules.voice.bridge import VoiceBridgeSession, VoiceBridgeState
-from kaiwen_gateway.modules.voice.domain import AudioFormat, AudioFrame, VoiceDomainError
+from kaiwen_gateway.modules.voice.domain import (
+    AudioFormat,
+    AudioFrame,
+    UnsupportedInterruptionCapabilityError,
+    VoiceDomainError,
+)
 from kaiwen_gateway.modules.voice.ports import AIRealtimeMediaPort
 from kaiwen_gateway.transports.synthetic.auth import SyntheticAuthBridge
 from kaiwen_gateway.transports.synthetic.media_adapter import WebSocketTelephonyMediaAdapter
 from kaiwen_gateway.transports.synthetic.media_protocol import (
+    EVENT_CALL_INTERRUPT,
+    EVENT_CALL_INTERRUPTED,
     PCM16LE_CHANNELS,
     PCM16LE_FRAME_BYTES,
     PCM16LE_FRAME_MS,
     PCM16LE_SAMPLE_RATE,
     SYNTHETIC_MEDIA_PROTOCOL_VERSION,
+    parse_and_validate_media_control_frame,
 )
 from kaiwen_gateway.transports.synthetic.protocol import (
     EVENT_CALL_END,
@@ -40,7 +48,6 @@ from kaiwen_gateway.transports.synthetic.protocol import (
     EVENT_SESSION_PONG,
     EVENT_SESSION_READY,
     SyntheticProtocolError,
-    parse_and_validate_client_frame,
 )
 
 try:
@@ -260,7 +267,11 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
         ai_port_factory: Callable[[], AIRealtimeMediaPort] | None = getattr(
             app_state, "ai_media_port_factory", None
         )
-        ai_port = ai_port_factory() if ai_port_factory is not None else BoundedFakeAIEchoPort()
+        ai_port = (
+            ai_port_factory()
+            if ai_port_factory is not None
+            else BoundedInterruptibleFakeAIEchoPort()
+        )
         voice_bridge = VoiceBridgeSession(
             call_id=verified_context.call_id,
             tenant_id=verified_context.tenant_id,
@@ -326,6 +337,7 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
             call_active = False
             call_started_once = False
             inbound_seq = 0
+            ingress_turn_id = 1
             receive_task: asyncio.Task[Any] | None = None
             bridge_waiter_task: asyncio.Task[None] | None = None
 
@@ -440,6 +452,7 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
                             channels=PCM16LE_CHANNELS,
                             sequence=inbound_seq,
                             timestamp_ms=float(inbound_seq * PCM16LE_FRAME_MS),
+                            turn_id=ingress_turn_id,
                         )
                         inbound_seq += 1
 
@@ -453,7 +466,7 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
                         continue
 
                     try:
-                        ctrl_payload = parse_and_validate_client_frame(text_data)
+                        ctrl_payload = parse_and_validate_media_control_frame(text_data)
                     except SyntheticProtocolError as proto_err:
                         telephony_adapter.record_reject()
                         await _close_socket(code=proto_err.close_code, reason=str(proto_err))
@@ -518,6 +531,115 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
                         await telephony_adapter.send_control_text(
                             json.dumps(started_response, separators=(",", ":"))
                         )
+
+                    elif event_name == EVENT_CALL_INTERRUPT:
+                        if not call_active:
+                            telephony_adapter.record_reject()
+                            await _close_socket(
+                                code=1008,
+                                reason="call.interrupt received but call is not active",
+                            )
+                            break
+
+                        payload_call_id = ctrl_payload.get("call_id")
+                        if payload_call_id != verified_context.call_id:
+                            telephony_adapter.record_reject()
+                            await _close_socket(
+                                code=1008,
+                                reason="Call ID in payload does not match connection context",
+                            )
+                            break
+
+                        target_turn_id: int = ctrl_payload["turn_id"]
+
+                        # Future turn rejection
+                        if target_turn_id > voice_bridge.current_turn_id:
+                            telephony_adapter.record_reject()
+                            await _close_socket(
+                                code=1008,
+                                reason=(
+                                    f"Cannot interrupt future turn {target_turn_id} "
+                                    f"(current turn is {voice_bridge.current_turn_id})"
+                                ),
+                            )
+                            break
+
+                        # Stale / superseded turn: return idempotent response without advancing turn
+                        if target_turn_id < voice_bridge.current_turn_id:
+                            stale_response: dict[str, Any] = {
+                                "event": EVENT_CALL_INTERRUPTED,
+                                "call_id": verified_context.call_id,
+                                "interrupted_turn_id": target_turn_id,
+                                "new_turn_id": voice_bridge.current_turn_id,
+                                "locally_discarded_frames": 0,
+                                "stale_frames_suppressed": voice_bridge.stale_frames_suppressed,
+                                "future_generation_cancelled": False,
+                                "transport_pending_cancelled": False,
+                                "provider_playback_cleared": False,
+                                "playback_confirmed": False,
+                            }
+                            if "request_id" in ctrl_payload:
+                                stale_response["request_id"] = ctrl_payload["request_id"]
+                            await telephony_adapter.send_control_text(
+                                json.dumps(stale_response, separators=(",", ":"))
+                            )
+                            continue
+
+                        # Current active turn interruption: engage outbound ordering barrier
+                        telephony_adapter.hold_outbound_barrier()
+                        outcome = None
+                        try:
+                            outcome = await voice_bridge.interrupt(
+                                turn_id=target_turn_id,
+                                require_future_generation_cancellation=True,
+                                timeout=2.0,
+                            )
+                        except UnsupportedInterruptionCapabilityError:
+                            telephony_adapter.record_reject()
+                            await _close_socket(
+                                code=1011,
+                                reason="Upstream media interruption failed",
+                            )
+                            break
+                        except Exception:
+                            telephony_adapter.record_reject()
+                            await _close_socket(
+                                code=1011,
+                                reason="Upstream media interruption failed",
+                            )
+                            break
+                        finally:
+                            if outcome is None:
+                                telephony_adapter.release_outbound_barrier(
+                                    voice_bridge.current_turn_id
+                                )
+
+                        # Update active ingress turn tracking
+                        ingress_turn_id = outcome.new_turn_id
+
+                        # Emit call.interrupted response BEFORE lifting outbound barrier
+                        interrupted_response: dict[str, Any] = {
+                            "event": EVENT_CALL_INTERRUPTED,
+                            "call_id": verified_context.call_id,
+                            "interrupted_turn_id": outcome.interrupted_turn_id,
+                            "new_turn_id": outcome.new_turn_id,
+                            "locally_discarded_frames": outcome.locally_discarded_frames,
+                            "stale_frames_suppressed": outcome.stale_frames_suppressed,
+                            "future_generation_cancelled": outcome.future_generation_cancelled,
+                            "transport_pending_cancelled": outcome.transport_pending_cancelled,
+                            "provider_playback_cleared": outcome.provider_playback_cleared,
+                            "playback_confirmed": False,
+                        }
+                        if "request_id" in ctrl_payload:
+                            interrupted_response["request_id"] = ctrl_payload["request_id"]
+
+                        await telephony_adapter.send_control_text(
+                            json.dumps(interrupted_response, separators=(",", ":"))
+                        )
+
+                        # Release barrier so newly generated frames may be transmitted
+                        telephony_adapter.release_outbound_barrier(outcome.new_turn_id)
+                        continue
 
                     elif event_name == EVENT_CALL_END:
                         if not call_active:

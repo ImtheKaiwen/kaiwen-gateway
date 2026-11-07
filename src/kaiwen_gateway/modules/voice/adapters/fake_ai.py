@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from collections import deque
 from typing import Final
 
 from kaiwen_gateway.modules.voice.adapters.fake import FakeAIMediaAdapter
@@ -31,6 +32,7 @@ from kaiwen_gateway.modules.voice.ports import (
 
 __all__ = [
     "BoundedFakeAIEchoPort",
+    "BoundedInterruptibleFakeAIEchoPort",
     "InterruptibleFakeAIPort",
 ]
 
@@ -227,6 +229,113 @@ class BoundedFakeAIEchoPort(AIRealtimeMediaPort):
                 pass
 
 
+class BoundedInterruptibleFakeAIEchoPort(BoundedFakeAIEchoPort, InterruptibleAIPort):
+    """Bounded, deterministic echo port implementing both AIRealtimeMediaPort and InterruptibleAIPort.
+
+    Combines the bounded queue and backpressure semantics of BoundedFakeAIEchoPort
+    with turn cancellation and interruption capabilities for media endpoints.
+    """
+
+    def __init__(
+        self,
+        *,
+        queue_capacity: int = 8,
+        backpressure_timeout: float | None = 2.0,
+        capabilities: InterruptionCapabilities | None = None,
+        simulate_cancellation_error: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            queue_capacity=queue_capacity,
+            backpressure_timeout=backpressure_timeout,
+        )
+        self._capabilities: Final[InterruptionCapabilities] = (
+            capabilities
+            if capabilities is not None
+            else InterruptionCapabilities(
+                can_cancel_future_generation=True,
+                can_discard_local_output=True,
+            )
+        )
+        self._simulate_cancellation_error: Exception | None = simulate_cancellation_error
+        self._cancelled_high_water: int = 0
+        self._recent_cancelled_turns: deque[int] = deque(maxlen=64)
+
+    @property
+    def interruption_capabilities(self) -> InterruptionCapabilities:
+        """Return declared interruption capabilities for this AI port."""
+        return self._capabilities
+
+    @property
+    def cancelled_turns(self) -> list[int]:
+        """List of recent turn IDs that have been cancelled via cancel_turn (bounded)."""
+        return list(self._recent_cancelled_turns)
+
+    @property
+    def cancelled_turn_high_water(self) -> int:
+        """Monotonic high-water mark of cancelled turns."""
+        return self._cancelled_high_water
+
+    async def cancel_turn(self, turn_id: int) -> None:
+        """Cancel future generation for the specified turn and purge unconsumed echo frames."""
+        if self._is_closed:
+            raise MediaPortClosedError("BoundedInterruptibleFakeAIEchoPort is closed")
+
+        if self._simulate_cancellation_error is not None:
+            err = self._simulate_cancellation_error
+            self._simulate_cancellation_error = None
+            raise err
+
+        if turn_id > self._cancelled_high_water:
+            self._cancelled_high_water = turn_id
+        self._recent_cancelled_turns.append(turn_id)
+
+        # Purge unconsumed echo frames for this turn (and prior cancelled turns) from the bounded output queue
+        remaining: list[object] = []
+        while not self._output_queue.empty():
+            try:
+                item = self._output_queue.get_nowait()
+                if (
+                    item is not None
+                    and item is not _CLOSE_SENTINEL
+                    and isinstance(item, AudioFrame)
+                ):
+                    if item.turn_id is not None and item.turn_id <= self._cancelled_high_water:
+                        continue  # Discard frame matching cancelled turns
+                remaining.append(item)
+            except asyncio.QueueEmpty:
+                break
+
+        for item in remaining:
+            self._output_queue.put_nowait(item)
+
+    async def send_frame(self, frame: AudioFrame) -> None:
+        """Receive an inbound frame from telephony and enqueue an echo response.
+
+        Frames belonging to an already cancelled turn are dropped immediately.
+        """
+        if self._is_closed:
+            raise MediaPortClosedError("BoundedInterruptibleFakeAIEchoPort is closed")
+
+        if frame.turn_id is not None and frame.turn_id <= self._cancelled_high_water:
+            return
+
+        await super().send_frame(frame)
+
+    async def receive_frame(self) -> AudioFrame | None:
+        """Receive the next echoed audio frame, discarding any frames from cancelled turns.
+
+        Guarantees that frames enqueued by producers unblocked concurrently during
+        turn cancellation cannot escape to the consumer.
+        """
+        while True:
+            frame = await super().receive_frame()
+            if frame is None:
+                return None
+            if frame.turn_id is not None and frame.turn_id <= self._cancelled_high_water:
+                continue
+            return frame
+
+
 class InterruptibleFakeAIPort(FakeAIMediaAdapter, InterruptibleAIPort):
     """Fake AI realtime media adapter supporting turn cancellation and tagged turn generation."""
 
@@ -249,7 +358,8 @@ class InterruptibleFakeAIPort(FakeAIMediaAdapter, InterruptibleAIPort):
             )
         )
         self._simulate_cancellation_error: Exception | None = simulate_cancellation_error
-        self._cancelled_turns: list[int] = []
+        self._cancelled_high_water: int = 0
+        self._recent_cancelled_turns: deque[int] = deque(maxlen=64)
         self._echo: bool = bool(echo)
         self._echo_turn_id: int = int(echo_turn_id)
 
@@ -260,8 +370,13 @@ class InterruptibleFakeAIPort(FakeAIMediaAdapter, InterruptibleAIPort):
 
     @property
     def cancelled_turns(self) -> list[int]:
-        """List of turn IDs that have been cancelled via cancel_turn."""
-        return list(self._cancelled_turns)
+        """List of recent turn IDs that have been cancelled via cancel_turn (bounded)."""
+        return list(self._recent_cancelled_turns)
+
+    @property
+    def cancelled_turn_high_water(self) -> int:
+        """Monotonic high-water mark of cancelled turns."""
+        return self._cancelled_high_water
 
     def set_echo_turn_id(self, turn_id: int) -> None:
         """Configure turn_id for subsequent echoed frames when echo=True."""
@@ -279,7 +394,9 @@ class InterruptibleFakeAIPort(FakeAIMediaAdapter, InterruptibleAIPort):
             self._simulate_cancellation_error = None
             raise err
 
-        self._cancelled_turns.append(turn_id)
+        if turn_id > self._cancelled_high_water:
+            self._cancelled_high_water = turn_id
+        self._recent_cancelled_turns.append(turn_id)
 
     async def send_frame(self, frame: AudioFrame) -> None:
         """Receive an inbound frame from telephony and optionally echo it tagged with turn_id."""

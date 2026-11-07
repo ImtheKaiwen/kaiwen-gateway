@@ -1,7 +1,7 @@
 # Voice Media Bridge, Turn Interruption & Audio Contracts (M4.1 / M4.2)
 
-> **Status:** M4.1 Complete (PR #20 / `577e6b9`); M4.2A Complete (PR #21 / `df28327`); M4.2B.1 In progress (turn interruption & in-process playback control)
-> **Document version:** 1.2
+> **Status:** M4.1 Complete (PR #20 / `577e6b9`); M4.2A Complete (PR #21 / `df28327`); M4.2B.1 Complete (PR #22 / `e457f8f`); M4.2B.2 Local implementation (synthetic WebSocket turn interruption vertical slice)
+> **Document version:** 1.3
 > **Last updated:** 2026-11-07
 > **Scope:** Voice-local media domain contracts, provider-neutral media ports, bounded bidirectional bridge, turn identity, stale frame suppression, interruption capability protocol, and synthetic binary WebSocket transport.
 

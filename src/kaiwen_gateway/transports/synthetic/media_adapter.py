@@ -72,6 +72,10 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
         self._send_lock: asyncio.Lock = asyncio.Lock()
         self._is_closed: bool = False
         self._close_event: asyncio.Event = asyncio.Event()
+        self._allowed_outbound_turn: int = 1
+        self._outbound_turn_gate: asyncio.Event = asyncio.Event()
+        self._outbound_turn_gate.set()
+        self._turn_events: dict[int, asyncio.Event] = {}
 
         # Observable telemetry counters
         self._frames_received: int = 0
@@ -123,6 +127,19 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
     def record_reject(self) -> None:
         """Increment count of rejected frames or malformed messages."""
         self._reject_count += 1
+
+    def hold_outbound_barrier(self) -> None:
+        """Engage the outbound turn barrier to hold back subsequent-turn audio frames."""
+        self._outbound_turn_gate.clear()
+
+    def release_outbound_barrier(self, allowed_turn: int) -> None:
+        """Release the outbound turn barrier up to allowed_turn."""
+        self._allowed_outbound_turn = max(self._allowed_outbound_turn, allowed_turn)
+        to_notify = [t for t in self._turn_events if t <= self._allowed_outbound_turn]
+        for t in to_notify:
+            ev = self._turn_events.pop(t)
+            ev.set()
+        self._outbound_turn_gate.set()
 
     async def push_inbound_frame(self, frame: AudioFrame) -> None:
         """Push an inbound AudioFrame into the bounded queue from the ingress reader loop.
@@ -212,6 +229,8 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
         """Send an audio frame to the client over WebSocket as a binary message.
 
         Synchronized via send_lock to guarantee frame ordering and avoid interleaving.
+        Respects outbound turn barrier so new-generation audio is never sent before
+        turn acknowledgment.
 
         Args:
             frame: Validated AudioFrame from the outbound bridge pump.
@@ -219,6 +238,17 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
         Raises:
             MediaPortClosedError: If the port is closed.
         """
+        if self._is_closed:
+            raise MediaPortClosedError("WebSocketTelephonyMediaAdapter is closed")
+
+        if frame.turn_id is not None and frame.turn_id > self._allowed_outbound_turn:
+            while not self._is_closed and frame.turn_id > self._allowed_outbound_turn:
+                event = self._turn_events.get(frame.turn_id)
+                if event is None or event.is_set():
+                    event = asyncio.Event()
+                    self._turn_events[frame.turn_id] = event
+                await event.wait()
+
         if self._is_closed:
             raise MediaPortClosedError("WebSocketTelephonyMediaAdapter is closed")
 
@@ -261,6 +291,10 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
         if not self._is_closed:
             self._is_closed = True
             self._close_event.set()
+            self._outbound_turn_gate.set()
+            for ev in self._turn_events.values():
+                ev.set()
+            self._turn_events.clear()
             try:
                 self._inbound_queue.put_nowait(_CLOSE_SENTINEL)
             except asyncio.QueueFull:
