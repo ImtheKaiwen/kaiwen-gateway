@@ -826,6 +826,7 @@ class VoiceBridgeSession:
             self._run_supervisor(),
             name=f"voice-supervisor-{self.call_id}",
         )
+        self._supervisor_task.add_done_callback(lambda _t: self._ensure_cleanup_task())
 
     async def wait_until_closed(self, *, propagate_error: bool = True) -> None:
         """Wait until the bridge session completes, fails, or is closed."""
@@ -855,7 +856,7 @@ class VoiceBridgeSession:
 
     def _ensure_cleanup_task(self) -> asyncio.Task[None]:
         """Ensure the single terminal cleanup task is scheduled and tracked."""
-        if self._state != VoiceBridgeState.FAILED:
+        if self._state not in (VoiceBridgeState.FAILED, VoiceBridgeState.CLOSED):
             self._state = VoiceBridgeState.CLOSING
         self._closing_event.set()
         if self._cleanup_task is None:
@@ -920,14 +921,21 @@ class VoiceBridgeSession:
         self._cleanup_state = VoiceTerminalCleanupState.IN_PROGRESS
         self._closing_event.set()
 
-        # 1. Cancel pump tasks if still running
-        pending_pumps = [
-            t for t in (self._inbound_task, self._outbound_task) if t is not None and not t.done()
-        ]
-        for t in pending_pumps:
-            t.cancel()
-        if pending_pumps:
-            await asyncio.gather(*pending_pumps, return_exceptions=True)
+        # 1. Cancel pump tasks if still running and ensure all pump exceptions are retrieved
+        all_pumps = [t for t in (self._inbound_task, self._outbound_task) if t is not None]
+        for t in all_pumps:
+            if not t.done():
+                t.cancel()
+        if all_pumps:
+            pump_results = await asyncio.gather(*all_pumps, return_exceptions=True)
+            if self._error is None:
+                for res in pump_results:
+                    if isinstance(res, BaseException) and not isinstance(
+                        res, asyncio.CancelledError
+                    ):
+                        self._error = res
+                        self._record_error(classify_voice_error(res))
+                        break
 
         # 2. Await supervisor task so all pump supervision is terminated
         if self._supervisor_task is not None and not self._supervisor_task.done():
@@ -1009,30 +1017,59 @@ class VoiceBridgeSession:
             assert self._inbound_task is not None
             assert self._outbound_task is not None
 
+            supervised_tasks: tuple[asyncio.Task[None], asyncio.Task[None]] = (
+                self._inbound_task,
+                self._outbound_task,
+            )
             done, pending = await asyncio.wait(
-                [self._inbound_task, self._outbound_task],
+                supervised_tasks,
                 return_when=asyncio.FIRST_EXCEPTION,
             )
 
+            # Retrieve all completed task exceptions without early-break truncation
+            task_exceptions: dict[asyncio.Task[None], BaseException | None] = {}
+            for t in supervised_tasks:
+                if t in done:
+                    if t.cancelled():
+                        task_exceptions[t] = asyncio.CancelledError()
+                    else:
+                        task_exceptions[t] = t.exception()
+
+            # If any completed task failed or was cancelled, cancel and await pending siblings
+            has_failure = any(exc is not None for exc in task_exceptions.values())
+            if has_failure and pending:
+                for t in pending:
+                    t.cancel()
+                pending_results = await asyncio.gather(*pending, return_exceptions=True)
+                for t, res in zip(pending, pending_results, strict=True):
+                    if isinstance(res, BaseException):
+                        task_exceptions[t] = res
+                    else:
+                        task_exceptions[t] = None
+
+            # Deterministic primary-error selection:
+            # 1. Real exceptions take strict precedence over cancellation, evaluated in
+            #    deterministic order (inbound pump before outbound pump).
             failed_exc: BaseException | None = None
-            for t in done:
-                if t.cancelled():
-                    if not self._closing_event.is_set():
-                        failed_exc = asyncio.CancelledError()
-                        self._record_error(VoiceErrorCategory.SESSION_CANCELLED)
-                    break
-                exc = t.exception()
-                if exc is not None:
+            for t in supervised_tasks:
+                exc = task_exceptions.get(t)
+                if exc is not None and not isinstance(exc, asyncio.CancelledError):
                     failed_exc = exc
                     break
+
+            # 2. If no real exception occurred, check for unexpected cancellation
+            if failed_exc is None:
+                for t in supervised_tasks:
+                    exc = task_exceptions.get(t)
+                    if isinstance(exc, asyncio.CancelledError):
+                        if not self._closing_event.is_set():
+                            failed_exc = exc
+                            self._record_error(VoiceErrorCategory.SESSION_CANCELLED)
+                        break
 
             if failed_exc is not None:
                 self._error = failed_exc
                 self._state = VoiceBridgeState.FAILED
-                for t in pending:
-                    t.cancel()
-                if pending:
-                    await asyncio.gather(*pending, return_exceptions=True)
             else:
                 if self._state not in (VoiceBridgeState.CLOSING, VoiceBridgeState.CLOSED):
                     self._state = VoiceBridgeState.CLOSED
@@ -1151,9 +1188,10 @@ class VoiceBridgeSession:
 
         rec_task = asyncio.create_task(receiver())
         fwd_task = asyncio.create_task(forwarder())
+        pump_tasks = (rec_task, fwd_task)
         try:
             done, pending = await asyncio.wait(
-                [rec_task, fwd_task],
+                pump_tasks,
                 return_when=asyncio.FIRST_EXCEPTION,
             )
             for t in pending:
@@ -1161,25 +1199,39 @@ class VoiceBridgeSession:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
 
+            task_exceptions: dict[asyncio.Task[None], BaseException | None] = {}
+            for t in pump_tasks:
+                if t in done:
+                    if t.cancelled():
+                        task_exceptions[t] = asyncio.CancelledError()
+                    else:
+                        task_exceptions[t] = t.exception()
+
             first_exc: BaseException | None = None
-            for t in done:
-                if t.cancelled():
-                    if first_exc is None:
-                        first_exc = asyncio.CancelledError()
-                else:
-                    exc = t.exception()
-                    if exc is not None:
-                        self._record_error(classify_voice_error(exc))
-                        if first_exc is None:
-                            first_exc = exc
+            # Prioritize real exceptions over cancellation in deterministic order (receiver, then forwarder)
+            for t in pump_tasks:
+                exc = task_exceptions.get(t)
+                if exc is not None and not isinstance(exc, asyncio.CancelledError):
+                    first_exc = exc
+                    break
+
+            if first_exc is None:
+                for t in pump_tasks:
+                    exc = task_exceptions.get(t)
+                    if isinstance(exc, asyncio.CancelledError):
+                        first_exc = exc
+                        break
+
             if first_exc is not None:
+                if not isinstance(first_exc, asyncio.CancelledError):
+                    self._record_error(classify_voice_error(first_exc))
                 raise first_exc
             self._inbound_completed = True
         finally:
-            for t in (rec_task, fwd_task):
+            for t in pump_tasks:
                 if not t.done():
                     t.cancel()
-            await asyncio.gather(rec_task, fwd_task, return_exceptions=True)
+            await asyncio.gather(*pump_tasks, return_exceptions=True)
 
     async def _run_outbound_pump(self) -> None:
         """Run the outbound media pump (AI -> Telephony)."""
@@ -1332,9 +1384,10 @@ class VoiceBridgeSession:
 
         rec_task = asyncio.create_task(receiver())
         fwd_task = asyncio.create_task(forwarder())
+        pump_tasks = (rec_task, fwd_task)
         try:
             done, pending = await asyncio.wait(
-                [rec_task, fwd_task],
+                pump_tasks,
                 return_when=asyncio.FIRST_EXCEPTION,
             )
             for t in pending:
@@ -1342,22 +1395,36 @@ class VoiceBridgeSession:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
 
+            task_exceptions: dict[asyncio.Task[None], BaseException | None] = {}
+            for t in pump_tasks:
+                if t in done:
+                    if t.cancelled():
+                        task_exceptions[t] = asyncio.CancelledError()
+                    else:
+                        task_exceptions[t] = t.exception()
+
             first_exc: BaseException | None = None
-            for t in done:
-                if t.cancelled():
-                    if first_exc is None:
-                        first_exc = asyncio.CancelledError()
-                else:
-                    exc = t.exception()
-                    if exc is not None:
-                        self._record_error(classify_voice_error(exc))
-                        if first_exc is None:
-                            first_exc = exc
+            # Prioritize real exceptions over cancellation in deterministic order (receiver, then forwarder)
+            for t in pump_tasks:
+                exc = task_exceptions.get(t)
+                if exc is not None and not isinstance(exc, asyncio.CancelledError):
+                    first_exc = exc
+                    break
+
+            if first_exc is None:
+                for t in pump_tasks:
+                    exc = task_exceptions.get(t)
+                    if isinstance(exc, asyncio.CancelledError):
+                        first_exc = exc
+                        break
+
             if first_exc is not None:
+                if not isinstance(first_exc, asyncio.CancelledError):
+                    self._record_error(classify_voice_error(first_exc))
                 raise first_exc
             self._outbound_completed = True
         finally:
-            for t in (rec_task, fwd_task):
+            for t in pump_tasks:
                 if not t.done():
                     t.cancel()
-            await asyncio.gather(rec_task, fwd_task, return_exceptions=True)
+            await asyncio.gather(*pump_tasks, return_exceptions=True)
