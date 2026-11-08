@@ -21,6 +21,7 @@ from kaiwen_gateway.modules.voice.domain import (
     AudioFrame,
     MediaBackpressureOverflowError,
     MediaPortClosedError,
+    MediaPortError,
     VoiceDomainError,
 )
 from kaiwen_gateway.modules.voice.ports import TelephonyMediaPort
@@ -42,6 +43,7 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
         *,
         queue_capacity: int = 8,
         backpressure_timeout: float | None = 2.0,
+        send_timeout: float | None = 2.0,
     ) -> None:
         if (
             isinstance(queue_capacity, bool)
@@ -61,12 +63,21 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
                 raise VoiceDomainError(
                     "backpressure_timeout must be a positive finite float or None"
                 )
+        if send_timeout is not None:
+            if isinstance(send_timeout, bool) or not isinstance(send_timeout, (int, float)):
+                raise VoiceDomainError("send_timeout must be a positive finite float or None")
+            send_timeout_float = float(send_timeout)
+            if not math.isfinite(send_timeout_float) or send_timeout_float <= 0.0:
+                raise VoiceDomainError("send_timeout must be a positive finite float or None")
 
         self._websocket: Final[Any] = websocket
         self._context: Final[VerifiedConnectionContext] = context
         self._queue_capacity: Final[int] = queue_capacity
         self._backpressure_timeout: Final[float | None] = (
             float(backpressure_timeout) if backpressure_timeout is not None else None
+        )
+        self._send_timeout: Final[float | None] = (
+            float(send_timeout) if send_timeout is not None else None
         )
 
         self._inbound_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=self._queue_capacity)
@@ -77,6 +88,7 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
         self._outbound_turn_gate: asyncio.Event = asyncio.Event()
         self._outbound_turn_gate.set()
         self._turn_events: dict[int, asyncio.Event] = {}
+        self._close_sentinel_enqueued: bool = False
 
         # Observable telemetry counters
         self._frames_received: int = 0
@@ -97,6 +109,11 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
     def context(self) -> VerifiedConnectionContext:
         """Verified connection context associated with this leg."""
         return self._context
+
+    @property
+    def send_timeout(self) -> float | None:
+        """Configured downstream send deadline in seconds, or None if unbounded."""
+        return self._send_timeout
 
     @property
     def frames_received(self) -> int:
@@ -283,7 +300,16 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
             self._last_send_frame_id = None
             t_send_start = time.perf_counter()
             try:
-                await self._websocket.send_bytes(frame.payload)
+                if self._send_timeout is not None:
+                    async with asyncio.timeout(self._send_timeout):
+                        await self._websocket.send_bytes(frame.payload)
+                else:
+                    await self._websocket.send_bytes(frame.payload)
+            except TimeoutError as exc:
+                self._is_closed = True
+                raise MediaPortError(
+                    f"Downstream WebSocket frame delivery timed out after {self._send_timeout}s"
+                ) from exc
             except Exception as exc:
                 self._is_closed = True
                 raise MediaPortClosedError("WebSocket connection closed or write failed") from exc
@@ -310,20 +336,30 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
             if self._is_closed and not allow_when_closed:
                 raise MediaPortClosedError("WebSocketTelephonyMediaAdapter is closed")
             try:
-                await self._websocket.send_text(text)
+                if self._send_timeout is not None:
+                    async with asyncio.timeout(self._send_timeout):
+                        await self._websocket.send_text(text)
+                else:
+                    await self._websocket.send_text(text)
+            except TimeoutError as exc:
+                self._is_closed = True
+                raise MediaPortError(
+                    f"Downstream WebSocket control text delivery timed out after {self._send_timeout}s"
+                ) from exc
             except Exception as exc:
                 self._is_closed = True
                 raise MediaPortClosedError("WebSocket connection closed or write failed") from exc
 
     async def close(self) -> None:
         """Idempotently close the adapter and release resources."""
-        if not self._is_closed:
-            self._is_closed = True
-            self._close_event.set()
-            self._outbound_turn_gate.set()
-            for ev in self._turn_events.values():
-                ev.set()
-            self._turn_events.clear()
+        self._is_closed = True
+        self._close_event.set()
+        self._outbound_turn_gate.set()
+        for ev in self._turn_events.values():
+            ev.set()
+        self._turn_events.clear()
+        if not self._close_sentinel_enqueued:
+            self._close_sentinel_enqueued = True
             try:
                 self._inbound_queue.put_nowait(_CLOSE_SENTINEL)
             except asyncio.QueueFull:

@@ -61,6 +61,8 @@ except ImportError:  # pragma: no cover
 
 DEFAULT_IDLE_TIMEOUT_SECONDS: Final[float] = 60.0
 DEFAULT_DRAIN_TIMEOUT_SECONDS: Final[float] = 2.0
+DEFAULT_BACKPRESSURE_TIMEOUT_SECONDS: Final[float] = 2.0
+DEFAULT_SEND_TIMEOUT_SECONDS: Final[float] = 2.0
 REQUIRED_SYNTHETIC_SCOPE: Final[str] = "voice.stream"
 
 
@@ -260,9 +262,19 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
         supervisor.register_resource(_cleanup_media_session)
 
         # Telephony adapter, AI port, and VoiceBridgeSession composition
+        backpressure_timeout = _resolve_positive_float(
+            getattr(app_state, "synthetic_backpressure_timeout", None),
+            DEFAULT_BACKPRESSURE_TIMEOUT_SECONDS,
+        )
+        send_timeout = _resolve_positive_float(
+            getattr(app_state, "synthetic_send_timeout", None),
+            DEFAULT_SEND_TIMEOUT_SECONDS,
+        )
         telephony_adapter = WebSocketTelephonyMediaAdapter(
             websocket=websocket,
             context=verified_context,
+            backpressure_timeout=backpressure_timeout,
+            send_timeout=send_timeout,
         )
         ai_port_factory: Callable[[], AIRealtimeMediaPort] | None = getattr(
             app_state, "ai_media_port_factory", None
@@ -278,6 +290,7 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
             tenant_id=verified_context.tenant_id,
             telephony_port=telephony_adapter,
             ai_port=ai_port,
+            backpressure_timeout=backpressure_timeout,
             telemetry_sink=telemetry_sink,
         )
     except Exception:

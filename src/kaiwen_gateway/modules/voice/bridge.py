@@ -1098,7 +1098,19 @@ class VoiceBridgeSession:
                 t_received = time.perf_counter()
                 if frame is None:
                     # Clean EOF from telephony media stream
-                    await self._inbound_queue.put(None)
+                    if self._backpressure_timeout is not None:
+                        try:
+                            await asyncio.wait_for(
+                                self._inbound_queue.put(None),
+                                timeout=self._backpressure_timeout,
+                            )
+                        except TimeoutError as err:
+                            raise MediaBackpressureOverflowError(
+                                f"Inbound queue capacity {self._queue_capacity} exceeded "
+                                f"and backpressure timed out after {self._backpressure_timeout}s"
+                            ) from err
+                    else:
+                        await self._inbound_queue.put(None)
                     break
 
                 if not isinstance(frame, AudioFrame):
@@ -1242,7 +1254,19 @@ class VoiceBridgeSession:
                 t_received = time.perf_counter()
                 if frame is None:
                     # Clean EOF from AI realtime media stream
-                    await self._outbound_queue.put(None)
+                    if self._backpressure_timeout is not None:
+                        try:
+                            await asyncio.wait_for(
+                                self._outbound_queue.put(None),
+                                timeout=self._backpressure_timeout,
+                            )
+                        except TimeoutError as err:
+                            raise MediaBackpressureOverflowError(
+                                f"Outbound queue capacity {self._queue_capacity} exceeded "
+                                f"and backpressure timed out after {self._backpressure_timeout}s"
+                            ) from err
+                    else:
+                        await self._outbound_queue.put(None)
                     break
 
                 if not isinstance(frame, AudioFrame):

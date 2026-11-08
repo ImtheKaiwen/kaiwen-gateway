@@ -2412,6 +2412,8 @@ def test_gate_d_invalid_timeouts_fall_back_safely_in_endpoint() -> None:
     # Inject invalid timeouts on app.state
     app.state.synthetic_drain_timeout = float("nan")
     app.state.synthetic_idle_timeout = -15.0
+    app.state.synthetic_backpressure_timeout = -15.0
+    app.state.synthetic_send_timeout = -15.0
 
     client = TestClient(app)
     token = verifier.issue_token(
@@ -2434,6 +2436,72 @@ def test_gate_d_invalid_timeouts_fall_back_safely_in_endpoint() -> None:
         echoed = ws.receive_bytes()
         assert len(echoed) == PCM16LE_FRAME_BYTES
         ws.send_json({"event": EVENT_CALL_END, "call_id": "call_timeout_nan_01"})
+        ended = ws.receive_json()
+        assert ended["event"] == EVENT_CALL_ENDED
+
+    assert admission.snapshot().active_connections == 0
+    assert len(auth_bridge._active_calls) == 0
+
+
+def test_gate_b_synthetic_send_timeout_constructor_validation() -> None:
+    """Gate B: Verify WebSocketTelephonyMediaAdapter validates send_timeout parameter."""
+    dummy_ws = object()
+    ctx = _make_verified_context()
+
+    # Valid configurations
+    adapter1 = WebSocketTelephonyMediaAdapter(dummy_ws, ctx, send_timeout=None)
+    assert adapter1.send_timeout is None
+    adapter2 = WebSocketTelephonyMediaAdapter(dummy_ws, ctx, send_timeout=1.5)
+    assert adapter2.send_timeout == 1.5
+
+    # Invalid configurations
+    with pytest.raises(VoiceDomainError, match="send_timeout"):
+        WebSocketTelephonyMediaAdapter(dummy_ws, ctx, send_timeout=0.0)
+    with pytest.raises(VoiceDomainError, match="send_timeout"):
+        WebSocketTelephonyMediaAdapter(dummy_ws, ctx, send_timeout=-1.0)
+    with pytest.raises(VoiceDomainError, match="send_timeout"):
+        WebSocketTelephonyMediaAdapter(dummy_ws, ctx, send_timeout=float("nan"))
+    with pytest.raises(VoiceDomainError, match="send_timeout"):
+        WebSocketTelephonyMediaAdapter(dummy_ws, ctx, send_timeout=True)
+    with pytest.raises(VoiceDomainError, match="send_timeout"):
+        WebSocketTelephonyMediaAdapter(dummy_ws, ctx, send_timeout="invalid")  # type: ignore[arg-type]
+
+
+def test_gate_b_synthetic_send_timeout_resolved_and_applied() -> None:
+    """Gate B: Verify custom synthetic_send_timeout is passed to adapter."""
+    verifier = SyntheticTokenVerifier(secret_key=TEST_SECRET_KEY)
+    auth_bridge = SyntheticAuthBridge(verifier=verifier)
+    admission = AdmissionController(CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC))
+
+    app = create_gateway_app(
+        config=CoreConfig(ingress_mode=INGRESS_MODE_SYNTHETIC),
+        admission_controller=admission,
+        synthetic_auth_bridge=auth_bridge,
+        enable_synthetic_media=True,
+    )
+    app.state.synthetic_send_timeout = 0.05
+
+    client = TestClient(app)
+    token = verifier.issue_token(
+        provider_id="smoke_provider",
+        tenant_id="tenant_send_custom",
+        call_id="call_send_custom_01",
+        allowed_scopes=["voice.stream"],
+    )
+
+    with client.websocket_connect(
+        SYNTHETIC_MEDIA_WS_ENDPOINT_PATH,
+        headers={"Authorization": f"Bearer {token}"},
+    ) as ws:
+        ready = ws.receive_json()
+        assert ready["event"] == EVENT_SESSION_READY
+        ws.send_json({"event": EVENT_CALL_START, "call_id": "call_send_custom_01"})
+        started = ws.receive_json()
+        assert started["event"] == EVENT_CALL_STARTED
+        ws.send_bytes(b"\x00" * PCM16LE_FRAME_BYTES)
+        echoed = ws.receive_bytes()
+        assert len(echoed) == PCM16LE_FRAME_BYTES
+        ws.send_json({"event": EVENT_CALL_END, "call_id": "call_send_custom_01"})
         ended = ws.receive_json()
         assert ended["event"] == EVENT_CALL_ENDED
 
