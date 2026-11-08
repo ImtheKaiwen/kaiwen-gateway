@@ -36,6 +36,14 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   - Verified eight deterministic fault and overload scenarios (`premature_client_disconnect`, `blocked_ai_consumer_inbound_backpressure`, `blocked_outbound_send_backpressure`, `normal_call_end_during_active_audio`, `admission_capacity_saturation`, `draining_with_active_media_calls`, `recovery_after_interrupted_and_failed_calls`, and `two_tenants_concurrent_isolation`).
   - Zero modifications to production source code (`src/kaiwen_gateway/`) or runtime dependencies (**pure synthetic loopback evaluation only; live telephony networks, real Verimor protocol, and external OpenAI/Kaiwen Agent integrations remain deferred**).
 
+### Fixed
+
+- Corrected incomplete retrieval of simultaneously failed Voice Bridge task exceptions in `VoiceBridgeSession._run_supervisor`, preventing unobserved task exception warnings when concurrent pump tasks fail ([PR #28](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/28) / `0dcc82179e08175eab0c43f706b3d67ac2c64035`, verified in GitHub Actions run `42523939041`).
+- Introduced deterministic primary-error precedence evaluated in fixed sequence (inbound pump before outbound pump, inner receiver before forwarder) rather than non-deterministic set iteration order.
+- Ensured genuine task exceptions strictly supersede unexpected or expected cancellations regardless of task scheduling order, preventing cancellations from masking underlying root-cause errors.
+- Improved terminal cleanup safety by attaching a done-callback to the supervisor task, ensuring terminal teardown, buffer drainage, and port closure execute reliably even if the supervisor task is cancelled prior to executing its first coroutine frame.
+- Added seven focused regression and adversarial tests verifying concurrent failure handling, error precedence, single-count error metrics, and clean task teardown without resource leaks.
+
 ## Maintenance policy
 
 This section describes **how to keep the changelog accurate**; it is not a record of released functionality.
