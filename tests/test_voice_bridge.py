@@ -15,6 +15,7 @@ from kaiwen_gateway.modules.voice.bridge import (
     VoiceBridgeState,
 )
 from kaiwen_gateway.modules.voice.domain import (
+    AudioFrame,
     InvalidAudioFrameError,
     MediaBackpressureOverflowError,
     OutOfOrderAudioFrameError,
@@ -1589,3 +1590,399 @@ class TestVoiceBridgePortCloseFailureSemantics:
             assert ai.is_closed is True
 
         asyncio.run(_test())
+
+
+class TestVoiceBridgeConcurrentFailureAndLifecycleHardening:
+    """Targeted regression and adversarial tests for concurrent failure handling,
+
+    task exception retrieval, and deterministic lifecycle state transitions.
+    """
+
+    def test_simultaneous_dual_pump_failures_retrieves_all_exceptions(self) -> None:
+        """Verify that when both inbound and outbound pumps fail in the same scheduling cycle,
+
+        every task's exception is retrieved, zero unretrieved exceptions are logged,
+        and the inbound error is chosen deterministically as the primary session error.
+        """
+
+        async def _test() -> None:
+            loop = asyncio.get_running_loop()
+            unretrieved: list[dict[str, object]] = []
+
+            def _handler(_loop: asyncio.AbstractEventLoop, ctx: dict[str, object]) -> None:
+                unretrieved.append(ctx)
+
+            old_handler = loop.get_exception_handler()
+            loop.set_exception_handler(_handler)
+
+            try:
+                barrier = asyncio.Barrier(2)
+
+                class _SimultaneousFailingPort(FakeTelephonyMediaAdapter):
+                    def __init__(self, exc: Exception) -> None:
+                        super().__init__()
+                        self._exc = exc
+
+                    async def receive_frame(self) -> None:
+                        await barrier.wait()
+                        raise self._exc
+
+                inbound_exc = RuntimeError("simultaneous inbound pump failure")
+                outbound_exc = ValueError("simultaneous outbound pump failure")
+
+                tel = _SimultaneousFailingPort(inbound_exc)
+
+                class _SimultaneousFailingAIPort(FakeAIMediaAdapter):
+                    async def receive_frame(self) -> None:
+                        await barrier.wait()
+                        raise outbound_exc
+
+                ai_failing = _SimultaneousFailingAIPort()
+
+                session = VoiceBridgeSession(
+                    call_id="call-dual-fail",
+                    tenant_id="tenant-dual-fail",
+                    telephony_port=tel,
+                    ai_port=ai_failing,
+                )
+
+                await session.start()
+
+                with pytest.raises(RuntimeError) as exc_info:
+                    await asyncio.wait_for(
+                        session.wait_until_closed(propagate_error=True), timeout=2.0
+                    )
+
+                assert str(exc_info.value) == "simultaneous inbound pump failure"
+                assert session.state == VoiceBridgeState.FAILED
+                assert session.error is inbound_exc
+
+                # Verify both tasks had their exceptions observed (_log_traceback is False)
+                t_in = session._inbound_task
+                t_out = session._outbound_task
+                assert t_in is not None and t_in.done() is True
+                assert t_out is not None and t_out.done() is True
+                assert getattr(t_in, "_log_traceback", None) is False
+                assert getattr(t_out, "_log_traceback", None) is False
+
+                # Force garbage collection to trigger __del__ on tasks
+                del session, t_in, t_out
+                import gc
+
+                gc.collect()
+                await asyncio.sleep(0.01)
+
+                assert len(unretrieved) == 0, f"Unretrieved exceptions detected: {unretrieved}"
+            finally:
+                loop.set_exception_handler(old_handler)
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_simultaneous_real_error_takes_precedence_over_cancellation(self) -> None:
+        """Verify that when one pump fails with a real error while the other is cancelled,
+
+        the real error is deterministically preserved as the primary session error.
+        """
+
+        async def _test() -> None:
+            loop = asyncio.get_running_loop()
+            unretrieved: list[dict[str, object]] = []
+            loop.set_exception_handler(lambda _l, ctx: unretrieved.append(ctx))
+
+            try:
+                barrier = asyncio.Barrier(2)
+                real_exc = OutOfOrderAudioFrameError("inbound sequence violation")
+
+                class _InboundFailingPort(FakeTelephonyMediaAdapter):
+                    async def receive_frame(self) -> None:
+                        await barrier.wait()
+                        raise real_exc
+
+                class _OutboundCancelledPort(FakeAIMediaAdapter):
+                    async def receive_frame(self) -> None:
+                        await barrier.wait()
+                        raise asyncio.CancelledError()
+
+                session = VoiceBridgeSession(
+                    call_id="call-prec-in",
+                    tenant_id="tenant-prec-in",
+                    telephony_port=_InboundFailingPort(),
+                    ai_port=_OutboundCancelledPort(),
+                )
+
+                await session.start()
+
+                with pytest.raises(OutOfOrderAudioFrameError):
+                    await asyncio.wait_for(
+                        session.wait_until_closed(propagate_error=True), timeout=2.0
+                    )
+
+                assert session.state == VoiceBridgeState.FAILED
+                assert session.error is real_exc
+
+                # Clean task outcome observation
+                t_in = session._inbound_task
+                t_out = session._outbound_task
+                assert t_in is not None and getattr(t_in, "_log_traceback", None) is False
+                assert t_out is not None and getattr(t_out, "_log_traceback", None) is False
+            finally:
+                loop.set_exception_handler(None)
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_outbound_real_error_takes_precedence_over_inbound_cancellation(self) -> None:
+        """Verify that an outbound real error takes precedence over inbound cancellation."""
+
+        async def _test() -> None:
+            loop = asyncio.get_running_loop()
+            unretrieved: list[dict[str, object]] = []
+            loop.set_exception_handler(lambda _l, ctx: unretrieved.append(ctx))
+
+            try:
+                barrier = asyncio.Barrier(2)
+                real_exc = MediaBackpressureOverflowError("outbound queue overflow")
+
+                class _InboundCancelledPort(FakeTelephonyMediaAdapter):
+                    async def receive_frame(self) -> None:
+                        await barrier.wait()
+                        raise asyncio.CancelledError()
+
+                class _OutboundFailingPort(FakeAIMediaAdapter):
+                    async def receive_frame(self) -> None:
+                        await barrier.wait()
+                        raise real_exc
+
+                session = VoiceBridgeSession(
+                    call_id="call-prec-out",
+                    tenant_id="tenant-prec-out",
+                    telephony_port=_InboundCancelledPort(),
+                    ai_port=_OutboundFailingPort(),
+                )
+
+                await session.start()
+
+                with pytest.raises(MediaBackpressureOverflowError):
+                    await asyncio.wait_for(
+                        session.wait_until_closed(propagate_error=True), timeout=2.0
+                    )
+
+                assert session.state == VoiceBridgeState.FAILED
+                assert session.error is real_exc
+
+                t_in = session._inbound_task
+                t_out = session._outbound_task
+                assert t_in is not None and getattr(t_in, "_log_traceback", None) is False
+                assert t_out is not None and getattr(t_out, "_log_traceback", None) is False
+            finally:
+                loop.set_exception_handler(None)
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_inner_pump_receiver_and_forwarder_concurrent_failures(self) -> None:
+        """Verify that when both receiver and forwarder in an inner pump fail concurrently,
+
+        all inner exceptions are retrieved, receiver error is chosen deterministically,
+        and no duplicate error counts are recorded.
+        """
+
+        async def _test() -> None:
+            loop = asyncio.get_running_loop()
+            unretrieved: list[dict[str, object]] = []
+            loop.set_exception_handler(lambda _l, ctx: unretrieved.append(ctx))
+
+            try:
+                barrier = asyncio.Barrier(2)
+                rec_exc = InvalidAudioFrameError("receiver invalid frame")
+                fwd_exc = RuntimeError("forwarder send failure")
+
+                class _DualFailingInboundPort(FakeTelephonyMediaAdapter):
+                    def __init__(self) -> None:
+                        super().__init__()
+                        self._called = False
+
+                    async def receive_frame(self) -> AudioFrame | None:
+                        if not self._called:
+                            self._called = True
+                            return create_synthetic_pcm16le_frame(b"PAYLOAD", sequence=0)
+                        await barrier.wait()
+                        raise rec_exc
+
+                class _DualFailingAIPort(FakeAIMediaAdapter):
+                    async def send_frame(self, frame: object) -> None:
+                        await barrier.wait()
+                        raise fwd_exc
+
+                tel = _DualFailingInboundPort()
+                ai = _DualFailingAIPort()
+
+                session = VoiceBridgeSession(
+                    call_id="call-inner-dual",
+                    tenant_id="tenant-inner-dual",
+                    telephony_port=tel,
+                    ai_port=ai,
+                )
+
+                await session.start()
+
+                with pytest.raises(InvalidAudioFrameError):
+                    await asyncio.wait_for(
+                        session.wait_until_closed(propagate_error=True), timeout=2.0
+                    )
+
+                assert session.state == VoiceBridgeState.FAILED
+                assert session.error is rec_exc
+
+                # Verify telemetry error counts do not double-count
+                snapshot = session.metrics_snapshot()
+                assert sum(snapshot.error_counts.values()) == 1
+
+                import gc
+
+                del session
+                gc.collect()
+                await asyncio.sleep(0.01)
+                assert len(unretrieved) == 0
+            finally:
+                loop.set_exception_handler(None)
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_supervisor_cancellation_during_active_pump_failure(self) -> None:
+        """Verify that cancelling supervisor during pump failure executes clean termination,
+
+        observes the pump error, and leaves zero unretrieved exceptions.
+        """
+
+        async def _test() -> None:
+            loop = asyncio.get_running_loop()
+            unretrieved: list[dict[str, object]] = []
+            loop.set_exception_handler(lambda _l, ctx: unretrieved.append(ctx))
+
+            try:
+                hold_event = asyncio.Event()
+                real_exc = RuntimeError("pump failed before supervisor cancelled")
+
+                class _HoldingPort(FakeTelephonyMediaAdapter):
+                    async def receive_frame(self) -> None:
+                        await hold_event.wait()
+                        raise real_exc
+
+                session = VoiceBridgeSession(
+                    call_id="call-sup-cancel",
+                    tenant_id="tenant-sup-cancel",
+                    telephony_port=_HoldingPort(),
+                    ai_port=FakeAIMediaAdapter(),
+                )
+
+                await session.start()
+                hold_event.set()
+                assert session._inbound_task is not None
+                while not session._inbound_task.done():
+                    await asyncio.sleep(0.001)
+
+                # Cancel supervisor task directly
+                assert session._supervisor_task is not None
+                session._supervisor_task.cancel()
+
+                await asyncio.wait_for(
+                    session.wait_until_closed(propagate_error=False), timeout=2.0
+                )
+
+                assert session.state == VoiceBridgeState.FAILED
+                assert session.error is not None
+
+                t_in = session._inbound_task
+                t_out = session._outbound_task
+                assert t_in is not None and getattr(t_in, "_log_traceback", None) is False
+                assert t_out is not None and getattr(t_out, "_log_traceback", None) is False
+
+                import gc
+
+                del session, t_in, t_out
+                gc.collect()
+                await asyncio.sleep(0.01)
+                assert len(unretrieved) == 0
+            finally:
+                loop.set_exception_handler(None)
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_idempotent_repeated_wait_and_close_after_terminal_failure(self) -> None:
+        """Verify that sequential and concurrent wait_until_closed and close calls after failure
+
+        are idempotent, propagate the same error, and maintain FAILED state.
+        """
+
+        async def _test() -> None:
+            fail_exc = RuntimeError("terminal fatal error")
+
+            class _FailingPort(FakeTelephonyMediaAdapter):
+                async def receive_frame(self) -> None:
+                    raise fail_exc
+
+            tel = _FailingPort()
+            ai = FakeAIMediaAdapter()
+
+            session = VoiceBridgeSession(
+                call_id="call-idempotent-fail",
+                tenant_id="tenant-idempotent-fail",
+                telephony_port=tel,
+                ai_port=ai,
+            )
+
+            await session.start()
+
+            # First wait propagates failure
+            with pytest.raises(RuntimeError) as exc1:
+                await asyncio.wait_for(session.wait_until_closed(propagate_error=True), timeout=2.0)
+            assert exc1.value is fail_exc
+
+            # Repeated wait propagates same failure
+            with pytest.raises(RuntimeError) as exc2:
+                await asyncio.wait_for(session.wait_until_closed(propagate_error=True), timeout=2.0)
+            assert exc2.value is fail_exc
+
+            # wait without propagation returns cleanly
+            await asyncio.wait_for(session.wait_until_closed(propagate_error=False), timeout=2.0)
+
+            # Concurrent close calls after failure succeed cleanly
+            await asyncio.wait_for(
+                asyncio.gather(session.close(), session.close(), session.close()),
+                timeout=2.0,
+            )
+
+            assert session.state == VoiceBridgeState.FAILED
+            assert session.error is fail_exc
+            assert tel.is_closed is True
+            assert ai.is_closed is True
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_zero_leaked_tasks_after_dual_failure(self) -> None:
+        """Verify that after dual failure and session termination, zero voice bridge tasks leak."""
+
+        async def _test() -> None:
+            pre_tasks = {t for t in asyncio.all_tasks() if not t.done()}
+
+            class _InstantFailPort(FakeTelephonyMediaAdapter):
+                async def receive_frame(self) -> None:
+                    raise RuntimeError("instant fail")
+
+            session = VoiceBridgeSession(
+                call_id="call-task-leak-check",
+                tenant_id="tenant-task-leak-check",
+                telephony_port=_InstantFailPort(),
+                ai_port=_InstantFailPort(),
+            )
+
+            await session.start()
+            await asyncio.wait_for(session.wait_until_closed(propagate_error=False), timeout=2.0)
+            await asyncio.wait_for(session.close(), timeout=2.0)
+
+            post_tasks = {t for t in asyncio.all_tasks() if not t.done()}
+            new_tasks = post_tasks - pre_tasks - {asyncio.current_task()}
+            voice_tasks = [t for t in new_tasks if t.get_name().startswith("voice-")]
+
+            assert len(voice_tasks) == 0, f"Leaked voice tasks detected: {voice_tasks}"
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
