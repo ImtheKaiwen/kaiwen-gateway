@@ -6,9 +6,11 @@ import asyncio
 
 import pytest
 
+from kaiwen_gateway.core.identity import VerifiedConnectionContext
 from kaiwen_gateway.modules.voice.adapters.fake import (
     FakeAIMediaAdapter,
     FakeTelephonyMediaAdapter,
+    InterruptibleFakeTelephonyAdapter,
 )
 from kaiwen_gateway.modules.voice.bridge import (
     VoiceBridgeSession,
@@ -18,11 +20,18 @@ from kaiwen_gateway.modules.voice.domain import (
     AudioFrame,
     InvalidAudioFrameError,
     MediaBackpressureOverflowError,
+    MediaPortClosedError,
+    MediaPortError,
     OutOfOrderAudioFrameError,
     VoiceBridgeSessionClosedError,
     VoiceDomainError,
     create_synthetic_pcm16le_frame,
 )
+from kaiwen_gateway.modules.voice.telemetry import (
+    InMemoryVoiceTelemetrySink,
+    VoiceErrorCategory,
+)
+from kaiwen_gateway.transports.synthetic.media_adapter import WebSocketTelephonyMediaAdapter
 
 
 class TestVoiceBridgeSessionInitialization:
@@ -1984,5 +1993,729 @@ class TestVoiceBridgeConcurrentFailureAndLifecycleHardening:
             voice_tasks = [t for t in new_tasks if t.get_name().startswith("voice-")]
 
             assert len(voice_tasks) == 0, f"Leaked voice tasks detected: {voice_tasks}"
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+
+class TestVoiceBridgeOutboundBackpressureAndProducerLifecycle:
+    """M5.1C-B regression suite: Outbound backpressure, producer lifecycle, and EOF guarantees."""
+
+    def test_outbound_queue_saturation_times_out_and_fails_closed(self) -> None:
+        """Verify that when downstream stalls beyond backpressure_timeout, session fails closed."""
+
+        async def _test() -> None:
+            block_event = asyncio.Event()
+
+            class _StalledTelephony(FakeTelephonyMediaAdapter):
+                async def send_frame(self, frame: AudioFrame) -> None:
+                    await block_event.wait()
+
+            tel = _StalledTelephony()
+            ai = FakeAIMediaAdapter()
+            sink = InMemoryVoiceTelemetrySink()
+            session = VoiceBridgeSession(
+                call_id="call-outbound-bp-timeout",
+                tenant_id="tenant-bp",
+                telephony_port=tel,
+                ai_port=ai,
+                queue_capacity=2,
+                backpressure_timeout=0.05,
+                telemetry_sink=sink,
+            )
+
+            for i in range(5):
+                ai.push_frame(create_synthetic_pcm16le_frame(f"AI_FRAME_{i}".encode(), sequence=i))
+
+            await session.start()
+            try:
+                with pytest.raises(MediaBackpressureOverflowError) as exc_info:
+                    await asyncio.wait_for(
+                        session.wait_until_closed(propagate_error=True), timeout=1.0
+                    )
+                assert "Outbound queue capacity 2 exceeded" in str(exc_info.value)
+                assert "backpressure timed out after 0.05s" in str(exc_info.value)
+            finally:
+                block_event.set()
+                await session.close()
+
+            assert session.state == VoiceBridgeState.FAILED
+            assert isinstance(session.error, MediaBackpressureOverflowError)
+            snap = sink.snapshot()
+            assert snap.error_counts.get(VoiceErrorCategory.BACKPRESSURE_OVERFLOW, 0) == 1
+            assert session.outbound_queue_depth == 0
+            assert session.inbound_queue_depth == 0
+            sess_snap = session.metrics_snapshot()
+            # Total unforwarded frames must balance received frames
+            assert session.outbound_frames_received == sess_snap.unforwarded_outbound_frames
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_outbound_queue_saturation_recovers_before_timeout(self) -> None:
+        """Verify that short downstream delays before backpressure_timeout drain losslessly."""
+
+        async def _test() -> None:
+            resume_event = asyncio.Event()
+
+            class _PausingTelephony(FakeTelephonyMediaAdapter):
+                def __init__(self) -> None:
+                    super().__init__()
+                    self._paused = True
+
+                async def send_frame(self, frame: AudioFrame) -> None:
+                    if self._paused:
+                        self._paused = False
+                        await resume_event.wait()
+                    await super().send_frame(frame)
+
+            tel = _PausingTelephony()
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-outbound-bp-recover",
+                tenant_id="tenant-bp",
+                telephony_port=tel,
+                ai_port=ai,
+                queue_capacity=2,
+                backpressure_timeout=0.2,
+            )
+
+            for i in range(4):
+                ai.push_frame(create_synthetic_pcm16le_frame(f"AI_DATA_{i}".encode(), sequence=i))
+            ai.push_eof()
+            tel.push_eof()
+
+            await session.start()
+            # Downstream pauses briefly (40ms), then unblocks well before 200ms timeout
+            await asyncio.sleep(0.04)
+            resume_event.set()
+
+            await asyncio.wait_for(session.wait_until_closed(propagate_error=True), timeout=2.0)
+            assert session.state == VoiceBridgeState.CLOSED
+            assert session.outbound_frames_transferred == 4
+            snap = session.metrics_snapshot()
+            assert snap.unforwarded_outbound_frames == 0
+            assert session.outbound_queue_depth == 0
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_outbound_eof_sentinel_under_saturation_times_out(self) -> None:
+        """Verify that EOF sentinel insertion put(None) does not deadlock when queue is full."""
+
+        async def _test() -> None:
+            block_event = asyncio.Event()
+
+            class _StalledTelephony(FakeTelephonyMediaAdapter):
+                async def send_frame(self, frame: AudioFrame) -> None:
+                    await block_event.wait()
+
+            tel = _StalledTelephony()
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-outbound-eof-saturation",
+                tenant_id="tenant-bp",
+                telephony_port=tel,
+                ai_port=ai,
+                queue_capacity=2,
+                backpressure_timeout=0.05,
+            )
+
+            # Capacity 2: 1 taken by forwarder, 2 queued = queue saturated
+            ai.push_frame(create_synthetic_pcm16le_frame(b"FRAME_0", sequence=0))
+            ai.push_frame(create_synthetic_pcm16le_frame(b"FRAME_1", sequence=1))
+            ai.push_frame(create_synthetic_pcm16le_frame(b"FRAME_2", sequence=2))
+            # AI reaches EOF while queue is full
+            ai.push_eof()
+
+            await session.start()
+            try:
+                # Must not hang! Must fail with MediaBackpressureOverflowError on EOF insertion
+                with pytest.raises(MediaBackpressureOverflowError) as exc_info:
+                    await asyncio.wait_for(
+                        session.wait_until_closed(propagate_error=True), timeout=1.0
+                    )
+                assert "Outbound queue capacity 2 exceeded" in str(exc_info.value)
+                assert "backpressure timed out after 0.05s" in str(exc_info.value)
+            finally:
+                block_event.set()
+                await session.close()
+
+            assert session.state == VoiceBridgeState.FAILED
+            assert isinstance(session.error, MediaBackpressureOverflowError)
+            assert session.outbound_queue_depth == 0
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_inbound_eof_sentinel_under_saturation_times_out(self) -> None:
+        """Verify that inbound EOF sentinel insertion put(None) does not deadlock when inbound queue is full."""
+
+        async def _test() -> None:
+            block_event = asyncio.Event()
+
+            class _StalledAI(FakeAIMediaAdapter):
+                async def send_frame(self, frame: AudioFrame) -> None:
+                    await block_event.wait()
+
+            tel = FakeTelephonyMediaAdapter()
+            ai = _StalledAI()
+            session = VoiceBridgeSession(
+                call_id="call-inbound-eof-saturation",
+                tenant_id="tenant-bp",
+                telephony_port=tel,
+                ai_port=ai,
+                queue_capacity=2,
+                backpressure_timeout=0.05,
+            )
+
+            # Saturate inbound queue: 1 in flight, 2 in queue
+            tel.push_frame(create_synthetic_pcm16le_frame(b"IN_0", sequence=0))
+            tel.push_frame(create_synthetic_pcm16le_frame(b"IN_1", sequence=1))
+            tel.push_frame(create_synthetic_pcm16le_frame(b"IN_2", sequence=2))
+            tel.push_eof()
+
+            await session.start()
+            try:
+                with pytest.raises(MediaBackpressureOverflowError) as exc_info:
+                    await asyncio.wait_for(
+                        session.wait_until_closed(propagate_error=True), timeout=1.0
+                    )
+                assert "Inbound queue capacity 2 exceeded" in str(exc_info.value)
+                assert "backpressure timed out after 0.05s" in str(exc_info.value)
+            finally:
+                block_event.set()
+                await session.close()
+
+            assert session.state == VoiceBridgeState.FAILED
+            assert isinstance(session.error, MediaBackpressureOverflowError)
+            assert session.inbound_queue_depth == 0
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_explicit_close_while_outbound_producer_blocked(self) -> None:
+        """Verify that calling close() immediately unblocks a producer waiting on backpressure."""
+
+        async def _test() -> None:
+            block_event = asyncio.Event()
+
+            class _StalledTelephony(FakeTelephonyMediaAdapter):
+                async def send_frame(self, frame: AudioFrame) -> None:
+                    await block_event.wait()
+
+            tel = _StalledTelephony()
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-outbound-close-race",
+                tenant_id="tenant-bp",
+                telephony_port=tel,
+                ai_port=ai,
+                queue_capacity=2,
+                backpressure_timeout=10.0,  # Long timeout
+            )
+
+            for i in range(5):
+                ai.push_frame(create_synthetic_pcm16le_frame(f"AI_DATA_{i}".encode(), sequence=i))
+
+            await session.start()
+            await asyncio.sleep(0.02)  # Wait for queue to saturate
+
+            t_close_start = asyncio.get_running_loop().time()
+            await session.close()
+            t_close_elapsed = asyncio.get_running_loop().time() - t_close_start
+
+            block_event.set()
+            assert t_close_elapsed < 1.0, f"close() took too long: {t_close_elapsed}s"
+            assert session.state in (VoiceBridgeState.CLOSED, VoiceBridgeState.FAILED)
+            assert session.outbound_queue_depth == 0
+            assert tel.is_closed
+            assert ai.is_closed
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_interruption_while_outbound_frame_waiting_under_backpressure(self) -> None:
+        """Verify that an interruption purges queued frames even when downstream send is blocked."""
+
+        async def _test() -> None:
+            block_event = asyncio.Event()
+
+            class _StalledTelephony(InterruptibleFakeTelephonyAdapter):
+                async def send_frame(self, frame: AudioFrame) -> None:
+                    await block_event.wait()
+
+            tel = _StalledTelephony()
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-outbound-bp-interrupt",
+                tenant_id="tenant-bp",
+                telephony_port=tel,
+                ai_port=ai,
+                queue_capacity=2,
+                backpressure_timeout=0.5,
+            )
+
+            for i in range(4):
+                ai.push_frame(
+                    create_synthetic_pcm16le_frame(
+                        f"AI_T1_{i}".encode(),
+                        sequence=i,
+                        turn_id=1,
+                    )
+                )
+
+            await session.start()
+            await asyncio.sleep(0.02)
+
+            outcome = await session.interrupt(turn_id=1, timeout=0.2)
+            assert outcome.interrupted_turn_id == 1
+            assert outcome.locally_discarded_frames > 0
+
+            block_event.set()
+            await session.close()
+            assert session.outbound_queue_depth == 0
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_concurrent_sessions_stalled_and_healthy_isolation(self) -> None:
+        """Verify multi-call isolation: a stalled session failing does not affect a healthy concurrent session."""
+
+        async def _test() -> None:
+            block_event = asyncio.Event()
+
+            class _StalledTelephony(FakeTelephonyMediaAdapter):
+                async def send_frame(self, frame: AudioFrame) -> None:
+                    await block_event.wait()
+
+            # Stalled session
+            tel_stall = _StalledTelephony()
+            ai_stall = FakeAIMediaAdapter()
+            sess_stall = VoiceBridgeSession(
+                call_id="call-iso-stall",
+                tenant_id="tenant-iso-1",
+                telephony_port=tel_stall,
+                ai_port=ai_stall,
+                queue_capacity=2,
+                backpressure_timeout=0.05,
+            )
+            for i in range(5):
+                ai_stall.push_frame(create_synthetic_pcm16le_frame(b"STALL_FRAME", sequence=i))
+
+            # Healthy session
+            tel_healthy = FakeTelephonyMediaAdapter()
+            ai_healthy = FakeAIMediaAdapter()
+            sess_healthy = VoiceBridgeSession(
+                call_id="call-iso-healthy",
+                tenant_id="tenant-iso-2",
+                telephony_port=tel_healthy,
+                ai_port=ai_healthy,
+                queue_capacity=4,
+                backpressure_timeout=0.5,
+            )
+            for i in range(3):
+                ai_healthy.push_frame(create_synthetic_pcm16le_frame(b"HEALTHY_FRAME", sequence=i))
+            ai_healthy.push_eof()
+            tel_healthy.push_eof()
+
+            await sess_stall.start()
+            await sess_healthy.start()
+
+            # Healthy session should complete normally without error
+            await asyncio.wait_for(
+                sess_healthy.wait_until_closed(propagate_error=True), timeout=2.0
+            )
+            assert sess_healthy.state == VoiceBridgeState.CLOSED
+            assert sess_healthy.outbound_frames_transferred == 3
+
+            # Stalled session should fail with backpressure overflow
+            with pytest.raises(MediaBackpressureOverflowError):
+                await asyncio.wait_for(
+                    sess_stall.wait_until_closed(propagate_error=True), timeout=2.0
+                )
+            assert sess_stall.state == VoiceBridgeState.FAILED
+            assert isinstance(sess_stall.error, MediaBackpressureOverflowError)
+
+            block_event.set()
+            await sess_stall.close()
+            await sess_healthy.close()
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_zero_leaked_tasks_and_zero_retained_frames_after_backpressure_overflow(self) -> None:
+        """Verify that backpressure overflow completely drains queues and leaves zero leaked tasks."""
+
+        async def _test() -> None:
+            pre_tasks = {t for t in asyncio.all_tasks() if not t.done()}
+            block_event = asyncio.Event()
+
+            class _StalledTelephony(FakeTelephonyMediaAdapter):
+                async def send_frame(self, frame: AudioFrame) -> None:
+                    await block_event.wait()
+
+            tel = _StalledTelephony()
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-bp-task-leak",
+                tenant_id="tenant-bp-leak",
+                telephony_port=tel,
+                ai_port=ai,
+                queue_capacity=2,
+                backpressure_timeout=0.04,
+            )
+
+            for i in range(4):
+                ai.push_frame(create_synthetic_pcm16le_frame(b"BYTES_LEAK_CHECK", sequence=i))
+
+            await session.start()
+            try:
+                with pytest.raises(MediaBackpressureOverflowError):
+                    await asyncio.wait_for(
+                        session.wait_until_closed(propagate_error=True), timeout=2.0
+                    )
+            finally:
+                block_event.set()
+                await session.close()
+
+            assert session.inbound_queue_depth == 0
+            assert session.outbound_queue_depth == 0
+
+            post_tasks = {t for t in asyncio.all_tasks() if not t.done()}
+            new_tasks = post_tasks - pre_tasks - {asyncio.current_task()}
+            voice_tasks = [t for t in new_tasks if t.get_name().startswith("voice-")]
+            assert len(voice_tasks) == 0, f"Leaked voice tasks detected: {voice_tasks}"
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_single_outbound_frame_send_timeout_with_zero_queue_depth(self) -> None:
+        """P1 Remediation: A single outbound frame blocked in downstream send_bytes times out with zero queue depth."""
+
+        async def _test() -> None:
+            pre_tasks = {t for t in asyncio.all_tasks() if not t.done()}
+            stall_event = asyncio.Event()
+
+            class _StalledWebSocket:
+                async def send_bytes(self, data: bytes) -> None:
+                    await stall_event.wait()
+
+                async def send_text(self, text: str) -> None:
+                    pass
+
+            ctx = VerifiedConnectionContext(
+                connection_id="conn-p1",
+                tenant_id="tenant-p1",
+                provider_id="provider-p1",
+                call_id="call-p1-single-stall",
+                allowed_scopes=frozenset({"voice.stream"}),
+            )
+            mock_ws = _StalledWebSocket()
+            adapter = WebSocketTelephonyMediaAdapter(
+                websocket=mock_ws,
+                context=ctx,
+                backpressure_timeout=10.0,
+                send_timeout=0.05,
+            )
+            ai = FakeAIMediaAdapter()
+            sink = InMemoryVoiceTelemetrySink()
+            session = VoiceBridgeSession(
+                call_id="call-p1-single-stall",
+                tenant_id="tenant-p1",
+                telephony_port=adapter,
+                ai_port=ai,
+                queue_capacity=8,
+                backpressure_timeout=10.0,
+                telemetry_sink=sink,
+            )
+
+            # Produce exactly ONE frame from AI.
+            # This frame is dequeued by the forwarder, so outbound queue depth remains 0.
+            # No further frames are produced.
+            ai.push_frame(create_synthetic_pcm16le_frame(b"SINGLE_STALL_FRAME", sequence=0))
+
+            await session.start()
+            try:
+                # With send_timeout=0.05s, the blocked send_bytes must timeout and raise MediaPortError
+                with pytest.raises(MediaPortError) as exc_info:
+                    await asyncio.wait_for(
+                        session.wait_until_closed(propagate_error=True), timeout=2.0
+                    )
+                assert "Downstream WebSocket frame delivery timed out after 0.05s" in str(
+                    exc_info.value
+                )
+            finally:
+                stall_event.set()
+                await session.close()
+
+            assert session.state == VoiceBridgeState.FAILED
+            assert isinstance(session.error, MediaPortError)
+            assert adapter.is_closed is True
+
+            # Telemetry verification: exactly one PORT_IO_ERROR recorded
+            snap = sink.snapshot()
+            assert snap.error_counts.get(VoiceErrorCategory.PORT_IO_ERROR, 0) == 1
+            sess_snap = session.metrics_snapshot()
+            assert sess_snap.outbound_frames_received == 1
+            assert sess_snap.outbound_frames_sent == 0
+            assert sess_snap.unforwarded_outbound_frames == 1
+            assert sess_snap.outbound_queue_depth == 0
+
+            # Zero task leaks
+            post_tasks = {t for t in asyncio.all_tasks() if not t.done()}
+            new_tasks = post_tasks - pre_tasks - {asyncio.current_task()}
+            voice_tasks = [t for t in new_tasks if t.get_name().startswith("voice-")]
+            assert len(voice_tasks) == 0, f"Leaked voice tasks detected: {voice_tasks}"
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_send_deadline_recovery_before_timeout(self) -> None:
+        """P1 Remediation: Downstream pauses during send_bytes that unblock before send_timeout deliver losslessly."""
+
+        async def _test() -> None:
+            resume_event = asyncio.Event()
+
+            class _PausingWebSocket:
+                def __init__(self) -> None:
+                    self.sent: list[bytes] = []
+                    self._paused = True
+
+                async def send_bytes(self, data: bytes) -> None:
+                    if self._paused:
+                        self._paused = False
+                        await resume_event.wait()
+                    self.sent.append(data)
+
+                async def send_text(self, text: str) -> None:
+                    pass
+
+            ctx = VerifiedConnectionContext(
+                connection_id="conn-p1-rec",
+                tenant_id="tenant-p1",
+                provider_id="provider-p1",
+                call_id="call-p1-recover",
+                allowed_scopes=frozenset({"voice.stream"}),
+            )
+            mock_ws = _PausingWebSocket()
+            adapter = WebSocketTelephonyMediaAdapter(
+                websocket=mock_ws,
+                context=ctx,
+                send_timeout=0.2,
+            )
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-p1-recover",
+                tenant_id="tenant-p1",
+                telephony_port=adapter,
+                ai_port=ai,
+                queue_capacity=8,
+            )
+
+            ai.push_frame(create_synthetic_pcm16le_frame(b"PAUSED_RECOVER_FRAME", sequence=0))
+            ai.push_eof()
+            adapter.push_inbound_eof_nowait()
+
+            await session.start()
+            # Downstream pauses 30ms then unblocks well before 200ms send_timeout
+            await asyncio.sleep(0.03)
+            resume_event.set()
+
+            await asyncio.wait_for(session.wait_until_closed(propagate_error=True), timeout=2.0)
+            assert session.state == VoiceBridgeState.CLOSED
+            assert session.outbound_frames_transferred == 1
+            assert len(mock_ws.sent) == 1
+            sess_snap = session.metrics_snapshot()
+            assert sess_snap.unforwarded_outbound_frames == 0
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_explicit_close_during_downstream_send_stall(self) -> None:
+        """P1 Remediation: Explicit session.close() promptly unblocks a forwarder hung in downstream send_bytes."""
+
+        async def _test() -> None:
+            stall_event = asyncio.Event()
+
+            class _StalledWebSocket:
+                async def send_bytes(self, data: bytes) -> None:
+                    await stall_event.wait()
+
+                async def send_text(self, text: str) -> None:
+                    pass
+
+            ctx = VerifiedConnectionContext(
+                connection_id="conn-p1-close",
+                tenant_id="tenant-p1",
+                provider_id="provider-p1",
+                call_id="call-p1-close-during-send",
+                allowed_scopes=frozenset({"voice.stream"}),
+            )
+            mock_ws = _StalledWebSocket()
+            adapter = WebSocketTelephonyMediaAdapter(
+                websocket=mock_ws,
+                context=ctx,
+                send_timeout=10.0,  # Long timeout
+            )
+            ai = FakeAIMediaAdapter()
+            session = VoiceBridgeSession(
+                call_id="call-p1-close-during-send",
+                tenant_id="tenant-p1",
+                telephony_port=adapter,
+                ai_port=ai,
+            )
+
+            ai.push_frame(create_synthetic_pcm16le_frame(b"STALL_THEN_CLOSE", sequence=0))
+            await session.start()
+            await asyncio.sleep(0.02)  # Wait for forwarder to enter send_bytes
+
+            t0 = asyncio.get_running_loop().time()
+            await session.close()
+            t_elapsed = asyncio.get_running_loop().time() - t0
+
+            stall_event.set()
+            assert t_elapsed < 1.0, f"session.close() took too long: {t_elapsed}s"
+            assert session.state in (VoiceBridgeState.CLOSED, VoiceBridgeState.FAILED)
+            assert adapter.is_closed is True
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_adapter_close_behavior_following_send_timeout(self) -> None:
+        """P1 Remediation: Following send timeout, adapter is terminal, turn waiters unblock, subsequent I/O raises."""
+
+        async def _test() -> None:
+            stall_event = asyncio.Event()
+
+            class _StalledWebSocket:
+                async def send_bytes(self, data: bytes) -> None:
+                    await stall_event.wait()
+
+                async def send_text(self, text: str) -> None:
+                    pass
+
+            ctx = VerifiedConnectionContext(
+                connection_id="conn-p1-adapter-test",
+                tenant_id="tenant-p1",
+                provider_id="provider-p1",
+                call_id="call-p1-adapter-test",
+                allowed_scopes=frozenset({"voice.stream"}),
+            )
+            mock_ws = _StalledWebSocket()
+            adapter = WebSocketTelephonyMediaAdapter(
+                websocket=mock_ws,
+                context=ctx,
+                send_timeout=0.04,
+            )
+
+            frame = create_synthetic_pcm16le_frame(b"ADAPTER_TIMEOUT_FRAME", sequence=0)
+            try:
+                with pytest.raises(MediaPortError) as exc_info:
+                    await adapter.send_frame(frame)
+                assert "Downstream WebSocket frame delivery timed out after 0.04s" in str(
+                    exc_info.value
+                )
+            finally:
+                stall_event.set()
+
+            # Verify adapter lifecycle state
+            assert adapter.is_closed is True
+            assert adapter.frames_sent == 0
+            assert adapter.bytes_sent == 0
+
+            # Subsequent operations must fail with MediaPortClosedError
+            with pytest.raises(MediaPortClosedError):
+                await adapter.send_frame(frame)
+            with pytest.raises(MediaPortClosedError):
+                await adapter.send_control_text("test")
+            with pytest.raises(MediaPortClosedError):
+                await adapter.receive_frame()
+
+            # Idempotent close
+            await adapter.close()
+            assert adapter.is_closed is True
+
+        asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
+
+    def test_concurrent_sessions_single_frame_send_stall_isolation(self) -> None:
+        """P1 Remediation: A single-frame downstream send stall on one call does not impact another healthy call."""
+
+        async def _test() -> None:
+            stall_event = asyncio.Event()
+
+            class _StalledWS:
+                async def send_bytes(self, data: bytes) -> None:
+                    await stall_event.wait()
+
+                async def send_text(self, text: str) -> None:
+                    pass
+
+            class _HealthyWS:
+                def __init__(self) -> None:
+                    self.sent: list[bytes] = []
+
+                async def send_bytes(self, data: bytes) -> None:
+                    self.sent.append(data)
+
+                async def send_text(self, text: str) -> None:
+                    pass
+
+            ctx_stall = VerifiedConnectionContext(
+                connection_id="conn-iso-s",
+                tenant_id="tenant-iso-1",
+                provider_id="provider-p1",
+                call_id="call-iso-stall",
+                allowed_scopes=frozenset({"voice.stream"}),
+            )
+            ctx_healthy = VerifiedConnectionContext(
+                connection_id="conn-iso-h",
+                tenant_id="tenant-iso-2",
+                provider_id="provider-p1",
+                call_id="call-iso-healthy",
+                allowed_scopes=frozenset({"voice.stream"}),
+            )
+
+            adapter_stall = WebSocketTelephonyMediaAdapter(
+                websocket=_StalledWS(),
+                context=ctx_stall,
+                send_timeout=0.05,
+            )
+            adapter_healthy = WebSocketTelephonyMediaAdapter(
+                websocket=_HealthyWS(),
+                context=ctx_healthy,
+                send_timeout=0.5,
+            )
+
+            ai_stall = FakeAIMediaAdapter()
+            ai_healthy = FakeAIMediaAdapter()
+
+            sess_stall = VoiceBridgeSession(
+                call_id="call-iso-stall",
+                tenant_id="tenant-iso-1",
+                telephony_port=adapter_stall,
+                ai_port=ai_stall,
+            )
+            sess_healthy = VoiceBridgeSession(
+                call_id="call-iso-healthy",
+                tenant_id="tenant-iso-2",
+                telephony_port=adapter_healthy,
+                ai_port=ai_healthy,
+            )
+
+            ai_stall.push_frame(create_synthetic_pcm16le_frame(b"STALL_SINGLE", sequence=0))
+            ai_healthy.push_frame(create_synthetic_pcm16le_frame(b"HEALTHY_SINGLE", sequence=0))
+            ai_healthy.push_eof()
+            adapter_healthy.push_inbound_eof_nowait()
+
+            await sess_stall.start()
+            await sess_healthy.start()
+
+            # Healthy session must finish normally
+            await asyncio.wait_for(
+                sess_healthy.wait_until_closed(propagate_error=True), timeout=2.0
+            )
+            assert sess_healthy.state == VoiceBridgeState.CLOSED
+            assert sess_healthy.outbound_frames_transferred == 1
+
+            # Stalled session must fail with MediaPortError after 0.05s
+            with pytest.raises(MediaPortError):
+                await asyncio.wait_for(
+                    sess_stall.wait_until_closed(propagate_error=True), timeout=2.0
+                )
+            assert sess_stall.state == VoiceBridgeState.FAILED
+            assert isinstance(sess_stall.error, MediaPortError)
+
+            stall_event.set()
+            await sess_stall.close()
+            await sess_healthy.close()
 
         asyncio.run(asyncio.wait_for(_test(), timeout=5.0))
