@@ -1,9 +1,9 @@
 # Kaiwen Gateway — Development Roadmap
 
-> **Status:** Active roadmap — M0 Complete (2026-11-01); M1 Complete (2026-11-01; M1.1–M1.4 verified); M2 Complete; M3 Complete; M4 In progress (M4.1 Complete — PR #20 / `577e6b9`; M4.2A Complete — PR #21 / `df28327`; M4.2B.1 Complete — PR #22 / `e457f8f`; M4.2B.2 Complete — PR #23 / `a3528ea`; external AI integration pending); M5 In progress (M5.1A provider-independent Voice Bridge observability foundation)
+> **Status:** Active roadmap — M0 Complete (2026-11-01); M1 Complete (2026-11-01; M1.1–M1.4 verified); M2 Complete; M3 Complete; M4 In progress (M4.1 Complete — PR #20 / `577e6b9`; M4.2A Complete — PR #21 / `df28327`; M4.2B.1 Complete — PR #22 / `e457f8f`; M4.2B.2 Complete — PR #23 / `a3528ea`; external AI integration pending); M5 In progress (M5.1A Complete — PR #24 / `aca13cc`; M5.1B paced synthetic media concurrency & load evaluation in progress)
 > **Project phase:** Pre-alpha implementation
 > **Initial target release:** `0.1.0a1` (synthetic-environment alpha)
-> **Last reviewed:** 2026-11-07
+> **Last reviewed:** 2026-11-08
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
 > **Primary scope:** Reusable Python library and optional ASGI service; **Voice is the only V1 functional module**.
 
@@ -63,7 +63,7 @@ Use only these milestone status values:
 | **M2** | Core contracts, identity and security/admission | `In progress` (M2.1 merged in `#9` / `68030a0`; M2.2A merged in `#10` / `f65ad6d`; M2.2B merged in `#11` / `705091e`; M2.3 merged in `#12` / `192ec9b`; M2.4A merged in `#13` / `cd835bf`; M2.4B merged in `#14` / `ade73ec`; remaining M2 exit criteria under evaluation) | M1 |
 | **M3** | ASGI/WSS ingress and synthetic telephony adapter | `Complete` (M3.1 merged in `#15` / `224284f`; M3.2A merged in `#16` / `558bd95`; M3.2B merged in `#17` / `7a28c40`; M3.3A merged in `#18` / `d347eae`; M3.3B merged in `#19` / `4fa9a18` & verified on `main` run `42289608463`) | M2 |
 | **M4** | Voice audio bridge and Kaiwen Agent integration | `In progress` (synthetic Voice Bridge foundation complete: M4.1 merged in `#20` / `577e6b9`; M4.2A merged in `#21` / `df28327`; M4.2B.1 merged in `#22` / `e457f8f`; M4.2B.2 merged in `#23` / `a3528ea` & verified on `main` run `42398851469`; full M4 external AI integration remains pending — Kaiwen Agent integration deferred while upstream public API is under active development, OpenAI Live unverified) | M3 |
-| **M5** | Resilience, simulation, security and load evidence | `In progress` (M5.1A provider-independent Voice Bridge observability foundation; full M5 depends on M4 completion) | M4 |
+| **M5** | Resilience, simulation, security and load evidence | `In progress` (M5.1A Complete — PR #24 / `aca13cc` & verified on `main` run `42412851784`; M5.1B paced synthetic media concurrency & overload evaluation at 1, 5, and 25 simultaneous calls in progress; full M5 depends on M4 completion) | M4 |
 | **M6** | Alpha packaging and release-readiness review | `Not started` | M5 |
 | **M7** | Conditional Verimor pilot | `Blocked` (official protocol and authorizations) | M6 + `OPEN-*` dependencies |
 | **M8** | Production-readiness decision (separate track) | `Not started` | M7 evidence and separately approved operations plan |
@@ -195,8 +195,8 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - [ ] Controlled fallback or clean termination. Human transfer only if actually supported and separately verified.
 - [ ] Replay/duplicate-start handling appropriate to the initial process model; defer distributed atomic storage to the live pilot gate where allowed.
 - [ ] No-storage-by-default and redaction tests for logs, traces, errors and CI artifacts.
-- [ ] In-process performance instrumentation (queue duration, bridge processing latency, connection counts, rejects, provider errors; M5.1A provider-independent Voice Bridge telemetry foundation implemented for synthetic Voice paths).
-- [ ] Reproducible synthetic load tests at **1 → 5 → 25 → 50 → 100** concurrent calls as environment/capacity permits, measuring p50/p95/p99, CPU, memory, queue growth and failure rate.
+- [x] In-process performance instrumentation (queue duration, bridge processing latency, connection counts, rejects, provider errors; M5.1A provider-independent Voice Bridge telemetry foundation merged in [PR #24](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/24) / commit `aca13ccc7c02019d8ab10fb04a87f732d24d333d` and verified on `push -> main` in [GitHub Actions run `42412851784`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/42412851784)).
+- [ ] Reproducible synthetic load tests at **1 → 5 → 25 → 50 → 100** concurrent calls as environment/capacity permits, measuring p50/p95/p99, CPU, memory, queue growth and failure rate (M5.1B paced 20 ms synthetic media concurrency and overload evaluation at 1, 5, and 25 simultaneous calls implemented locally in `tools/synthetic_media_load.py` validated locally in `tools/synthetic_media_load.py` with process isolation and Mode A/B scheduling; 25 unit tests passing in `tests/test_synthetic_media_load.py` (including R2.1 process lifecycle, async IPC, ephemeral port binding, and env secret hardening); 50/100 stages and provider-backed load evaluation remain pending).
 - [ ] Scheduled/manual benchmark workflow when stable; security and dependency scans without leaking test data.
 
 **Exit evidence:** `AT-001` through `AT-008`, `AT-010` and `AT-011` test reports where applicable; leak/cleanup evidence; environment and traffic profile included in benchmark artifact; regressions documented rather than masked by generous averages.

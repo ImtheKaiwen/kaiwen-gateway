@@ -1,9 +1,9 @@
-# Voice Media Bridge, Turn Interruption, Observability & Audio Contracts (M4.1 / M4.2 / M5.1A)
+# Voice Media Bridge, Turn Interruption, Observability & Paced Concurrency Load Evaluation (M4.1 / M4.2 / M5.1A / M5.1B)
 
-> **Status:** M4.1 Complete (PR #20 / `577e6b9`); M4.2A Complete (PR #21 / `df28327`); M4.2B.1 Complete (PR #22 / `e457f8f`); M4.2B.2 Complete (PR #23 / `a3528ea`); M5.1A In progress (provider-independent Voice Bridge observability foundation)
-> **Document version:** 1.4
-> **Last updated:** 2026-11-07
-> **Scope:** Voice-local media domain contracts, provider-neutral media ports, bounded bidirectional bridge, turn identity, stale frame suppression, interruption capability protocol, synthetic binary WebSocket transport, and provider-independent in-memory telemetry.
+> **Status:** M4.1 Complete (PR #20 / `577e6b9`); M4.2A Complete (PR #21 / `df28327`); M4.2B.1 Complete (PR #22 / `e457f8f`); M4.2B.2 Complete (PR #23 / `a3528ea`); M5.1A Complete (PR #24 / `aca13cc`); M5.1B In progress (paced synthetic media concurrency & load evaluation)
+> **Document version:** 1.5
+> **Last updated:** 2026-11-08
+> **Scope:** Voice-local media domain contracts, provider-neutral media ports, bounded bidirectional bridge, turn identity, stale frame suppression, interruption capability protocol, synthetic binary WebSocket transport, provider-independent in-memory telemetry, and real-time 20 ms paced synthetic media concurrency evaluation.
 
 ---
 
@@ -204,7 +204,136 @@ Synthetic 25-frame baseline tests (25 frames $\times$ 20 ms = 500 ms of represen
 
 ---
 
-## 7. Verification and Deterministic Testing
+## 7. Paced Synthetic Media Concurrency & Overload Evaluation (M5.1B)
+
+Milestone M5.1B (`tools/synthetic_media_load.py`) evaluates the **media plane** (`/ws/synthetic-media/v1`) under real-time 20 ms frame pacing at **1, 5, and 25 simultaneous calls**, reusing M5.1A's `InMemoryVoiceTelemetrySink`, `VoiceSessionMetricsSnapshot`, and `BoundedLatencyAggregator`.
+
+### Why M5.1B Is Distinct from M3.3B (`tools/synthetic_soak.py`):
+- **M3.3B (`tools/synthetic_soak.py`)** exercised the **control plane** (`/ws/synthetic/v1` JSON `call.start`, `ping`/`pong`, `call.end`), admission ceilings, and draining without streaming binary audio frames or instantiating `VoiceBridgeSession`.
+- **M5.1B (`tools/synthetic_media_load.py`)** exercises the **media plane** (`/ws/synthetic-media/v1`) with continuous, barrier-synchronized 20 ms binary PCM16LE audio streaming (`640 B/frame` at 16 kHz mono = `50 frames/s` inbound + `50 frames/s` outbound per call), verifying frame byte integrity, FIFO ordering, bounded queue high-water marks, internal Gateway processing/queue-wait latencies, and resource cleanup across concurrent sessions.
+
+### Monotonic 20 ms Pacing Algorithm & Missed-Deadline Policy:
+- **Reference Schedule (`MonotonicFramePacer`):** Each call establishes a monotonic reference origin $t_0$ after all concurrent calls pass the `call.started` barrier. Frame slot $k \in \{0, \dots, N-1\}$ is assigned an immutable deadline:
+  $$t_{\text{deadline}}(k) = t_0 + k \times 0.020\text{ s}$$
+  The reference origin $t_0$ is **never** reset after a late wakeup, ensuring scheduling drift is measured rather than concealed.
+- **Missed-Deadline Policy (`monotonic_fixed_schedule_rate_limited_catchup`):**
+  1. A slot is recorded in `missed_deadlines` whenever actual wakeup/send time exceeds $t_{\text{deadline}}(k) + 20.0\text{ ms}$.
+  2. If `--skip-threshold-ms` is configured and lateness reaches that threshold, the stale slot is skipped (`frames_skipped`) rather than sent late.
+  3. When catching up after an OS timer or event-loop stall, consecutive sends enforce a minimum anti-burst spacing (`min_send_spacing_ms = 5.0 ms` default, i.e. $0.25 \times \text{interval}$) so the client never floods the WebSocket with zero-delay back-to-back bursts.
+- **Deterministic 640-Byte Payloads:** Every 640-byte frame carries a 16-byte little-endian header (`magic=0x4B574D35`, `session_slot_id`, `frame_seq`, `blake2s_checksum`) followed by 624 deterministic PCM16LE body bytes (`"deterministic"`, `"sine"`, or `"ramp"`), enabling exact detection of missing, duplicate, out-of-order, corrupt, or cross-session frames.
+
+### Measurement Definitions, Percentile Semantics & Heuristic Bounds:
+| Metric | Definition & Boundary | Aggregation Method |
+| --- | --- | --- |
+| `frame_scheduling_interval_ms` / `scheduler_lateness_ms` / `scheduler_jitter_ms` | Client-side monotonic send cadence, wakeup lateness $\max(0, t_{\text{actual}} - t_{\text{deadline}})$, and $\|(\Delta t_{\text{send}}) - 20\text{ ms}\|$. | `pooled_per_frame_exact`: 100% sample retention across calls. Raw IEEE 754 64-bit float storage is ~48.8 KiB for 6,250 samples ($6,250 \times 8\text{ B}$ at S3); CPython object/list memory is ~200–300 KiB (finite, $\mathcal{O}(N_{\text{calls}} \times N_{\text{frames}})$). |
+| `client_synthetic_echo_rtt_ms` | Client monotonic round-trip from `ws.send(frame)` to receiving matching 640-byte echoed frame on loopback. Includes client scheduling, loopback transport, Gateway queues, and AI echo. | `pooled_per_frame_exact` across all echoed frames, plus `max_session_p95_ms` across sessions. |
+| `gateway_inbound_processing_ms` / `gateway_outbound_processing_ms` | Gateway internal per-frame receiver validation + forwarder dispatch + port `send_frame` await time from `VoiceSessionMetricsSnapshot`. | `across_session_percentiles`: Distribution of per-session p95s across active sessions (`session_p50_median_ms`, `session_p95_p95_ms`, `max_session_p95_ms`, `weighted_frame_mean_ms`). |
+| `gateway_inbound_queue_wait_ms` / `gateway_outbound_queue_wait_ms` | Per-frame residence time inside `_inbound_queue` and `_outbound_queue` (capacity 8). | `across_session_percentiles` over per-session p95 metrics snapshots. |
+| `asgi_websocket_send_bytes_ms` | Server `websocket.send_bytes(frame.payload)` await time (`network_transport_ms`). Local ASGI socket write only, not wire propagation or speaker playback. | `across_session_percentiles` over per-session p95 metrics snapshots. |
+| `gateway_added_overhead_estimate_ms` | Descriptive heuristic summing session p95s of inbound queue wait, inbound processing, outbound queue wait, and outbound processing. Labeled `summary_method: "uncorrelated_component_percentile_sum_heuristic"`, `is_directly_measured_end_to_end_latency: False`, `nfr_perf_004_qualified: False`. | Sum of marginal component p95s (descriptive heuristic; NOT a guaranteed upper bound, does not measure end-to-end transit, does not qualify `NFR-PERF-004`). |
+| `event_loop_lag_ms` | Periodic 10 ms monotonic sleep probe measuring asyncio event-loop wakeup delay. | `pooled_per_frame_exact` over loopback evaluation duration. |
+| `python_heap_peak_kib` vs `process_rss_peak_kib` | `tracemalloc` Python allocator heap peak vs OS process Working Set / VmRSS peak (reported separately, never conflated). | Min/Max/Current/Peak tracked via platform stdlib (`psapi` on Windows, `/proc/self/status` on Linux). |
+| `upstream_ai_generation_ms`, `external_telephony_network_ms`, `remote_playback_latency_ms` | Explicitly `available=False` and `None` in synthetic mode (`unknown_without_provider_instrumentation` / `unknown_without_playback_acknowledgment`). | Unavailable without provider instrumentation. |
+
+### Overhead Heuristic Interpretation & Omitted Intervals:
+Summing the 95th percentiles of internal Gateway components (`inbound_queue_wait_p95 + inbound_proc_p95 + outbound_queue_wait_p95 + outbound_proc_p95`) is an **uncalibrated descriptive heuristic**, NOT a valid mathematical upper bound. In general, $p95(\sum X_i) \le \sum p95(X_i)$ is mathematically false whenever upper-tail events are disjoint or negatively dependent (as proven in regression test `test_percentile_sum_inequality_counterexample_and_conjoint_latency_distinction`, where $p95(X_1 + X_2) = 100\text{ ms} > 10\text{ ms} = p95(X_1) + p95(X_2)$).
+
+Furthermore, this component sum is NOT an empirical measurement of end-to-end frame transit latency, and omits multiple critical latency intervals partitioned by ownership:
+
+**Category A: Gateway-Owned Latency Intervals (Unmeasured or Excluded from Component Sum):**
+1. Telephony ingress adapter queue residence time (`WebSocketTelephonyMediaAdapter._inbound_queue` wait before bridge pops it).
+2. Producer-side `queue.put()` backpressure waiting under queue saturation (`t_enqueued - t_pre_enqueue`).
+3. Outbound transport send duration (`websocket.send_bytes` await duration, tracked separately as `network_transport_ms` but excluded from the 4-component sum).
+4. Local ASGI server framework demuxing, routing, and task-switch latency.
+
+**Category B: Genuinely External Latency Intervals (Outside Gateway Boundary):**
+1. Telephony carrier / PSTN / SIP network propagation wire delay.
+2. Client OS TCP network stack and kernel socket buffer queueing.
+3. Upstream AI provider network round-trip, model inference, and audio synthesis.
+4. Remote endpoint jitter buffering, audio hardware decoding, and physical acoustic playback.
+
+Consequently, `nfr_perf_004_qualified` remains `False` until end-to-end hardware/provider instrumentation is integrated in M5.2.
+
+### OS Timer Granularity & Single-Loop Loopback Limitations:
+- Non-real-time OS schedulers (especially Windows with ~1–15.6 ms timer resolution) introduce wakeup jitter on `asyncio.sleep(0.020)`.
+- In single-process loopback execution, the Uvicorn server, `VoiceBridgeSession` tasks, and all $N$ WebSocket client tasks share a single Python event loop thread. At $N=25$ (`1,250 frames/s` inbound + `1,250 frames/s` outbound = `2,500 WebSocket frames/s`), single-core CPU utilization reaches ~92–94%, inflating client-side loopback echo RTT (`p95 ~689.7 ms`) while Gateway internal per-session added overhead remains bounded (`p95 ~22.9 ms` $\le 50\text{ ms}$ target, max queue HWM `1`).
+
+### Expected Rejection vs. Unexpected Failure:
+- **Expected Rejections (`expected_rejections`):** Policy-enforced admission denials (`1008` / HTTP rejection) during capacity saturation (`max_concurrent_connections`, `max_connections_per_tenant`) or instance draining. Verified to allocate **zero** upstream AI media ports.
+- **Unexpected Failures (`unexpected_failures`):** Unplanned disconnects, missing/corrupt/out-of-order frames, unhandled exceptions, or post-run resource leaks (`final_active_connections != 0` or `leaked_tasks != 0`).
+
+### Reproduction Commands:
+```bash
+# Full S1=1, S2=5, S3=25 evaluation (5.0s per stage) + 8 GATE F fault/overload scenarios
+uv run --locked --group dev --extra server python -m tools.synthetic_media_load --duration 5 --seed 42
+
+# Single concurrency stage without fault suite, writing sanitized JSON report
+uv run --locked --group dev --extra server python -m tools.synthetic_media_load --concurrency 5 --duration 5 --seed 42 --no-faults --output m5_s2.json
+```
+
+### Empirical Reference Summary (Windows 11, Python 3.12.13, 12 Logical CPUs, 5.0 s / 250 Frames per Call):
+| Stage | Achieved Concurrency | Sent / Echoed | Loss / Dup / OOO / Mismatch | Gateway In / Out Proc p95 (ms) | Gateway In / Out Queue Wait p95 (ms) | Gateway Added Overhead p95 (ms) | Client Echo RTT p95 (ms) | Max Queue HWM (In / Out) | CPU (1-Core / All-Core) | Heap Peak / RSS Peak (KiB) | Cleanup (Conn / Calls / Tasks) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **S1 (`1`)** | `1 / 1` | `250 / 250` | `0 / 0 / 0 / 0` | `0.0699 / 0.0321` | `0.0527 / 0.0354` | `0.1901` | `1.8774` | `1 / 1` | `9.19% / 0.77%` | `2,072.57 / 41,192.0` | `0 / 0 / 0` |
+| **S2 (`5`)** | `5 / 5` | `1,250 / 1,250` | `0 / 0 / 0 / 0` | `0.0612 / 0.0347` | `0.9168 / 1.6961` | `2.5664` | `10.0850` | `1 / 1` | `20.61% / 1.72%` | `3,091.31 / 44,104.0` | `0 / 0 / 0` |
+| **S3 (`25`)** | `25 / 25` | `6,250 / 6,250` | `0 / 0 / 0 / 0` | `0.0782 / 0.0378` | `11.2876 / 12.0455` | `22.9426` | `689.6707` | `1 / 1` | `92.66% / 7.72%` | `15,255.28 / 66,536.0` | `0 / 0 / 0` |
+
+All 8 GATE F fault and overload scenarios pass with `0` leaked connections, `0` leaked calls, `0` leaked Voice sessions, and `0` leaked asyncio tasks:
+1. `premature_client_disconnect`: Client disconnects during streaming; bridge aborts cleanly without unhandled exceptions.
+2. `blocked_ai_consumer_inbound_backpressure`: AI port blocks inbound consumption; `_inbound_queue` saturates (HWM=8), backpressure timeout fires, WebSocket closes with `1011`, and `BACKPRESSURE_OVERFLOW` error is recorded.
+3. `blocked_outbound_send_backpressure`: Outbound ASGI send blocks; `_outbound_queue` saturates (HWM=8, 1 frame in flight + 8 buffered); synthetic AI port injects `MediaBackpressureOverflowError` verifying Gateway exception handling, WebSocket closure with `1011`, and clean drainage of 9 unforwarded frames (genuine `VoiceBridgeSession` internal queue timeout is independently verified via direct unit tests).
+4. `normal_call_end_during_active_audio`: Client ends call cleanly with `call.end`; bridge flushes and closes with `1000`.
+5. `admission_capacity_saturation`: Global connection limit rejects excess calls with `1008`; zero AI ports allocated for rejected calls.
+6. `draining_with_active_media_calls`: Server initiates graceful drain; active calls complete streaming while new arrivals are rejected.
+7. `recovery_after_interrupted_and_failed_calls`: After an interrupted call (Turn 1 $\to$ Turn 2 with audio recovery) and an invalid frame failure (`1003`), a subsequent call streams normally.
+8. `two_tenants_concurrent_isolation`: Two tenants run concurrent media calls simultaneously with zero cross-tenant state or audio leakage.
+
+---
+
+
+### Process-Isolated Media Concurrency & Load Validation (M5.1B-R2 & R2.1)
+
+To resolve whether the severe 25-call loopback echo RTT latency observed in the single-event-loop architecture was a Gateway bottleneck or client load-generation contention, M5.1B-R2 and R2.1 introduce **process-isolated concurrency testing** via `start_isolated_media_server_process` in `tools/synthetic_media_load.py`.
+
+#### 1. Process Isolation Architecture & Hardening:
+- **Server Process:** Dedicated child OS process running Uvicorn + ASGI Gateway app, `create_gateway_app`, `InMemoryVoiceTelemetrySink`, and an independent server `EventLoopLagMonitor`. Communication uses line-delimited JSON over `stdin`/`stdout`.
+- **Client Runner Process:** Independent parent OS process running $N$ concurrent client sender/receiver tasks, `MonotonicFramePacer`, client `EventLoopLagMonitor`, and collecting RTT/lateness/jitter samples.
+- **Shared Monotonic Scheduling Epoch (Finding 1):** A single shared epoch origin $t_0 = \text{time.perf\_counter()}$ is recorded immediately upon barrier release and passed to all $N$ client pacers. Every client session schedules its $k$-th frame against the deterministic deadline:
+  $$\text{deadline}_k = t_0 + \frac{\text{phase\_offset\_ms}}{1000.0} + (k \times \text{interval\_s})$$
+  Client dispatch skew (the delta between target deadline and actual send attempt of frame 0) is measured and reported separately as `client_dispatch_skew_ms`, never conflated with configured phase offsets.
+- **Deterministic Asynchronous IPC Lifecycle (Finding 2):** Replaced synchronous thread-pool pipe reads with native `asyncio.create_subprocess_exec` and `asyncio.StreamReader` (with a 16 MiB line limit). Timeouts and cancellations terminate cleanly without abandoning blocked OS worker threads in `concurrent.futures.ThreadPoolExecutor`.
+- **Atomic Kernel Ephemeral Port Binding (Finding 3):** Uvicorn binds with `port=0`, allowing the OS kernel to allocate an unused ephemeral port atomically (eliminating TOCTOU port race conditions). Both child and parent perform active bidirectional TCP socket connectivity probes (`socket.create_connection`) before WebSocket streaming begins.
+- **Secret Key Environment Isolation (Finding 5):** Secrets are passed exclusively via the private environment variable `KW_SYNTHETIC_MEDIA_SECRET_KEY_HEX`, eliminating `--secret-key-hex` from the command-line argument vector. Secret material is stripped from the child stdout handshake JSON, and IPC schemas are strictly validated.
+- **Subprocess Failure-Path Coverage (Finding 6 & B2):** Explicit deterministic mocked-subprocess regression tests in `tests/test_synthetic_media_load.py` verify startup failures, startup timeouts, child error events, malformed IPC schemas, shutdown timeouts with forced process termination (`proc.kill()`), and cancellation. Real-child post-start abnormal termination and >16 MiB stream overflow remain documented nonblocking runtime limitations.
+- **Subprocess Stderr Handling (Finding B1):** The child process configures standard library logging at `WARNING` level to `sys.stderr`. The parent inspects and decodes `proc.stderr` on startup failure and process exit. Continuous asynchronous draining of `stderr` during active streaming is deliberately omitted to prevent background task leaks and keep test tooling focused.
+- **Server Event-Loop Lag Sample Accounting (Finding B3):** The lag monitor probes event loop latency at a configured interval of 10 ms (`0.010 s`). On Windows, `BaseEventLoop._clock_resolution` defaults to 15.625 ms (`0.015625 s`), which permits scheduled timers to evaluate early when high-frequency IOCP network packets (1,250 frames/s across 25 calls) wake the event loop. The internal `BoundedLatencyAggregator` strictly enforces `window_capacity=256` to bound memory usage regardless of total probe iterations. A server lag p95 of 0.00 ms confirms the server event loop was unblocked, though tail p99 and max capture scheduling quantization.
+
+#### 2. Phase-Aligned (Mode A) vs. Phase-Staggered (Mode B) Scheduling:
+- **Mode A (Aligned, `--scheduling-mode aligned`):** All $N$ sessions schedule frame 0 at $t_0$ (`phase_offset_ms = 0.0`), creating simultaneous burst wakeups.
+- **Mode B (Staggered, `--scheduling-mode staggered`):** Sessions are evenly staggered across the 20 ms frame interval ($\text{offset} = \text{slot\_id} \times \frac{20.0}{N}\text{ ms}$), distributing send wakeups evenly across time.
+
+#### 3. Empirical Reference Matrix (Windows 11, Python 3.12.13, 12 Logical CPUs, 20 ms / 640-byte Frames):
+| Stage & Mode | Isolation | Concurrency / Duration | Sent / Echoed | Missing / Dup / OOO | Client Echo RTT p95 (ms) | Client Dispatch Skew p95 (ms) | Gateway Overhead Est. p95 Sum (ms) | Server Event Loop Lag p95 (ms) | Client Event Loop Lag p95 (ms) | CPU Time (Client / Server) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **S1 (1 call)** | Isolated (Aligned) | 1 / 5.0 s | 250 / 250 | 0 / 0 / 0 | **1.94** | 0.25 | 0.10 | **0.00** | 5.85 | 0.25 s / 0.14 s |
+| **S2 (5 calls)** | Isolated (Aligned) | 5 / 5.0 s | 1,250 / 1,250 | 0 / 0 / 0 | **7.31** | 4.31 | 0.32 | **0.00** | 15.06 | 1.25 s / 0.84 s |
+| **S3 Baseline** | In-Process (Single Loop) | 25 / 5.0 s | 6,250 / 6,250 | 0 / 0 / 0 | **2,582.27** | 6.10 | 22.10 | 25.08 | 25.08 | 6.12 s (shared single loop) |
+| **S3 Run 1 (Mode A)** | Isolated (Aligned) | 25 / 5.0 s | 6,250 / 6,250 | 0 / 0 / 0 | **28.15** | 11.33 | 1.00 | **0.00** | 21.32 | 3.20 s / 1.25 s |
+| **S3 Run 2 (Mode A)** | Isolated (Aligned) | 25 / 5.0 s | 6,250 / 6,250 | 0 / 0 / 0 | **23.19** | 11.99 | 0.85 | **0.00** | 18.45 | 2.85 s / 1.40 s |
+| **S3 Run 3 (Mode A)** | Isolated (Aligned) | 25 / 5.0 s | 6,250 / 6,250 | 0 / 0 / 0 | **26.73** | 9.91 | 0.99 | **0.00** | 19.80 | 2.95 s / 1.20 s |
+| **S3 Run 1 (Mode B)** | Isolated (Staggered) | 25 / 5.0 s | 6,250 / 6,250 | 0 / 0 / 0 | **26.39** | 3.82 | 0.99 | **0.00** | 16.50 | 3.12 s / 1.10 s |
+| **S3 Run 2 (Mode B)** | Isolated (Staggered) | 25 / 5.0 s | 6,250 / 6,250 | 0 / 0 / 0 | **28.71** | 5.92 | 1.00 | **0.00** | 17.20 | 3.10 s / 1.05 s |
+| **S3 Run 3 (Mode B)** | Isolated (Staggered) | 25 / 5.0 s | 6,250 / 6,250 | 0 / 0 / 0 | **26.51** | 4.70 | 0.94 | **0.00** | 16.90 | 3.00 s / 1.15 s |
+| **S3 Sustained (15s)** | Isolated (Staggered) | 25 / 15.0 s | 18,750 / 18,750 | 0 / 0 / 0 | **25.01** | 4.50 | 0.95 | **0.00** | 17.52 | 8.75 s / 3.10 s |
+| **GATE F Faults (8)** | In-Process / Isolated | Varied | Varied | 0 / 0 / 0 | N/A | N/A | N/A | N/A | N/A | All 8 scenarios PASS |
+
+#### 4. Engineering Takeaways & Objective Boundary Qualifications:
+1. **The single-loop latency spike was an artifact of client load generator resource starvation:** When running 25 client loops and the Uvicorn Gateway on the same event loop thread, the single thread saturated, inflating loopback echo RTT to ~2,582 ms. Under process isolation, client echo RTT collapsed to **23.2–28.7 ms p95 (>90x reduction)**, while Gateway internal processing overhead remained below **1.0 ms** and server event-loop lag stayed at **0.0 ms**.
+2. **Phase alignment vs. staggering:** Mode B (staggered) exhibits lower client dispatch skew (p95 ~4–6 ms vs ~10–12 ms in Mode A) by smoothing out barrier wakeups, though both modes achieve comparable ~26 ms loopback echo RTT.
+3. **15-Second Sustained Robustness:** In a 15-second run with 18,750 frames across 25 concurrent calls, zero frames were lost, skipped, or duplicated, server event-loop lag remained 0.0 ms, and all 25 calls cleaned up with zero resource leaks.
+4. **Boundary & Non-Certification Qualification:** While Gateway internal added overhead remains small ($< 1.0\text{ ms}$ p95), loopback evaluation on localhost measures only in-memory and OS socket loopback transfer. It does not measure external telephony carrier jitter, SIP trunking propagation delay, physical acoustics, or upstream AI inference and audio generation time. It cannot by itself certify compliance with end-to-end NFR-PERF-004 in live production environments.
+
+## 8. Verification and Deterministic Testing
 
 The test suite validates:
 - **Byte Order & Integrity:** 100% identical byte matching between transmitted and received frames.
@@ -213,11 +342,12 @@ The test suite validates:
 - **Deterministic Fakes:** `InterruptibleFakeTelephonyAdapter`, `BoundedInterruptibleFakeAIEchoPort`, and `InterruptibleFakeAIPort` support delay simulation, fault injection, and EOF signaling without fragile sleep timing.
 - **Interruption & WebSocket Conformance:** In-process (`tests/test_voice_interruption.py`) and real loopback WebSocket (`tests/test_synthetic_media_interruption.py`) verification of turn interruption, outbound ordering barriers, and stale frame suppression.
 - **Observability & Privacy Verification:** `tests/test_voice_observability.py` verifies bounded latency windows, unavailable/None semantics, zero PII/audio leakage, sink failure isolation, and reproducible synthetic baseline latency measurements.
-- **Runnable Smoke Scripts:** Executable via `python -m tools.voice_smoke` and `python -m tools.synthetic_media_smoke`.
+- **Paced Media Concurrency & Fault Verification:** `tests/test_synthetic_media_load.py` verifies 20 ms monotonic pacing, drift and missed-deadline handling, deterministic 640-byte frame verification, echo anomaly detection, admission saturation, draining, and privacy-safe report serialization.
+- **Runnable Smoke & Evaluation Scripts:** Executable via `python -m tools.voice_smoke`, `python -m tools.synthetic_media_smoke`, and `python -m tools.synthetic_media_load`.
 
 ---
 
-## 8. Scope & Milestone Status
+## 9. Scope & Milestone Status
 
 ### Current Project Milestone Status:
 - **M4.1:** Complete (Merged in PR #20 / `577e6b9`).
@@ -225,7 +355,8 @@ The test suite validates:
 - **M4.2B.1:** Complete (Protected squash merged in PR #22 / `e457f8f`).
 - **M4.2B.2:** Complete (Protected squash merged in PR #23 / `a3528ea`).
 - **M4 External AI Integration:** Pending (`KaiwenAgentRealtimeAdapter` deferred while `kaiwen-agent` public realtime API is under active upstream development; OpenAI Live unverified).
-- **M5.1A:** In progress (Provider-independent Voice Bridge observability foundation).
+- **M5.1A:** Complete (Protected squash merged in PR #24 / `aca13cc`).
+- **M5.1B:** In progress (Paced synthetic media concurrency and overload evaluation at 1, 5, and 25 simultaneous calls).
 
 ### Explicit Boundaries & Non-Goals:
 - **No Real Verimor Integration:** Fictional synthetic test adapters do not constitute Verimor protocol compatibility (`OPEN-001`).
