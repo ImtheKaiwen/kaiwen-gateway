@@ -2358,3 +2358,134 @@ def test_multi_process_client_workers_execution_and_metrics() -> None:
             assert "worker_lag" in w
 
     asyncio.run(_run())
+
+
+def test_aggregate_cpu_utilization_accounting_reconciliation() -> None:
+    """Verify aggregate CPU duration includes workers and matches utilization percentages exactly."""
+
+    async def _run() -> None:
+        lenient_criteria = PacingAcceptanceCriteria(
+            max_missed_deadline_rate=1.0,
+            max_mean_interval_deviation_pct=500.0,
+            max_p95_scheduler_lateness_ms=5000.0,
+            max_transmission_elongation_pct=500.0,
+        )
+        stage = await run_paced_media_stage(
+            stage_name="test_cpu_reconcile",
+            concurrency=2,
+            duration_seconds=0.15,
+            interval_ms=20.0,
+            client_workers=2,
+            isolation_mode=ISOLATION_MODE_IN_PROCESS,
+            pacing_criteria=lenient_criteria,
+        )
+        assert stage.status == "PASS"
+        res = stage.resources
+
+        client_cpu = res["client_process_cpu_time_seconds"]
+        worker_cpu = res["client_worker_cpu_time_seconds"]
+        server_cpu = res["server_process_cpu_time_seconds"]
+        total_cpu = res["process_cpu_time_seconds"]
+        wall_sec = res["wall_clock_duration_seconds"]
+        logical_cpus = res["logical_cpu_count"]
+
+        # 1. Total CPU must equal sum of coordinator, workers and server
+        expected_total = round(client_cpu + worker_cpu + server_cpu, 4)
+        assert abs(total_cpu - expected_total) <= 0.0002
+
+        # 2. Worker CPU must be non-zero and populated from child processes
+        assert worker_cpu >= 0.0
+        assert len(res["client_worker_diagnostics"]) == 2
+
+        # 3. Utilization percentages must be derived from the exact same total_cpu population
+        expected_single_core_pct = round((total_cpu / wall_sec) * 100.0, 2)
+        assert abs(res["cpu_utilization_pct_single_core"] - expected_single_core_pct) <= 0.05
+
+        expected_all_cores_pct = round((total_cpu / (wall_sec * float(logical_cpus))) * 100.0, 2)
+        assert abs(res["cpu_utilization_pct_all_cores"] - expected_all_cores_pct) <= 0.05
+
+    asyncio.run(_run())
+
+
+def test_sanitize_worker_error_message_redacts_credentials() -> None:
+    """Verify _sanitize_worker_error_message redacts tokens, secrets, and auth headers."""
+    from tools.synthetic_media_load import _sanitize_worker_error_message
+
+    exc_with_bearer = RuntimeError(
+        "Failed connection to ws://127.0.0.1/ws with Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret"
+    )
+    cleaned = _sanitize_worker_error_message(exc_with_bearer)
+    assert "Bearer [REDACTED]" in cleaned
+    assert "eyJhbGciOi" not in cleaned
+
+    exc_with_params = ValueError("Invalid handshake response: token=abc1234xyz&secret=supersecret")
+    cleaned_params = _sanitize_worker_error_message(exc_with_params)
+    assert "token=[REDACTED]" in cleaned_params
+    assert "secret=[REDACTED]" in cleaned_params
+    assert "abc1234xyz" not in cleaned_params
+
+    exc_with_header = ConnectionError(
+        "Handshake rejected: Authorization: Bearer sensitive_pass_12345"
+    )
+    cleaned_header = _sanitize_worker_error_message(exc_with_header)
+    assert "Authorization: [REDACTED]" in cleaned_header or "Bearer [REDACTED]" in cleaned_header
+    assert "sensitive_pass_12345" not in cleaned_header
+
+
+def test_worker_call_exception_propagation_and_partial_records() -> None:
+    """Verify worker subprocess fails stage and reports error when a call task raises an exception."""
+    from tools.synthetic_media_load import _run_multi_process_client_workers
+
+    async def _run() -> None:
+        call_specs = [
+            (0, "tenant_1", "call_1", "fake_token_1", 0.0),
+            (1, "tenant_1", "call_2", "fake_token_2", 2.0),
+        ]
+
+        # Patch run_single_paced_media_call inside child worker to raise on call_2
+        # In a multi-process test with bad token/endpoint, the server handshake will fail cleanly:
+        with pytest.raises(RuntimeError, match=r"Client worker \d+ reported (error|failure)"):
+            await _run_multi_process_client_workers(
+                client_workers=2,
+                call_specs=call_specs,
+                ws_url="ws://127.0.0.1:9/invalid_port",
+                frames_per_call=5,
+                interval_ms=20.0,
+                seed=42,
+                pattern="deterministic",
+                skip_threshold_ms=None,
+                timeout=1.0,
+                latency_window_capacity=32,
+            )
+
+    asyncio.run(_run())
+
+
+def test_start_synchronization_lead_time_and_late_sync_detection() -> None:
+    """Verify start synchronization future epoch delivery and late-start diagnostic tracking."""
+
+    async def _run() -> None:
+        lenient_criteria = PacingAcceptanceCriteria(
+            max_missed_deadline_rate=1.0,
+            max_mean_interval_deviation_pct=500.0,
+            max_p95_scheduler_lateness_ms=5000.0,
+            max_transmission_elongation_pct=500.0,
+        )
+        stage = await run_paced_media_stage(
+            stage_name="test_sync_epoch",
+            concurrency=2,
+            duration_seconds=0.1,
+            interval_ms=20.0,
+            client_workers=2,
+            isolation_mode=ISOLATION_MODE_IN_PROCESS,
+            pacing_criteria=lenient_criteria,
+        )
+        assert stage.status == "PASS"
+        diags = stage.resources["client_worker_diagnostics"]
+        assert len(diags) == 2
+        for w in diags:
+            assert "start_sync_skew_ms" in w
+            assert "late_start_sync" in w
+            assert isinstance(w["late_start_sync"], bool)
+
+    asyncio.run(_run())

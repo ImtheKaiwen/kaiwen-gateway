@@ -33,6 +33,7 @@ import json
 import math
 import os
 import platform
+import re
 import secrets
 import socket
 import struct
@@ -1874,6 +1875,16 @@ class CallMediaRunRecord:
         )
 
 
+class ClientWorkerExecutionError(RuntimeError):
+    """Raised when a client worker subprocess reports a runtime failure."""
+
+    def __init__(
+        self, message: str, partial_records: list[CallMediaRunRecord] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.partial_records: list[CallMediaRunRecord] = partial_records or []
+
+
 async def run_single_paced_media_call(
     *,
     ws_url: str,
@@ -2282,6 +2293,25 @@ class PacedStageResult:
         }
 
 
+def _sanitize_worker_error_message(exc: BaseException) -> str:
+    """Produce a sanitized single-line error description without leaking tokens or headers."""
+    cls_name = type(exc).__name__
+    raw_msg = str(exc).splitlines()[0] if str(exc) else ""
+    cleaned = re.sub(
+        r"Bearer\s+[A-Za-z0-9_\-\.]+", "Bearer [REDACTED]", raw_msg, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(
+        r"(token|secret|password|key)=[A-Za-z0-9_\-\.]+",
+        r"\1=[REDACTED]",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"Authorization:\s+[^\s,]+", "Authorization: [REDACTED]", cleaned, flags=re.IGNORECASE
+    )
+    return f"{cls_name}: {cleaned}" if cleaned else cls_name
+
+
 async def _client_worker_subprocess_async(config: Mapping[str, Any]) -> int:
     """Run client worker coroutine inside a dedicated subprocess."""
     worker_index = int(config.get("worker_index", 0))
@@ -2355,17 +2385,56 @@ async def _client_worker_subprocess_async(config: Mapping[str, Any]) -> int:
             f"Client worker {worker_index} received unexpected start event: {start_payload}"
         )
 
+    t_start_recv = time.perf_counter()
     shared_epoch_s = start_payload.get("shared_epoch_s")
+    start_sync_skew_ms = 0.0
+    late_start_sync = False
     if shared_epoch_s is not None:
-        shared_epoch_holder.append(float(shared_epoch_s))
+        epoch_val = float(shared_epoch_s)
+        shared_epoch_holder.append(epoch_val)
+        if t_start_recv > epoch_val:
+            late_start_sync = True
+            start_sync_skew_ms = (t_start_recv - epoch_val) * 1000.0
     epoch_ready_event.set()
 
-    # Wait for calls to complete
-    await asyncio.gather(*call_tasks, return_exceptions=True)
+    # Wait for calls to complete and inspect outcomes
+    call_outcomes = await asyncio.gather(*call_tasks, return_exceptions=True)
+    task_errors = [e for e in call_outcomes if isinstance(e, BaseException)]
 
     lag_summary = await lag_monitor.stop()
     cpu_duration_s = max(0.0, time.process_time() - t_cpu_start)
     rss_after = measure_process_rss_kib()
+
+    if task_errors:
+        sanitized_errors = [_sanitize_worker_error_message(e) for e in task_errors]
+        err_detail = (
+            f"Worker {worker_index} encountered {len(task_errors)} failed call task(s): "
+            f"{'; '.join(sorted(set(sanitized_errors))[:3])}"
+        )
+        err_payload = {
+            "event": "error",
+            "worker_index": worker_index,
+            "error": err_detail,
+            "failed_calls_count": len(task_errors),
+            "records": [r.to_dict() for r in records],
+            "worker_lag": lag_summary.to_dict(),
+            "cpu_duration_s": cpu_duration_s,
+            "rss_peak_kib": (
+                rss_after.peak_rss_kib
+                if rss_after.available and rss_after.peak_rss_kib is not None
+                else 0.0
+            ),
+            "rss_current_kib": (
+                rss_after.current_rss_kib
+                if rss_after.available and rss_after.current_rss_kib is not None
+                else 0.0
+            ),
+            "start_sync_skew_ms": round(start_sync_skew_ms, 3),
+            "late_start_sync": late_start_sync,
+        }
+        sys.stdout.write(json.dumps(err_payload) + "\n")
+        sys.stdout.flush()
+        return 1
 
     result_payload = {
         "event": "done",
@@ -2383,6 +2452,8 @@ async def _client_worker_subprocess_async(config: Mapping[str, Any]) -> int:
             if rss_after.available and rss_after.current_rss_kib is not None
             else 0.0
         ),
+        "start_sync_skew_ms": round(start_sync_skew_ms, 3),
+        "late_start_sync": late_start_sync,
     }
     sys.stdout.write(json.dumps(result_payload) + "\n")
     sys.stdout.flush()
@@ -2398,7 +2469,8 @@ def run_client_worker_subprocess() -> int:
         config = json.loads(init_line)
         return asyncio.run(_client_worker_subprocess_async(config))
     except Exception as exc:
-        err_msg = {"event": "error", "error": f"{type(exc).__name__}: {exc}"}
+        sanitized = _sanitize_worker_error_message(exc)
+        err_msg = {"event": "error", "error": f"Worker process error: {sanitized}"}
         sys.stdout.write(json.dumps(err_msg) + "\n")
         sys.stdout.flush()
         return 1
@@ -2416,6 +2488,7 @@ async def _run_multi_process_client_workers(
     skip_threshold_ms: float | None,
     timeout: float,
     latency_window_capacity: int,
+    start_lead_time_s: float = 0.050,
     on_ready_callback: Callable[[], None] | None = None,
 ) -> tuple[list[CallMediaRunRecord], list[dict[str, Any]]]:
     """Execute synthetic calls across multiple client worker child processes."""
@@ -2502,14 +2575,21 @@ async def _run_multi_process_client_workers(
         if on_ready_callback is not None:
             on_ready_callback()
 
-        # Coordinated monotonic start epoch
-        shared_epoch_s = time.perf_counter()
+        # Coordinated monotonic start epoch with bounded future lead time
+        lead_time = max(0.0, float(start_lead_time_s))
+        shared_epoch_s = time.perf_counter() + lead_time
 
         # Send start signal to all workers
         for proc in procs:
             assert proc.stdin is not None
             proc.stdin.write(
-                json.dumps({"event": "start", "shared_epoch_s": shared_epoch_s}).encode("utf-8")
+                json.dumps(
+                    {
+                        "event": "start",
+                        "shared_epoch_s": shared_epoch_s,
+                        "lead_time_s": lead_time,
+                    }
+                ).encode("utf-8")
                 + b"\n"
             )
             await proc.stdin.drain()
@@ -2531,7 +2611,12 @@ async def _run_multi_process_client_workers(
                 )
             msg = cast(dict[str, Any], json.loads(line.decode("utf-8")))
             if msg.get("event") == "error":
-                raise RuntimeError(f"Client worker {idx} reported error: {msg.get('error')}")
+                partial_recs = [CallMediaRunRecord.from_dict(r) for r in msg.get("records", [])]
+                err_msg = str(msg.get("error", "Unknown worker error"))
+                raise ClientWorkerExecutionError(
+                    f"Client worker {idx} reported failure: {err_msg}",
+                    partial_records=partial_recs,
+                )
             if msg.get("event") != "done":
                 raise RuntimeError(f"Client worker {idx} returned unexpected done event: {msg}")
             return msg
@@ -2552,6 +2637,8 @@ async def _run_multi_process_client_workers(
                     "cpu_duration_s": float(res.get("cpu_duration_s", 0.0)),
                     "rss_peak_kib": float(res.get("rss_peak_kib", 0.0)),
                     "rss_current_kib": float(res.get("rss_current_kib", 0.0)),
+                    "start_sync_skew_ms": res.get("start_sync_skew_ms"),
+                    "late_start_sync": bool(res.get("late_start_sync", False)),
                     "worker_lag": res.get("worker_lag", {}),
                 }
             )
@@ -2782,6 +2869,9 @@ async def run_paced_media_stage(
                         f"did not match requested concurrency ({concurrency})"
                     )
             except Exception as err:
+                partial = getattr(err, "partial_records", None)
+                if partial and isinstance(partial, list):
+                    records.extend(partial)
                 failure_reasons.append(
                     f"Multi-process client workers failed: {type(err).__name__}: {err}"
                 )
@@ -2971,11 +3061,15 @@ async def run_paced_media_stage(
     t_cpu_end = time.process_time()
     wall_duration_s = max(1e-6, t_wall_end - t_wall_start)
     cpu_duration_s = max(0.0, t_cpu_end - t_cpu_start)
-    total_cpu_duration_s = (
-        cpu_duration_s
-        if isolation_mode == ISOLATION_MODE_IN_PROCESS
-        else cpu_duration_s + server_cpu_duration_s
+    worker_cpu_duration_s = (
+        sum(w.get("cpu_duration_s", 0.0) for w in worker_diagnostics) if client_workers > 1 else 0.0
     )
+    worker_rss_peak_kib = (
+        max([float(w.get("rss_peak_kib", 0.0)) for w in worker_diagnostics] + [0.0])
+        if client_workers > 1
+        else 0.0
+    )
+    total_cpu_duration_s = cpu_duration_s + server_cpu_duration_s + worker_cpu_duration_s
 
     heap_current_bytes, heap_peak_bytes = tracemalloc.get_traced_memory()
     if not was_tracing:
@@ -3341,20 +3435,6 @@ async def run_paced_media_stage(
         },
     }
 
-    worker_cpu_duration_s = (
-        sum(w.get("cpu_duration_s", 0.0) for w in worker_diagnostics) if client_workers > 1 else 0.0
-    )
-    worker_rss_peak_kib = (
-        max([float(w.get("rss_peak_kib", 0.0)) for w in worker_diagnostics] + [0.0])
-        if client_workers > 1
-        else 0.0
-    )
-    total_cpu_duration_s = (
-        cpu_duration_s
-        if isolation_mode == ISOLATION_MODE_IN_PROCESS
-        else cpu_duration_s + server_cpu_duration_s + worker_cpu_duration_s
-    )
-
     resources = {
         "isolation_mode": isolation_mode,
         "scheduling_mode": scheduling_mode,
@@ -3369,7 +3449,8 @@ async def run_paced_media_stage(
         "cpu_utilization_pct_all_cores": round(cpu_pct_all_cores, 2),
         "cpu_normalization_note": (
             "cpu_utilization_pct_single_core = (process_cpu_time_seconds / wall_clock_duration_seconds) * 100 "
-            "(100% = 1 logical core); cpu_utilization_pct_all_cores divides by logical_cpu_count."
+            "(100% = 1 logical core equivalent; can exceed 100% across multiple worker/server processes); "
+            "cpu_utilization_pct_all_cores divides by logical_cpu_count."
         ),
         "python_heap_current_kib": round(float(heap_current_bytes) / 1024.0, 2),
         "python_heap_peak_kib": round(float(heap_peak_bytes) / 1024.0, 2),
@@ -3384,6 +3465,7 @@ async def run_paced_media_stage(
                 rss_after.peak_rss_kib or 0, server_rss_peak_kib, int(round(worker_rss_peak_kib))
             )
         ),
+        "process_rss_peak_note": "Maximum peak RSS observed among individual coordinator, server, and worker child processes.",
         "process_rss_source": rss_after.source,
         "client_rss_peak_kib": rss_after.peak_rss_kib,
         "client_worker_rss_peak_kib": round(worker_rss_peak_kib, 2),
