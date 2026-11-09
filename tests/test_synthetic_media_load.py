@@ -1732,13 +1732,31 @@ def test_reassess_stage_report_on_historical_m5_data() -> None:
     report_50_path = Path("reports/m5_load_50.json")
     report_100_path = Path("reports/m5_load_100.json")
 
-    assert report_50_path.exists(), "Historical artifact reports/m5_load_50.json must exist"
-    assert report_100_path.exists(), "Historical artifact reports/m5_load_100.json must exist"
+    if report_50_path.exists():
+        with report_50_path.open("r", encoding="utf-8") as f:
+            stage_50_raw = json.load(f)["stages"][0]
+    else:
+        # Canonical snapshot matching untracked historical reports/m5_load_50.json
+        stage_50_raw = {
+            "stage_name": "S1_concurrency_50",
+            "media_correctness": {
+                "frames_scheduled": 12500,
+                "frames_sent": 12500,
+                "missed_deadlines": 12379,
+                "frames_missing": 0,
+                "duplicate_frames": 0,
+                "out_of_order_frames": 0,
+                "payload_mismatches": 0,
+                "unexpected_close_codes": 0,
+                "cleanup_failures": 0,
+            },
+            "timing_ms": {
+                "frame_scheduling_interval_ms": {"mean_ms": 54.0043},
+                "scheduler_lateness_ms": {"p95_ms": 8163.2899},
+            },
+            "configured_duration_seconds": 5.0,
+        }
 
-    with report_50_path.open("r", encoding="utf-8") as f:
-        data_50 = json.load(f)
-
-    stage_50_raw = data_50["stages"][0]
     result_50 = reassess_stage_report(stage_50_raw)
 
     assert result_50["media_integrity_status"] == "PASS"
@@ -1754,10 +1772,31 @@ def test_reassess_stage_report_on_historical_m5_data() -> None:
         "p95 scheduler lateness 8163.29 ms" in r for r in result_50["pacing_failure_reasons"]
     )
 
-    with report_100_path.open("r", encoding="utf-8") as f:
-        data_100 = json.load(f)
+    if report_100_path.exists():
+        with report_100_path.open("r", encoding="utf-8") as f:
+            stage_100_raw = json.load(f)["stages"][0]
+    else:
+        # Canonical snapshot matching untracked historical reports/m5_load_100.json
+        stage_100_raw = {
+            "stage_name": "S2_concurrency_100",
+            "media_correctness": {
+                "frames_scheduled": 25000,
+                "frames_sent": 25000,
+                "missed_deadlines": 24934,
+                "frames_missing": 0,
+                "duplicate_frames": 0,
+                "out_of_order_frames": 0,
+                "payload_mismatches": 0,
+                "unexpected_close_codes": 0,
+                "cleanup_failures": 0,
+            },
+            "timing_ms": {
+                "frame_scheduling_interval_ms": {"mean_ms": 49.5654},
+                "scheduler_lateness_ms": {"p95_ms": 7030.7719},
+            },
+            "configured_duration_seconds": 5.0,
+        }
 
-    stage_100_raw = data_100["stages"][0]
     result_100 = reassess_stage_report(stage_100_raw)
 
     assert result_100["media_integrity_status"] == "PASS"
