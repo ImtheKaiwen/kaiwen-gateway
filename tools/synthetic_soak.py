@@ -212,7 +212,8 @@ def resolve_sustained_tenant_distribution(
         idx = 0
         while remaining > 0:
             chunk = min(remaining, max_connections_per_tenant)
-            dist[f"tenant_{chr(ord('a') + idx)}"] = chunk
+            tenant_label = chr(ord("a") + idx) if idx < 26 else str(idx + 1)
+            dist[f"tenant_{tenant_label}"] = chunk
             remaining -= chunk
             idx += 1
         return dist

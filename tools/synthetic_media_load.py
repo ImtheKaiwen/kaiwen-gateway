@@ -41,7 +41,7 @@ import sys
 import time
 import tracemalloc
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
@@ -113,6 +113,390 @@ SUPPORTED_ISOLATION_MODES: Final[tuple[str, ...]] = (
     ISOLATION_MODE_IN_PROCESS,
 )
 KW_SYNTHETIC_MEDIA_SECRET_KEY_ENV: Final[str] = "KW_SYNTHETIC_MEDIA_SECRET_KEY_HEX"
+
+DEFAULT_MAX_MISSED_DEADLINE_RATE: Final[float] = 0.20
+DEFAULT_MAX_MEAN_INTERVAL_DEVIATION_PCT: Final[float] = 20.0
+DEFAULT_MAX_P95_SCHEDULER_LATENESS_MS: Final[float] = 100.0
+DEFAULT_MAX_TRANSMISSION_ELONGATION_PCT: Final[float] = 25.0
+
+
+@dataclass(frozen=True, slots=True)
+class PacingAcceptanceCriteria:
+    """Explicit, documented acceptance criteria for real-time frame pacing."""
+
+    max_missed_deadline_rate: float = DEFAULT_MAX_MISSED_DEADLINE_RATE
+    max_mean_interval_deviation_pct: float = DEFAULT_MAX_MEAN_INTERVAL_DEVIATION_PCT
+    max_p95_scheduler_lateness_ms: float = DEFAULT_MAX_P95_SCHEDULER_LATENESS_MS
+    max_transmission_elongation_pct: float = DEFAULT_MAX_TRANSMISSION_ELONGATION_PCT
+
+    def __post_init__(self) -> None:
+        if isinstance(self.max_missed_deadline_rate, bool) or not isinstance(
+            self.max_missed_deadline_rate, (int, float)
+        ):
+            raise TypeError("max_missed_deadline_rate must be a float, not bool")
+        rate_val = float(self.max_missed_deadline_rate)
+        if not math.isfinite(rate_val) or rate_val <= 0.0 or rate_val > 1.0:
+            raise ValueError(f"max_missed_deadline_rate must be in (0.0, 1.0], got {rate_val!r}")
+        object.__setattr__(self, "max_missed_deadline_rate", rate_val)
+
+        if isinstance(self.max_mean_interval_deviation_pct, bool) or not isinstance(
+            self.max_mean_interval_deviation_pct, (int, float)
+        ):
+            raise TypeError("max_mean_interval_deviation_pct must be a float, not bool")
+        dev_val = float(self.max_mean_interval_deviation_pct)
+        if not math.isfinite(dev_val) or dev_val <= 0.0:
+            raise ValueError(f"max_mean_interval_deviation_pct must be positive, got {dev_val!r}")
+        object.__setattr__(self, "max_mean_interval_deviation_pct", dev_val)
+
+        if isinstance(self.max_p95_scheduler_lateness_ms, bool) or not isinstance(
+            self.max_p95_scheduler_lateness_ms, (int, float)
+        ):
+            raise TypeError("max_p95_scheduler_lateness_ms must be a float, not bool")
+        late_val = float(self.max_p95_scheduler_lateness_ms)
+        if not math.isfinite(late_val) or late_val <= 0.0:
+            raise ValueError(f"max_p95_scheduler_lateness_ms must be positive, got {late_val!r}")
+        object.__setattr__(self, "max_p95_scheduler_lateness_ms", late_val)
+
+        if isinstance(self.max_transmission_elongation_pct, bool) or not isinstance(
+            self.max_transmission_elongation_pct, (int, float)
+        ):
+            raise TypeError("max_transmission_elongation_pct must be a float, not bool")
+        elong_val = float(self.max_transmission_elongation_pct)
+        if not math.isfinite(elong_val) or elong_val <= 0.0:
+            raise ValueError(f"max_transmission_elongation_pct must be positive, got {elong_val!r}")
+        object.__setattr__(self, "max_transmission_elongation_pct", elong_val)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "max_missed_deadline_rate": self.max_missed_deadline_rate,
+            "max_mean_interval_deviation_pct": self.max_mean_interval_deviation_pct,
+            "max_p95_scheduler_lateness_ms": self.max_p95_scheduler_lateness_ms,
+            "max_transmission_elongation_pct": self.max_transmission_elongation_pct,
+        }
+
+
+def evaluate_pacing_metrics(
+    *,
+    total_scheduled: int,
+    total_sent: int,
+    total_missed_deadlines: int,
+    target_interval_ms: float,
+    mean_interval_ms: float | None,
+    p95_scheduler_lateness_ms: float | None,
+    nominal_transmission_s: float,
+    actual_transmission_s: float | None,
+    criteria: PacingAcceptanceCriteria,
+    require_transmission_duration: bool = True,
+) -> tuple[str, list[str], dict[str, Any]]:
+    """Evaluate empirical timing counters against strict real-time pacing criteria."""
+    failure_reasons: list[str] = []
+
+    # 1. Counter validations & type checks
+    counters_valid = True
+    if (
+        isinstance(total_scheduled, bool)
+        or not isinstance(total_scheduled, int)
+        or total_scheduled < 0
+    ):
+        failure_reasons.append(f"Invalid total_scheduled counter: {total_scheduled!r}")
+        counters_valid = False
+
+    if isinstance(total_sent, bool) or not isinstance(total_sent, int) or total_sent < 0:
+        failure_reasons.append(f"Invalid total_sent counter: {total_sent!r}")
+        counters_valid = False
+
+    if (
+        isinstance(total_missed_deadlines, bool)
+        or not isinstance(total_missed_deadlines, int)
+        or total_missed_deadlines < 0
+    ):
+        failure_reasons.append(
+            f"Invalid total_missed_deadlines counter: {total_missed_deadlines!r}"
+        )
+        counters_valid = False
+
+    if counters_valid:
+        if total_sent > total_scheduled:
+            failure_reasons.append(
+                f"total_sent ({total_sent}) cannot exceed total_scheduled ({total_scheduled})"
+            )
+        if total_missed_deadlines > total_scheduled:
+            failure_reasons.append(
+                f"total_missed_deadlines ({total_missed_deadlines}) cannot exceed total_scheduled ({total_scheduled})"
+            )
+
+    if isinstance(total_sent, int) and not isinstance(total_sent, bool) and total_sent <= 0:
+        failure_reasons.append("No audio frames were transmitted to evaluate real-time pacing")
+
+    # 2. Missed deadline rate
+    missed_rate: float | None = None
+    if counters_valid and total_sent > 0 and total_missed_deadlines <= total_scheduled:
+        missed_rate = float(total_missed_deadlines) / float(total_sent)
+        if missed_rate > criteria.max_missed_deadline_rate:
+            failure_reasons.append(
+                f"Missed deadline rate {missed_rate:.2%} exceeded threshold "
+                f"{criteria.max_missed_deadline_rate:.2%} ({total_missed_deadlines}/{total_sent} frames missed deadline)"
+            )
+
+    # 3. Target interval validation
+    target_valid = True
+    if (
+        isinstance(target_interval_ms, bool)
+        or not isinstance(target_interval_ms, (int, float))
+        or not math.isfinite(target_interval_ms)
+        or target_interval_ms <= 0.0
+    ):
+        failure_reasons.append(f"Invalid target interval: {target_interval_ms!r}")
+        target_valid = False
+
+    # 4. Mean scheduling interval
+    mean_interval_dev_pct: float | None = None
+    if mean_interval_ms is not None:
+        if isinstance(mean_interval_ms, bool) or not isinstance(mean_interval_ms, (int, float)):
+            failure_reasons.append(
+                f"Invalid mean interval measurement type: {type(mean_interval_ms).__name__}"
+            )
+        elif not math.isfinite(mean_interval_ms):
+            failure_reasons.append(f"Nonfinite mean interval measurement: {mean_interval_ms!r}")
+        elif mean_interval_ms <= 0.0:
+            failure_reasons.append(
+                f"Nonpositive mean interval measurement: {mean_interval_ms:.2f} ms"
+            )
+        elif target_valid:
+            mean_interval_dev_pct = (
+                abs(mean_interval_ms - target_interval_ms) / target_interval_ms * 100.0
+            )
+            if mean_interval_dev_pct > criteria.max_mean_interval_deviation_pct:
+                failure_reasons.append(
+                    f"Mean inter-frame interval {mean_interval_ms:.2f} ms deviated by "
+                    f"{mean_interval_dev_pct:.2f}% from target {target_interval_ms:.2f} ms "
+                    f"(max allowed: {criteria.max_mean_interval_deviation_pct:.2f}%)"
+                )
+    elif isinstance(total_sent, int) and not isinstance(total_sent, bool) and total_sent > 1:
+        failure_reasons.append(
+            "Missing inter-frame scheduling interval measurements for pacing evaluation"
+        )
+
+    # 5. p95 scheduler lateness
+    if p95_scheduler_lateness_ms is not None:
+        if isinstance(p95_scheduler_lateness_ms, bool) or not isinstance(
+            p95_scheduler_lateness_ms, (int, float)
+        ):
+            failure_reasons.append(
+                f"Invalid p95 scheduler lateness measurement type: {type(p95_scheduler_lateness_ms).__name__}"
+            )
+        elif not math.isfinite(p95_scheduler_lateness_ms):
+            failure_reasons.append(
+                f"Nonfinite p95 scheduler lateness measurement: {p95_scheduler_lateness_ms!r}"
+            )
+        elif p95_scheduler_lateness_ms < 0.0:
+            failure_reasons.append(
+                f"Negative p95 scheduler lateness measurement: {p95_scheduler_lateness_ms:.2f} ms"
+            )
+        else:
+            if p95_scheduler_lateness_ms > criteria.max_p95_scheduler_lateness_ms:
+                failure_reasons.append(
+                    f"p95 scheduler lateness {p95_scheduler_lateness_ms:.2f} ms exceeded threshold "
+                    f"{criteria.max_p95_scheduler_lateness_ms:.2f} ms"
+                )
+    elif isinstance(total_sent, int) and not isinstance(total_sent, bool) and total_sent > 0:
+        failure_reasons.append("Missing scheduler lateness measurements for pacing evaluation")
+
+    # 6. Nominal and actual transmission duration
+    nominal_valid = True
+    if (
+        isinstance(nominal_transmission_s, bool)
+        or not isinstance(nominal_transmission_s, (int, float))
+        or not math.isfinite(nominal_transmission_s)
+        or nominal_transmission_s < 0.0
+    ):
+        failure_reasons.append(f"Invalid nominal transmission duration: {nominal_transmission_s!r}")
+        nominal_valid = False
+
+    elongation_pct: float | None = None
+    if actual_transmission_s is not None:
+        if isinstance(actual_transmission_s, bool) or not isinstance(
+            actual_transmission_s, (int, float)
+        ):
+            failure_reasons.append(
+                f"Invalid actual transmission duration measurement type: {type(actual_transmission_s).__name__}"
+            )
+        elif not math.isfinite(actual_transmission_s):
+            failure_reasons.append(
+                f"Nonfinite actual transmission duration measurement: {actual_transmission_s!r}"
+            )
+        elif actual_transmission_s < 0.0:
+            failure_reasons.append(
+                f"Negative actual transmission duration measurement: {actual_transmission_s:.2f}s"
+            )
+        elif (
+            nominal_valid
+            and nominal_transmission_s > 0
+            and isinstance(total_sent, int)
+            and not isinstance(total_sent, bool)
+            and total_sent > 1
+        ):
+            elongation_pct = max(
+                0.0,
+                (actual_transmission_s - nominal_transmission_s) / nominal_transmission_s * 100.0,
+            )
+            if elongation_pct > criteria.max_transmission_elongation_pct:
+                failure_reasons.append(
+                    f"Media transmission duration elongated by {elongation_pct:.2f}% "
+                    f"({actual_transmission_s:.2f}s vs nominal {nominal_transmission_s:.2f}s, "
+                    f"max allowed: {criteria.max_transmission_elongation_pct:.2f}%)"
+                )
+    elif (
+        require_transmission_duration
+        and isinstance(total_sent, int)
+        and not isinstance(total_sent, bool)
+        and total_sent > 1
+    ):
+        failure_reasons.append(
+            "Missing actual transmission duration measurement for pacing evaluation"
+        )
+
+    pacing_status = "PASS" if not failure_reasons else "FAIL"
+    metrics = {
+        "missed_deadline_rate": (
+            round(missed_rate, 6)
+            if missed_rate is not None and math.isfinite(missed_rate)
+            else None
+        ),
+        "mean_interval_deviation_pct": (
+            round(mean_interval_dev_pct, 4)
+            if mean_interval_dev_pct is not None and math.isfinite(mean_interval_dev_pct)
+            else None
+        ),
+        "p95_scheduler_lateness_ms": (
+            round(p95_scheduler_lateness_ms, 4)
+            if (
+                p95_scheduler_lateness_ms is not None
+                and not isinstance(p95_scheduler_lateness_ms, bool)
+                and isinstance(p95_scheduler_lateness_ms, (int, float))
+                and math.isfinite(p95_scheduler_lateness_ms)
+            )
+            else None
+        ),
+        "transmission_elongation_pct": (
+            round(elongation_pct, 4)
+            if elongation_pct is not None and math.isfinite(elongation_pct)
+            else None
+        ),
+        "nominal_transmission_seconds": (
+            round(nominal_transmission_s, 4)
+            if (
+                not isinstance(nominal_transmission_s, bool)
+                and isinstance(nominal_transmission_s, (int, float))
+                and math.isfinite(nominal_transmission_s)
+            )
+            else None
+        ),
+        "actual_transmission_seconds": (
+            round(actual_transmission_s, 4)
+            if (
+                actual_transmission_s is not None
+                and not isinstance(actual_transmission_s, bool)
+                and isinstance(actual_transmission_s, (int, float))
+                and math.isfinite(actual_transmission_s)
+            )
+            else None
+        ),
+    }
+    return pacing_status, failure_reasons, metrics
+
+
+def reassess_stage_report(
+    stage_data: Mapping[str, Any],
+    criteria: PacingAcceptanceCriteria | None = None,
+) -> dict[str, Any]:
+    """Offline evaluator: reassess any stage result dict against explicit pacing and integrity criteria."""
+    crit = criteria or PacingAcceptanceCriteria()
+    mc = stage_data.get("media_correctness", {})
+    tm = stage_data.get("timing_ms", {})
+
+    total_scheduled = int(mc.get("frames_scheduled", 0))
+    total_sent = int(mc.get("frames_sent", 0))
+    total_missed = int(mc.get("missed_deadlines", 0))
+    target_interval_ms = 20.0
+
+    interval_summary = tm.get("frame_scheduling_interval_ms", {})
+    mean_interval_ms = (
+        float(interval_summary["mean_ms"]) if interval_summary.get("mean_ms") is not None else None
+    )
+
+    lateness_summary = tm.get("scheduler_lateness_ms", {})
+    p95_lateness_ms = (
+        float(lateness_summary["p95_ms"]) if lateness_summary.get("p95_ms") is not None else None
+    )
+
+    configured_duration_s = float(stage_data.get("configured_duration_seconds", 5.0))
+    frames_per_session = max(1, int(round((configured_duration_s * 1000.0) / target_interval_ms)))
+    nominal_transmission_s = max(1e-6, (frames_per_session - 1) * (target_interval_ms / 1000.0))
+
+    pacing_eval = tm.get("pacing_evaluation", {})
+    eval_metrics = pacing_eval.get("metrics", {})
+    actual_transmission_s: float | None = eval_metrics.get("actual_transmission_seconds")
+    if actual_transmission_s is None:
+        actual_transmission_s = tm.get("media_transmission_duration_s")
+
+    require_tx_duration = actual_transmission_s is not None
+
+    pacing_status, pacing_failures, metrics = evaluate_pacing_metrics(
+        total_scheduled=total_scheduled,
+        total_sent=total_sent,
+        total_missed_deadlines=total_missed,
+        target_interval_ms=target_interval_ms,
+        mean_interval_ms=mean_interval_ms,
+        p95_scheduler_lateness_ms=p95_lateness_ms,
+        nominal_transmission_s=nominal_transmission_s,
+        actual_transmission_s=actual_transmission_s,
+        criteria=crit,
+        require_transmission_duration=require_tx_duration,
+    )
+
+    media_failures: list[str] = []
+    if int(mc.get("frames_missing", 0)) > 0:
+        media_failures.append(f"Missing frames: {mc.get('frames_missing')}")
+    if int(mc.get("duplicate_frames", 0)) > 0:
+        media_failures.append(f"Duplicate frames: {mc.get('duplicate_frames')}")
+    if int(mc.get("out_of_order_frames", 0)) > 0:
+        media_failures.append(f"Out of order frames: {mc.get('out_of_order_frames')}")
+    if int(mc.get("payload_mismatches", 0)) > 0:
+        media_failures.append(f"Payload mismatches: {mc.get('payload_mismatches')}")
+    if int(mc.get("unexpected_close_codes", 0)) > 0:
+        media_failures.append(f"Unexpected close codes: {mc.get('unexpected_close_codes')}")
+    if int(mc.get("cleanup_failures", 0)) > 0:
+        media_failures.append(f"Cleanup failures: {mc.get('cleanup_failures')}")
+
+    cleanup = stage_data.get("cleanup_verification", {})
+    if (
+        int(cleanup.get("final_active_connections", 0)) != 0
+        or int(cleanup.get("leaked_asyncio_tasks", 0)) != 0
+    ):
+        media_failures.append(f"Resource leaks detected in cleanup: {cleanup}")
+
+    req_concurrency = int(stage_data.get("requested_concurrency", 0))
+    achieved_concurrency = int(stage_data.get("achieved_media_concurrency", 0))
+    if req_concurrency > 0 and achieved_concurrency != req_concurrency:
+        media_failures.append(
+            f"Achieved active media concurrency ({achieved_concurrency}) "
+            f"did not match requested concurrency ({req_concurrency})"
+        )
+
+    media_status = "PASS" if not media_failures else "FAIL"
+    overall_status = "PASS" if media_status == "PASS" and pacing_status == "PASS" else "FAIL"
+
+    return {
+        "stage_name": stage_data.get("stage_name", "unknown"),
+        "media_integrity_status": media_status,
+        "realtime_pacing_status": pacing_status,
+        "overall_status": overall_status,
+        "media_failure_reasons": media_failures,
+        "pacing_failure_reasons": pacing_failures,
+        "pacing_metrics": metrics,
+        "pacing_acceptance_criteria": crit.to_dict(),
+    }
 
 
 def compute_session_phase_offset_ms(
@@ -1395,6 +1779,7 @@ class CallMediaRunRecord:
     scheduling_jitter_samples_ms: tuple[float, ...]
     dispatch_skew_ms: float = 0.0
     error_category: str | None = None
+    last_frame_sent_s: float | None = None
 
 
 async def run_single_paced_media_call(
@@ -1434,6 +1819,7 @@ async def run_single_paced_media_call(
     interval_samples: list[float] = []
     jitter_samples: list[float] = []
     first_sent_s: float | None = None
+    last_sent_s: float | None = None
     last_activity_s: float | None = None
     handshake_ms = 0.0
     call_start_rtt_ms = 0.0
@@ -1503,7 +1889,7 @@ async def run_single_paced_media_call(
         control_messages: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
         async def _sender_loop() -> None:
-            nonlocal first_sent_s, last_activity_s, dispatch_skew_ms
+            nonlocal first_sent_s, last_sent_s, last_activity_s, dispatch_skew_ms
             pacer.reset(t0=effective_epoch_s)
             sent_seq = 0
             for slot_idx in range(frames_to_schedule):
@@ -1517,6 +1903,7 @@ async def run_single_paced_media_call(
                     first_sent_s = t_send
                     target_slot0_s = effective_epoch_s + pacer.phase_offset_s
                     dispatch_skew_ms = max(0.0, (t_send - target_slot0_s) * 1000.0)
+                last_sent_s = t_send
                 last_activity_s = t_send
                 tracker.record_sent(sent_seq, payload, t_send)
                 lateness_samples.append(sched.lateness_ms)
@@ -1591,6 +1978,7 @@ async def run_single_paced_media_call(
         payload_mismatches=tracker.payload_mismatches,
         cross_session_frames=tracker.cross_session_frames,
         first_frame_sent_s=first_sent_s,
+        last_frame_sent_s=last_sent_s,
         last_frame_activity_s=last_activity_s,
         handshake_ms=handshake_ms,
         call_start_rtt_ms=call_start_rtt_ms,
@@ -1763,11 +2151,18 @@ class PacedStageResult:
     resources: dict[str, Any]
     cleanup_verification: dict[str, Any]
     failure_reasons: tuple[str, ...] = ()
+    media_integrity_status: str = "PASS"
+    realtime_pacing_status: str = "PASS"
+    media_failure_reasons: tuple[str, ...] = ()
+    pacing_failure_reasons: tuple[str, ...] = ()
+    pacing_acceptance_criteria: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "stage_name": self.stage_name,
             "status": self.status,
+            "media_integrity_status": self.media_integrity_status,
+            "realtime_pacing_status": self.realtime_pacing_status,
             "requested_concurrency": self.requested_concurrency,
             "admitted_concurrency": self.admitted_concurrency,
             "achieved_media_concurrency": self.achieved_media_concurrency,
@@ -1784,6 +2179,9 @@ class PacedStageResult:
             "resources": self.resources,
             "cleanup_verification": self.cleanup_verification,
             "failure_reasons": list(self.failure_reasons),
+            "media_failure_reasons": list(self.media_failure_reasons),
+            "pacing_failure_reasons": list(self.pacing_failure_reasons),
+            "pacing_acceptance_criteria": dict(self.pacing_acceptance_criteria),
         }
 
 
@@ -1801,6 +2199,7 @@ async def run_paced_media_stage(
     max_concurrent_connections: int = DEFAULT_MAX_CONCURRENT_CONNECTIONS,
     max_connections_per_tenant: int = DEFAULT_MAX_CONNECTIONS_PER_TENANT,
     latency_window_capacity: int = DEFAULT_LATENCY_WINDOW_SIZE,
+    pacing_criteria: PacingAcceptanceCriteria | None = None,
     timeout: float = 20.0,
     isolation_mode: str = ISOLATION_MODE_PROCESS_ISOLATED,
     scheduling_mode: str = SCHEDULING_MODE_ALIGNED,
@@ -1813,6 +2212,43 @@ async def run_paced_media_stage(
     if scheduling_mode not in SUPPORTED_SCHEDULING_MODES:
         raise ValueError(
             f"Unsupported scheduling_mode {scheduling_mode!r}; must be one of {SUPPORTED_SCHEDULING_MODES}"
+        )
+
+    if pacing_criteria is not None and not isinstance(pacing_criteria, PacingAcceptanceCriteria):
+        raise TypeError(
+            f"pacing_criteria must be a PacingAcceptanceCriteria instance, got {type(pacing_criteria).__name__}"
+        )
+    effective_pacing_criteria = (
+        pacing_criteria if pacing_criteria is not None else PacingAcceptanceCriteria()
+    )
+
+    if isinstance(max_concurrent_connections, bool) or not isinstance(
+        max_concurrent_connections, int
+    ):
+        raise TypeError(
+            f"max_concurrent_connections must be a positive integer, not bool or {type(max_concurrent_connections).__name__}"
+        )
+    if max_concurrent_connections <= 0:
+        raise ValueError(
+            f"max_concurrent_connections must be a positive integer, got {max_concurrent_connections!r}"
+        )
+    if isinstance(max_connections_per_tenant, bool) or not isinstance(
+        max_connections_per_tenant, int
+    ):
+        raise TypeError(
+            f"max_connections_per_tenant must be a positive integer, not bool or {type(max_connections_per_tenant).__name__}"
+        )
+    if max_connections_per_tenant <= 0:
+        raise ValueError(
+            f"max_connections_per_tenant must be a positive integer, got {max_connections_per_tenant!r}"
+        )
+    if max_connections_per_tenant > max_concurrent_connections:
+        raise ValueError(
+            f"max_connections_per_tenant ({max_connections_per_tenant}) cannot exceed max_concurrent_connections ({max_concurrent_connections})"
+        )
+    if concurrency > max_concurrent_connections:
+        raise ValueError(
+            f"Requested concurrency {concurrency} exceeds max capacity {max_concurrent_connections}"
         )
 
     frames_per_call = max(1, int(round((duration_seconds * 1000.0) / interval_ms)))
@@ -2079,6 +2515,9 @@ async def run_paced_media_stage(
                 "session_duration_ms": dict(telem_raw.get("session_duration_ms", {})),
                 "cleanup_duration_ms": dict(telem_raw.get("cleanup_duration_ms", {})),
             }
+            # Reconcile achieved_media_concurrency against independently observed server peak
+            server_peak_sessions = int(telem_raw.get("peak_active_sessions", 0))
+            achieved_media_concurrency = min(achieved_media_concurrency, server_peak_sessions)
         else:
             failure_reasons.append("Missing telemetry result from isolated server child process")
 
@@ -2108,6 +2547,23 @@ async def run_paced_media_stage(
     overlap_ms = 0.0
     if len(first_starts) == concurrency and len(last_ends) == concurrency:
         overlap_ms = max(0.0, (min(last_ends) - max(first_starts)) * 1000.0)
+
+    # Reconcile client-side admission and verified active sessions
+    client_admitted = sum(1 for r in records if r.admitted)
+    admitted_concurrency = min(admitted_at_barrier, client_admitted)
+    achieved_media_concurrency = min(achieved_media_concurrency, client_admitted)
+
+    if achieved_media_concurrency != concurrency:
+        failure_msg = (
+            f"Achieved active media concurrency ({achieved_media_concurrency}) "
+            f"did not match requested concurrency ({concurrency})"
+        )
+        if failure_msg not in failure_reasons:
+            failure_reasons.append(failure_msg)
+    if concurrency > 1 and overlap_ms <= 0.0:
+        failure_reasons.append(
+            f"No concurrent media streaming overlap observed across all {concurrency} sessions (overlap_ms={overlap_ms:.2f})"
+        )
 
     # Aggregate client-side media correctness counters
     total_scheduled = sum(r.frames_scheduled for r in records)
@@ -2163,6 +2619,7 @@ async def run_paced_media_stage(
         )
 
     # Combine client timing samples across sessions (retaining 100% of stage samples)
+    media_failure_reasons: list[str] = list(failure_reasons)
     all_lateness = [x for r in records for x in r.scheduling_lateness_samples_ms]
     all_intervals = [x for r in records for x in r.scheduling_interval_samples_ms]
     all_jitter = [x for r in records for x in r.scheduling_jitter_samples_ms]
@@ -2176,6 +2633,49 @@ async def run_paced_media_stage(
         if r.echo_rtt_summary.available and r.echo_rtt_summary.p95_ms is not None
     ]
     max_session_echo_p95 = max(session_echo_p95s) if session_echo_p95s else None
+
+    nominal_transmission_s = (
+        max(1e-6, (frames_per_call - 1) * (interval_ms / 1000.0))
+        if frames_per_call > 1
+        else (interval_ms / 1000.0)
+    )
+    session_tx_durations: list[float] = []
+    for r in records:
+        if r.first_frame_sent_s is not None:
+            end_s = (
+                r.last_frame_sent_s
+                if getattr(r, "last_frame_sent_s", None) is not None
+                else r.last_frame_activity_s
+            )
+            if end_s is not None:
+                session_tx_durations.append(max(0.0, end_s - r.first_frame_sent_s))
+    max_session_tx_duration_s = max(session_tx_durations) if session_tx_durations else None
+
+    mean_interval = (sum(all_intervals) / len(all_intervals)) if all_intervals else None
+    lateness_summary = _summarize_pooled_stage_samples(all_lateness)
+    lateness_p95 = lateness_summary.get("p95_ms")
+
+    pacing_status, pacing_failure_reasons, pacing_metrics = evaluate_pacing_metrics(
+        total_scheduled=total_scheduled,
+        total_sent=total_sent,
+        total_missed_deadlines=total_missed_deadlines,
+        target_interval_ms=interval_ms,
+        mean_interval_ms=mean_interval,
+        p95_scheduler_lateness_ms=lateness_p95,
+        nominal_transmission_s=nominal_transmission_s,
+        actual_transmission_s=max_session_tx_duration_s,
+        criteria=effective_pacing_criteria,
+        require_transmission_duration=True,
+    )
+
+    media_integrity_status = "PASS" if not media_failure_reasons else "FAIL"
+    realtime_pacing_status = pacing_status
+    stage_overall_status = (
+        "PASS"
+        if (media_integrity_status == "PASS" and realtime_pacing_status == "PASS")
+        else "FAIL"
+    )
+    combined_failure_reasons = tuple(media_failure_reasons + pacing_failure_reasons)
 
     in_proc_dict = _summarize_session_metric_across_calls(
         recent_snaps,
@@ -2249,6 +2749,7 @@ async def run_paced_media_stage(
         "frames_sent": total_sent,
         "frames_skipped": total_skipped,
         "missed_deadlines": total_missed_deadlines,
+        "missed_deadline_rate": pacing_metrics["missed_deadline_rate"],
         "frames_echoed": total_echoed,
         "frames_missing": total_missing,
         "duplicate_frames": total_duplicates,
@@ -2352,12 +2853,21 @@ async def run_paced_media_stage(
         "event_loop_lag_ms": client_lag_dict,
         "client_event_loop_lag_ms": client_lag_dict,
         "server_event_loop_lag_ms": server_lag_summary_dict,
+        "media_transmission_duration_s": (
+            round(max_session_tx_duration_s, 4) if max_session_tx_duration_s is not None else None
+        ),
         "control_handshake_ms": _summarize_pooled_stage_samples(all_handshakes),
         "control_call_start_rtt_ms": _summarize_pooled_stage_samples(all_start_rtts),
         "control_call_end_rtt_ms": _summarize_pooled_stage_samples(all_end_rtts),
         "upstream_ai_generation_ms": unavail_provider,
         "external_telephony_network_ms": unavail_provider,
         "remote_playback_latency_ms": unavail_playback,
+        "pacing_evaluation": {
+            "status": realtime_pacing_status,
+            "criteria": effective_pacing_criteria.to_dict(),
+            "metrics": pacing_metrics,
+            "failure_reasons": list(pacing_failure_reasons),
+        },
     }
 
     resources = {
@@ -2401,9 +2911,9 @@ async def run_paced_media_stage(
 
     return PacedStageResult(
         stage_name=stage_name,
-        status="PASS" if not failure_reasons else "FAIL",
+        status=stage_overall_status,
         requested_concurrency=concurrency,
-        admitted_concurrency=admitted_at_barrier,
+        admitted_concurrency=admitted_concurrency,
         achieved_media_concurrency=achieved_media_concurrency,
         completed_calls=completed_calls,
         expected_rejections=0,
@@ -2417,7 +2927,12 @@ async def run_paced_media_stage(
         gateway_telemetry=gateway_telemetry,
         resources=resources,
         cleanup_verification=cleanup_verification,
-        failure_reasons=tuple(failure_reasons),
+        failure_reasons=combined_failure_reasons,
+        media_integrity_status=media_integrity_status,
+        realtime_pacing_status=realtime_pacing_status,
+        media_failure_reasons=tuple(media_failure_reasons),
+        pacing_failure_reasons=tuple(pacing_failure_reasons),
+        pacing_acceptance_criteria=effective_pacing_criteria.to_dict(),
     )
 
 
@@ -3273,6 +3788,8 @@ class PacedMediaLoadReport:
     stages: tuple[PacedStageResult, ...]
     fault_scenarios: tuple[FaultScenarioResult, ...]
     limitations: tuple[str, ...]
+    media_integrity_status: str = "PASS"
+    realtime_pacing_status: str = "PASS"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -3286,6 +3803,8 @@ class PacedMediaLoadReport:
             "configuration": dict(self.configuration),
             "units": dict(self.units),
             "overall_status": self.overall_status,
+            "media_integrity_status": self.media_integrity_status,
+            "realtime_pacing_status": self.realtime_pacing_status,
             "stages": [s.to_dict() for s in self.stages],
             "fault_scenarios": [f.to_dict() for f in self.fault_scenarios],
             "limitations": list(self.limitations),
@@ -3302,11 +3821,62 @@ async def execute_media_load_evaluation(
     queue_capacity: int = 8,
     backpressure_timeout: float = 2.0,
     skip_threshold_ms: float | None = None,
+    max_concurrent_connections: int | None = None,
+    max_connections_per_tenant: int | None = None,
+    pacing_criteria: PacingAcceptanceCriteria | None = None,
     include_faults: bool = True,
     isolation_mode: str = ISOLATION_MODE_PROCESS_ISOLATED,
     scheduling_mode: str = SCHEDULING_MODE_ALIGNED,
 ) -> PacedMediaLoadReport:
     """Execute the configured paced media concurrency stages and optional fault suite."""
+    effective_max_concurrent = (
+        max_concurrent_connections
+        if max_concurrent_connections is not None
+        else DEFAULT_MAX_CONCURRENT_CONNECTIONS
+    )
+    effective_max_per_tenant = (
+        max_connections_per_tenant
+        if max_connections_per_tenant is not None
+        else DEFAULT_MAX_CONNECTIONS_PER_TENANT
+    )
+
+    if pacing_criteria is not None and not isinstance(pacing_criteria, PacingAcceptanceCriteria):
+        raise TypeError(
+            f"pacing_criteria must be a PacingAcceptanceCriteria instance, got {type(pacing_criteria).__name__}"
+        )
+    effective_pacing_criteria = (
+        pacing_criteria if pacing_criteria is not None else PacingAcceptanceCriteria()
+    )
+
+    if isinstance(effective_max_concurrent, bool) or not isinstance(effective_max_concurrent, int):
+        raise TypeError(
+            f"max_concurrent_connections must be a positive integer, not bool or {type(effective_max_concurrent).__name__}"
+        )
+    if effective_max_concurrent <= 0:
+        raise ValueError(
+            f"max_concurrent_connections must be a positive integer, got {effective_max_concurrent!r}"
+        )
+    if isinstance(effective_max_per_tenant, bool) or not isinstance(effective_max_per_tenant, int):
+        raise TypeError(
+            f"max_connections_per_tenant must be a positive integer, not bool or {type(effective_max_per_tenant).__name__}"
+        )
+    if effective_max_per_tenant <= 0:
+        raise ValueError(
+            f"max_connections_per_tenant must be a positive integer, got {effective_max_per_tenant!r}"
+        )
+    if effective_max_per_tenant > effective_max_concurrent:
+        raise ValueError(
+            f"max_connections_per_tenant ({effective_max_per_tenant}) cannot exceed max_concurrent_connections ({effective_max_concurrent})"
+        )
+
+    for c in concurrencies:
+        if isinstance(c, bool) or not isinstance(c, int) or c <= 0:
+            raise ValueError(f"concurrency must be a positive integer, got {c!r}")
+        if c > effective_max_concurrent:
+            raise ValueError(
+                f"Requested concurrency {c} exceeds configured max_concurrent_connections {effective_max_concurrent}"
+            )
+
     stage_results: list[PacedStageResult] = []
     for idx, conc in enumerate(concurrencies, start=1):
         stage_name = f"S{idx}_concurrency_{conc}"
@@ -3320,6 +3890,9 @@ async def execute_media_load_evaluation(
             queue_capacity=queue_capacity,
             backpressure_timeout=backpressure_timeout,
             skip_threshold_ms=skip_threshold_ms,
+            max_concurrent_connections=effective_max_concurrent,
+            max_connections_per_tenant=effective_max_per_tenant,
+            pacing_criteria=effective_pacing_criteria,
             isolation_mode=isolation_mode,
             scheduling_mode=scheduling_mode,
         )
@@ -3329,9 +3902,16 @@ async def execute_media_load_evaluation(
     if include_faults:
         fault_results = await run_fault_and_overload_suite(seed=seed)
 
-    all_stages_pass = all(s.status == "PASS" for s in stage_results)
+    all_stages_media_pass = all(s.media_integrity_status == "PASS" for s in stage_results)
+    all_stages_pacing_pass = all(s.realtime_pacing_status == "PASS" for s in stage_results)
     all_faults_pass = all(f.status == "PASS" for f in fault_results)
-    overall = "PASS" if (all_stages_pass and all_faults_pass) else "FAIL"
+    media_integrity_status = "PASS" if (all_stages_media_pass and all_faults_pass) else "FAIL"
+    realtime_pacing_status = "PASS" if all_stages_pacing_pass else "FAIL"
+    overall = (
+        "PASS"
+        if (media_integrity_status == "PASS" and realtime_pacing_status == "PASS")
+        else "FAIL"
+    )
 
     limitations = (
         "Loopback WebSocket synthetic echo RTT measures local client-to-Gateway-to-FakeAI-to-client "
@@ -3357,6 +3937,8 @@ async def execute_media_load_evaluation(
         logical_cpu_count=max(1, os.cpu_count() or 1),
         configuration={
             "concurrencies": list(concurrencies),
+            "max_concurrent_connections": effective_max_concurrent,
+            "max_connections_per_tenant": effective_max_per_tenant,
             "duration_seconds": duration_seconds,
             "interval_ms": interval_ms,
             "frame_bytes": PCM16LE_FRAME_BYTES,
@@ -3372,6 +3954,7 @@ async def execute_media_load_evaluation(
             "include_faults": include_faults,
             "isolation_mode": isolation_mode,
             "scheduling_mode": scheduling_mode,
+            "pacing_acceptance_criteria": effective_pacing_criteria.to_dict(),
         },
         units={
             "latencies": "milliseconds (ms)",
@@ -3384,6 +3967,8 @@ async def execute_media_load_evaluation(
         stages=tuple(stage_results),
         fault_scenarios=tuple(fault_results),
         limitations=limitations,
+        media_integrity_status=media_integrity_status,
+        realtime_pacing_status=realtime_pacing_status,
     )
 
 
@@ -3488,14 +4073,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-concurrent-connections",
         type=int,
-        default=DEFAULT_MAX_CONCURRENT_CONNECTIONS,
-        help="Max concurrent connections.",
+        default=None,
+        help="Max concurrent connections (default: 25).",
     )
     parser.add_argument(
         "--max-connections-per-tenant",
         type=int,
-        default=DEFAULT_MAX_CONNECTIONS_PER_TENANT,
-        help="Max connections per tenant.",
+        default=None,
+        help="Max connections per tenant (default: 10).",
     )
     parser.add_argument(
         "--latency-window-capacity",
@@ -3509,6 +4094,30 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=128,
         help="Max retained telemetry sessions.",
     )
+    parser.add_argument(
+        "--max-missed-deadline-rate",
+        type=float,
+        default=DEFAULT_MAX_MISSED_DEADLINE_RATE,
+        help=f"Maximum allowed fraction of missed frame deadlines (default: {DEFAULT_MAX_MISSED_DEADLINE_RATE}).",
+    )
+    parser.add_argument(
+        "--max-mean-interval-deviation-pct",
+        type=float,
+        default=DEFAULT_MAX_MEAN_INTERVAL_DEVIATION_PCT,
+        help=f"Maximum allowed percent deviation of mean interval from nominal (default: {DEFAULT_MAX_MEAN_INTERVAL_DEVIATION_PCT}%).",
+    )
+    parser.add_argument(
+        "--max-p95-scheduler-lateness-ms",
+        type=float,
+        default=DEFAULT_MAX_P95_SCHEDULER_LATENESS_MS,
+        help=f"Maximum allowed p95 scheduler lateness in ms (default: {DEFAULT_MAX_P95_SCHEDULER_LATENESS_MS}ms).",
+    )
+    parser.add_argument(
+        "--max-transmission-elongation-pct",
+        type=float,
+        default=DEFAULT_MAX_TRANSMISSION_ELONGATION_PCT,
+        help=f"Maximum allowed percent elongation of transmission duration (default: {DEFAULT_MAX_TRANSMISSION_ELONGATION_PCT}%).",
+    )
     return parser
 
 
@@ -3519,8 +4128,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.server_subprocess:
         return run_isolated_server_process(
             port=int(args.port),
-            max_concurrent_connections=int(args.max_concurrent_connections),
-            max_connections_per_tenant=int(args.max_connections_per_tenant),
+            max_concurrent_connections=(
+                int(args.max_concurrent_connections)
+                if args.max_concurrent_connections is not None
+                else DEFAULT_MAX_CONCURRENT_CONNECTIONS
+            ),
+            max_connections_per_tenant=(
+                int(args.max_connections_per_tenant)
+                if args.max_connections_per_tenant is not None
+                else DEFAULT_MAX_CONNECTIONS_PER_TENANT
+            ),
             queue_capacity=int(args.queue_capacity),
             backpressure_timeout=float(args.backpressure_timeout),
             latency_window_capacity=int(args.latency_window_capacity),
@@ -3533,6 +4150,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         concurrencies = [int(x.strip()) for x in str(args.stages).split(",") if x.strip()]
         include_faults = not args.no_faults
+
+    pacing_criteria = PacingAcceptanceCriteria(
+        max_missed_deadline_rate=float(args.max_missed_deadline_rate),
+        max_mean_interval_deviation_pct=float(args.max_mean_interval_deviation_pct),
+        max_p95_scheduler_lateness_ms=float(args.max_p95_scheduler_lateness_ms),
+        max_transmission_elongation_pct=float(args.max_transmission_elongation_pct),
+    )
 
     report = asyncio.run(
         execute_media_load_evaluation(
@@ -3549,6 +4173,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             include_faults=include_faults,
             isolation_mode=str(args.isolation_mode),
             scheduling_mode=str(args.scheduling_mode),
+            max_concurrent_connections=(
+                int(args.max_concurrent_connections)
+                if args.max_concurrent_connections is not None
+                else None
+            ),
+            max_connections_per_tenant=(
+                int(args.max_connections_per_tenant)
+                if args.max_connections_per_tenant is not None
+                else None
+            ),
+            pacing_criteria=pacing_criteria,
         )
     )
 
@@ -3576,16 +4211,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             out_p95 = tm["gateway_outbound_processing_ms"]["p95_ms"]
             echo_p95 = tm["client_synthetic_echo_rtt_ms"]["p95_ms"]
             lag_p95 = tm["event_loop_lag_ms"]["p95_ms"]
+            missed_rate = mc.get("missed_deadline_rate", 0.0)
             print(
-                f"[{st.stage_name}] status={st.status} "
+                f"[{st.stage_name}] status={st.status} (media={st.media_integrity_status}, pacing={st.realtime_pacing_status}) "
                 f"concurrency={st.achieved_media_concurrency}/{st.requested_concurrency} "
                 f"calls={st.completed_calls} sent={mc['frames_sent']} echoed={mc['frames_echoed']} "
+                f"missed_deadlines={mc['missed_deadlines']} ({missed_rate:.2%}) "
                 f"missing={mc['frames_missing']} dup={mc['duplicate_frames']} "
                 f"ooo={mc['out_of_order_frames']} mismatch={mc['payload_mismatches']} "
                 f"in_p95={in_p95}ms out_p95={out_p95}ms echo_rtt_p95={echo_p95}ms "
                 f"loop_lag_p95={lag_p95}ms cpu_1core={res['cpu_utilization_pct_single_core']}% "
                 f"heap_peak={res['python_heap_peak_kib']}KiB rss_peak={res['process_rss_peak_kib']}KiB"
             )
+            if st.pacing_failure_reasons:
+                for r_pacing in st.pacing_failure_reasons:
+                    print(f"    pacing_failure: {r_pacing}")
+            if st.media_failure_reasons:
+                for r_media in st.media_failure_reasons:
+                    print(f"    media_failure: {r_media}")
         for ft in report.fault_scenarios:
             print(
                 f"[FAULT:{ft.scenario}] status={ft.status} "
@@ -3593,7 +4236,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"sent={ft.frames_sent} echoed={ft.frames_echoed} "
                 f"final_conn={ft.final_active_connections} leaked_tasks={ft.leaked_tasks}"
             )
-        print(f"OVERALL STATUS: {report.overall_status}")
+        print(
+            f"OVERALL STATUS: {report.overall_status} "
+            f"(media_integrity={report.media_integrity_status}, "
+            f"realtime_pacing={report.realtime_pacing_status})"
+        )
 
     return 0 if report.overall_status == "PASS" else 1
 
