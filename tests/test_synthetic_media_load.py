@@ -6,7 +6,7 @@ import asyncio
 import json
 import unittest.mock
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from tools.synthetic_media_load import (
@@ -22,6 +22,7 @@ from tools.synthetic_media_load import (
     SCHEDULING_MODE_ALIGNED,
     SCHEDULING_MODE_STAGGERED,
     SUPPORTED_PATTERNS,
+    CallMediaRunRecord,
     EventLoopLagMonitor,
     MonotonicFramePacer,
     PacedMediaLoadReport,
@@ -2219,3 +2220,141 @@ def test_late_sends_with_fast_echoes_correctly_fails_transmission_duration() -> 
     assert any("Media transmission duration elongated by 525.00%" in f for f in failures)
     assert metrics["actual_transmission_seconds"] == 0.50
     assert metrics["transmission_elongation_pct"] == 525.0
+
+
+def test_call_media_run_record_serialization_roundtrip() -> None:
+    """Verify CallMediaRunRecord to_dict and from_dict preserve all fields including send wait."""
+    agg = BoundedLatencyAggregator(window_capacity=64)
+    agg.record(1.0)
+    rec = CallMediaRunRecord(
+        session_slot_id=3,
+        admitted=True,
+        completed_cleanly=True,
+        close_code=1000,
+        frames_scheduled=10,
+        frames_sent=10,
+        frames_skipped=0,
+        missed_deadlines=1,
+        frames_echoed=10,
+        frames_missing=0,
+        duplicate_frames=0,
+        out_of_order_frames=0,
+        payload_mismatches=0,
+        cross_session_frames=0,
+        first_frame_sent_s=100.0,
+        last_frame_activity_s=100.2,
+        handshake_ms=2.5,
+        call_start_rtt_ms=1.2,
+        call_end_rtt_ms=1.1,
+        total_call_duration_ms=210.0,
+        echo_rtt_summary=agg.snapshot(),
+        echo_rtt_samples_ms=(0.5, 1.0, 1.8),
+        scheduling_lateness_samples_ms=(0.1, 0.2),
+        scheduling_interval_samples_ms=(20.0, 20.1),
+        scheduling_jitter_samples_ms=(0.0, 0.1),
+        dispatch_skew_ms=0.5,
+        error_category=None,
+        last_frame_sent_s=100.18,
+        client_socket_send_wait_samples_ms=(0.05, 0.12, 0.08),
+    )
+    d = rec.to_dict()
+    assert d["session_slot_id"] == 3
+    assert d["client_socket_send_wait_samples_ms"] == [0.05, 0.12, 0.08]
+
+    reconstructed = CallMediaRunRecord.from_dict(d)
+    assert reconstructed.session_slot_id == rec.session_slot_id
+    assert reconstructed.client_socket_send_wait_samples_ms == (0.05, 0.12, 0.08)
+    assert reconstructed.last_frame_sent_s == 100.18
+    assert reconstructed.completed_cleanly is True
+
+
+def test_client_workers_parameter_validation() -> None:
+    """Verify validation of client_workers across run_paced_media_stage and execute_media_load_evaluation."""
+
+    async def _run() -> None:
+        # Bool rejection
+        with pytest.raises(TypeError, match="client_workers must be a positive integer"):
+            await run_paced_media_stage(
+                stage_name="val",
+                concurrency=2,
+                client_workers=cast(Any, True),
+            )
+
+        with pytest.raises(TypeError, match="client_workers must be a positive integer"):
+            await execute_media_load_evaluation(
+                concurrencies=(2,),
+                client_workers=cast(Any, False),
+            )
+
+        # Non-positive rejection
+        with pytest.raises(ValueError, match="client_workers must be a positive integer"):
+            await run_paced_media_stage(
+                stage_name="val",
+                concurrency=2,
+                client_workers=0,
+            )
+
+        with pytest.raises(ValueError, match="client_workers must be a positive integer"):
+            await execute_media_load_evaluation(
+                concurrencies=(2,),
+                client_workers=-1,
+            )
+
+        # Worker count exceeding concurrency
+        with pytest.raises(
+            ValueError, match=r"client_workers \(4\) cannot exceed concurrency \(2\)"
+        ):
+            await run_paced_media_stage(
+                stage_name="val",
+                concurrency=2,
+                client_workers=4,
+            )
+
+    asyncio.run(_run())
+
+
+def test_multi_process_client_workers_execution_and_metrics() -> None:
+    """Verify multi-process client workers execute and report pooled diagnostics and send wait."""
+
+    async def _run() -> None:
+        lenient_criteria = PacingAcceptanceCriteria(
+            max_missed_deadline_rate=1.0,
+            max_mean_interval_deviation_pct=500.0,
+            max_p95_scheduler_lateness_ms=5000.0,
+            max_transmission_elongation_pct=500.0,
+        )
+        stage = await run_paced_media_stage(
+            stage_name="test_mp_workers",
+            concurrency=2,
+            duration_seconds=0.1,
+            interval_ms=20.0,
+            client_workers=2,
+            isolation_mode=ISOLATION_MODE_IN_PROCESS,
+            pacing_criteria=lenient_criteria,
+        )
+        assert stage.status == "PASS"
+        assert stage.requested_concurrency == 2
+        assert stage.achieved_media_concurrency == 2
+        assert stage.completed_calls == 2
+        assert stage.media_correctness["frames_sent"] == 10  # 5 frames * 2 calls
+        assert stage.media_correctness["frames_echoed"] == 10
+        assert stage.media_correctness["frames_missing"] == 0
+
+        # Timing and send wait metrics
+        assert stage.timing_ms["client_workers"] == 2
+        assert "client_socket_send_wait_ms" in stage.timing_ms
+        send_wait = stage.timing_ms["client_socket_send_wait_ms"]
+        assert send_wait["available"] is True
+        assert send_wait["sample_count"] == 10
+        assert send_wait["p50_ms"] is not None
+
+        # Resource and worker diagnostics
+        assert stage.resources["client_workers"] == 2
+        worker_diags = stage.resources["client_worker_diagnostics"]
+        assert len(worker_diags) == 2
+        assert {w["worker_index"] for w in worker_diags} == {0, 1}
+        for w in worker_diags:
+            assert "cpu_duration_s" in w
+            assert "worker_lag" in w
+
+    asyncio.run(_run())
