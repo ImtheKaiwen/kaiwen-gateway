@@ -1778,7 +1778,7 @@ def test_reassess_stage_report_on_historical_m5_data() -> None:
     else:
         # Canonical snapshot matching untracked historical reports/m5_load_100.json
         stage_100_raw = {
-            "stage_name": "S2_concurrency_100",
+            "stage_name": "S1_concurrency_100",
             "media_correctness": {
                 "frames_scheduled": 25000,
                 "frames_sent": 25000,
