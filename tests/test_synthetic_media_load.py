@@ -10,8 +10,13 @@ from typing import Any
 
 import pytest
 from tools.synthetic_media_load import (
+    DEFAULT_MAX_MEAN_INTERVAL_DEVIATION_PCT,
+    DEFAULT_MAX_MISSED_DEADLINE_RATE,
+    DEFAULT_MAX_P95_SCHEDULER_LATENESS_MS,
+    DEFAULT_MAX_TRANSMISSION_ELONGATION_PCT,
     FRAME_MAGIC,
     HEADER_STRUCT,
+    ISOLATION_MODE_IN_PROCESS,
     ISOLATION_MODE_PROCESS_ISOLATED,
     KW_SYNTHETIC_MEDIA_SECRET_KEY_ENV,
     SCHEDULING_MODE_ALIGNED,
@@ -20,14 +25,17 @@ from tools.synthetic_media_load import (
     EventLoopLagMonitor,
     MonotonicFramePacer,
     PacedMediaLoadReport,
+    PacingAcceptanceCriteria,
     SessionEchoTracker,
     _build_arg_parser,
     build_deterministic_frame_payload,
     compute_session_phase_offset_ms,
+    evaluate_pacing_metrics,
     execute_media_load_evaluation,
     extract_frame_identity,
     main,
     measure_process_rss_kib,
+    reassess_stage_report,
     run_fault_and_overload_suite,
     run_paced_media_stage,
     start_isolated_media_server_process,
@@ -827,11 +835,18 @@ def test_execute_media_load_evaluation_report_structure() -> None:
     """Verify `execute_media_load_evaluation` returns a frozen `PacedMediaLoadReport`."""
 
     async def _run() -> None:
+        lenient_criteria = PacingAcceptanceCriteria(
+            max_missed_deadline_rate=1.0,
+            max_mean_interval_deviation_pct=500.0,
+            max_p95_scheduler_lateness_ms=5000.0,
+            max_transmission_elongation_pct=500.0,
+        )
         report = await execute_media_load_evaluation(
             concurrencies=(1,),
             duration_seconds=0.08,
             seed=42,
             include_faults=False,
+            pacing_criteria=lenient_criteria,
         )
         assert isinstance(report, PacedMediaLoadReport)
         assert report.overall_status == "PASS"
@@ -1196,3 +1211,1011 @@ def test_shared_monotonic_epoch_and_pacer_epoch_alignment() -> None:
     # Frame 0 deadline for staggered must be exactly t0 + 0.010s
     assert pacer_aligned.phase_offset_s == 0.0
     assert pacer_staggered.phase_offset_s == 0.010
+
+
+# ==============================================================================
+# R3: High-Concurrency Capacity Propagation & Accounting Unit Tests (M5.1C)
+# ==============================================================================
+
+
+def test_capacity_configuration_cli_and_propagation() -> None:
+    """Verify capacity configuration parsing, execution propagation, and report metadata."""
+    parser = _build_arg_parser()
+    args = parser.parse_args(
+        ["--max-concurrent-connections", "50", "--max-connections-per-tenant", "10"]
+    )
+    assert args.max_concurrent_connections == 50
+    assert args.max_connections_per_tenant == 10
+
+    async def _run() -> None:
+        lenient_criteria = PacingAcceptanceCriteria(
+            max_missed_deadline_rate=1.0,
+            max_mean_interval_deviation_pct=500.0,
+            max_p95_scheduler_lateness_ms=5000.0,
+            max_transmission_elongation_pct=500.0,
+        )
+        report = await execute_media_load_evaluation(
+            concurrencies=(1,),
+            duration_seconds=0.10,
+            include_faults=False,
+            isolation_mode=ISOLATION_MODE_IN_PROCESS,
+            max_concurrent_connections=50,
+            max_connections_per_tenant=10,
+            pacing_criteria=lenient_criteria,
+        )
+        assert report.overall_status == "PASS"
+        assert report.configuration["max_concurrent_connections"] == 50
+        assert report.configuration["max_connections_per_tenant"] == 10
+        assert len(report.stages) == 1
+        assert report.stages[0].status == "PASS"
+        assert report.stages[0].requested_concurrency == 1
+        assert report.stages[0].admitted_concurrency == 1
+        assert report.stages[0].achieved_media_concurrency == 1
+
+    asyncio.run(_run())
+
+
+def test_capacity_configuration_validation_errors() -> None:
+    """Verify strict type and boundary validation for capacity configuration parameters."""
+
+    async def _run() -> None:
+        with pytest.raises(TypeError, match="must be a positive integer, not bool"):
+            await execute_media_load_evaluation(
+                concurrencies=(1,),
+                include_faults=False,
+                max_concurrent_connections=True,
+            )
+
+        with pytest.raises(ValueError, match="must be a positive integer"):
+            await execute_media_load_evaluation(
+                concurrencies=(1,),
+                include_faults=False,
+                max_concurrent_connections=0,
+            )
+
+        with pytest.raises(TypeError, match="must be a positive integer, not bool"):
+            await execute_media_load_evaluation(
+                concurrencies=(1,),
+                include_faults=False,
+                max_connections_per_tenant=False,
+            )
+
+        with pytest.raises(ValueError, match="must be a positive integer"):
+            await execute_media_load_evaluation(
+                concurrencies=(1,),
+                include_faults=False,
+                max_connections_per_tenant=-2,
+            )
+
+        with pytest.raises(
+            ValueError, match="max_connections_per_tenant.*cannot exceed max_concurrent_connections"
+        ):
+            await execute_media_load_evaluation(
+                concurrencies=(1,),
+                include_faults=False,
+                max_concurrent_connections=10,
+                max_connections_per_tenant=20,
+            )
+
+        with pytest.raises(
+            ValueError,
+            match="Requested concurrency 50 exceeds configured max_concurrent_connections 25",
+        ):
+            await execute_media_load_evaluation(
+                concurrencies=(50,),
+                include_faults=False,
+                max_concurrent_connections=25,
+            )
+
+        with pytest.raises(ValueError, match="Requested concurrency 50 exceeds max capacity 25"):
+            await run_paced_media_stage(
+                stage_name="test_val_stage",
+                concurrency=50,
+                duration_seconds=0.04,
+                max_concurrent_connections=25,
+                max_connections_per_tenant=10,
+            )
+
+    asyncio.run(_run())
+
+
+def test_empirical_concurrency_accounting_and_active_overlap_failure() -> None:
+    """Verify achieved_media_concurrency fails stage if peak active sessions fall short."""
+
+    async def _run() -> None:
+        lenient_criteria = PacingAcceptanceCriteria(
+            max_missed_deadline_rate=1.0,
+            max_mean_interval_deviation_pct=500.0,
+            max_p95_scheduler_lateness_ms=5000.0,
+            max_transmission_elongation_pct=500.0,
+        )
+        # Run a 2-concurrency stage in in-process mode
+        stage = await run_paced_media_stage(
+            stage_name="test_emp_2concurrency",
+            concurrency=2,
+            duration_seconds=0.06,
+            max_concurrent_connections=10,
+            max_connections_per_tenant=5,
+            isolation_mode=ISOLATION_MODE_IN_PROCESS,
+            pacing_criteria=lenient_criteria,
+        )
+        # In a normal run with 2 sessions, both should overlap and achieve 2 concurrency
+        assert stage.status == "PASS"
+        assert stage.requested_concurrency == 2
+        assert stage.admitted_concurrency == 2
+        assert stage.achieved_media_concurrency == 2
+        assert stage.media_correctness["frame_loss_rate"] == 0.0
+
+    asyncio.run(_run())
+
+
+def test_empirical_concurrency_failure_on_underachievement() -> None:
+    """Verify that when peak active sessions fall short of requested concurrency, stage status is FAIL."""
+
+    async def _run() -> None:
+        with (
+            unittest.mock.patch(
+                "tools.synthetic_media_load.start_isolated_media_server_process"
+            ) as mock_cm,
+            unittest.mock.patch(
+                "tools.synthetic_media_load.run_single_paced_media_call"
+            ) as mock_call,
+        ):
+            mock_ctx = unittest.mock.AsyncMock()
+            mock_ctx.ws_base_url = "ws://127.0.0.1:9999"
+            mock_verifier = unittest.mock.MagicMock()
+            mock_verifier.issue_token.return_value = "fake_tok"
+            mock_ctx.verifier = mock_verifier
+            mock_cm.return_value.__aenter__.return_value = mock_ctx
+
+            fake_rec = unittest.mock.MagicMock()
+            fake_rec.admitted = False
+            fake_rec.completed_cleanly = False
+            fake_rec.close_code = 1008
+            fake_rec.frames_scheduled = 5
+            fake_rec.frames_sent = 0
+            fake_rec.frames_skipped = 5
+            fake_rec.missed_deadlines = 0
+            fake_rec.frames_echoed = 0
+            fake_rec.frames_missing = 0
+            fake_rec.duplicate_frames = 0
+            fake_rec.out_of_order_frames = 0
+            fake_rec.payload_mismatches = 0
+            fake_rec.cross_session_frames = 0
+            fake_rec.first_frame_sent_s = None
+            fake_rec.last_frame_activity_s = None
+            fake_rec.scheduling_lateness_samples_ms = []
+            fake_rec.scheduling_interval_samples_ms = []
+            fake_rec.scheduling_jitter_samples_ms = []
+            fake_rec.echo_rtt_samples_ms = []
+            fake_rec.handshake_ms = 1.0
+            fake_rec.call_start_rtt_ms = 1.0
+            fake_rec.call_end_rtt_ms = 1.0
+            fake_rec.echo_rtt_summary = unittest.mock.MagicMock(available=False, p95_ms=None)
+            mock_call.return_value = fake_rec
+
+            mock_res = unittest.mock.MagicMock()
+            mock_res.telemetry = {
+                "peak_active_sessions": 1,
+                "total_sessions_accepted": 1,
+                "total_sessions_closed": 1,
+                "cpu_user_seconds": 0.01,
+                "cpu_system_seconds": 0.01,
+                "peak_rss_kib": 1000,
+                "final_rss_kib": 1000,
+                "final_active_connections": 0,
+                "final_active_tenants": 0,
+                "final_active_calls": 0,
+                "final_active_voice_sessions": 0,
+                "leaked_asyncio_tasks": 0,
+            }
+            mock_ctx.wait_shutdown.return_value = mock_res
+
+            stage = await run_paced_media_stage(
+                stage_name="test_shortfall",
+                concurrency=2,
+                duration_seconds=0.04,
+                max_concurrent_connections=10,
+                max_connections_per_tenant=5,
+                isolation_mode=ISOLATION_MODE_PROCESS_ISOLATED,
+            )
+            assert stage.status == "FAIL"
+            assert stage.requested_concurrency == 2
+            assert stage.achieved_media_concurrency < 2
+            assert any("did not match requested concurrency" in r for r in stage.failure_reasons)
+
+    asyncio.run(_run())
+
+
+# ==============================================================================
+# R4: Real-Time Frame Pacing Acceptance & Historical Reassessment Tests (Phase F)
+# ==============================================================================
+
+
+def test_pacing_acceptance_criteria_validation() -> None:
+    """Verify default values, to_dict, type checks, and boundary validations of PacingAcceptanceCriteria."""
+    criteria = PacingAcceptanceCriteria()
+    assert criteria.max_missed_deadline_rate == DEFAULT_MAX_MISSED_DEADLINE_RATE
+    assert criteria.max_mean_interval_deviation_pct == DEFAULT_MAX_MEAN_INTERVAL_DEVIATION_PCT
+    assert criteria.max_p95_scheduler_lateness_ms == DEFAULT_MAX_P95_SCHEDULER_LATENESS_MS
+    assert criteria.max_transmission_elongation_pct == DEFAULT_MAX_TRANSMISSION_ELONGATION_PCT
+
+    data = criteria.to_dict()
+    assert data["max_missed_deadline_rate"] == 0.20
+    assert data["max_mean_interval_deviation_pct"] == 20.0
+    assert data["max_p95_scheduler_lateness_ms"] == 100.0
+    assert data["max_transmission_elongation_pct"] == 25.0
+
+    # Custom valid values
+    custom = PacingAcceptanceCriteria(
+        max_missed_deadline_rate=0.10,
+        max_mean_interval_deviation_pct=15.0,
+        max_p95_scheduler_lateness_ms=50.0,
+        max_transmission_elongation_pct=10.0,
+    )
+    assert custom.max_missed_deadline_rate == 0.10
+    assert custom.max_mean_interval_deviation_pct == 15.0
+
+    # Type errors (bool, str, None)
+    with pytest.raises(TypeError, match="must be a float, not bool"):
+        PacingAcceptanceCriteria(max_missed_deadline_rate=True)
+    with pytest.raises(TypeError, match="must be a float, not bool"):
+        PacingAcceptanceCriteria(max_missed_deadline_rate="0.2")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="must be a float, not bool"):
+        PacingAcceptanceCriteria(max_mean_interval_deviation_pct=False)
+    with pytest.raises(TypeError, match="must be a float, not bool"):
+        PacingAcceptanceCriteria(max_p95_scheduler_lateness_ms=True)
+    with pytest.raises(TypeError, match="must be a float, not bool"):
+        PacingAcceptanceCriteria(max_transmission_elongation_pct=False)
+
+    # Boundary and value errors
+    with pytest.raises(ValueError, match="must be in \\(0.0, 1.0\\]"):
+        PacingAcceptanceCriteria(max_missed_deadline_rate=0.0)
+    with pytest.raises(ValueError, match="must be in \\(0.0, 1.0\\]"):
+        PacingAcceptanceCriteria(max_missed_deadline_rate=-0.05)
+    with pytest.raises(ValueError, match="must be in \\(0.0, 1.0\\]"):
+        PacingAcceptanceCriteria(max_missed_deadline_rate=1.05)
+    with pytest.raises(ValueError, match="must be in \\(0.0, 1.0\\]"):
+        PacingAcceptanceCriteria(max_missed_deadline_rate=float("nan"))
+
+    with pytest.raises(ValueError, match="must be positive"):
+        PacingAcceptanceCriteria(max_mean_interval_deviation_pct=0.0)
+    with pytest.raises(ValueError, match="must be positive"):
+        PacingAcceptanceCriteria(max_mean_interval_deviation_pct=-1.0)
+
+    with pytest.raises(ValueError, match="must be positive"):
+        PacingAcceptanceCriteria(max_p95_scheduler_lateness_ms=0.0)
+    with pytest.raises(ValueError, match="must be positive"):
+        PacingAcceptanceCriteria(max_p95_scheduler_lateness_ms=-10.0)
+
+    with pytest.raises(ValueError, match="must be positive"):
+        PacingAcceptanceCriteria(max_transmission_elongation_pct=0.0)
+    with pytest.raises(ValueError, match="must be positive"):
+        PacingAcceptanceCriteria(max_transmission_elongation_pct=-5.0)
+
+
+def test_evaluate_pacing_metrics_perfect_and_small_jitter() -> None:
+    """Verify evaluate_pacing_metrics passes on ideal pacing and tolerable scheduler jitter."""
+    criteria = PacingAcceptanceCriteria()
+
+    # Scenario 1: Ideal 0-jitter pacing
+    status, failures, metrics = evaluate_pacing_metrics(
+        total_scheduled=100,
+        total_sent=100,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=0.5,
+        nominal_transmission_s=1.98,
+        actual_transmission_s=1.98,
+        criteria=criteria,
+    )
+    assert status == "PASS"
+    assert failures == []
+    assert metrics["missed_deadline_rate"] == 0.0
+    assert metrics["mean_interval_deviation_pct"] == 0.0
+    assert metrics["p95_scheduler_lateness_ms"] == 0.5
+    assert metrics["transmission_elongation_pct"] == 0.0
+
+    # Scenario 2: Realistic small jitter within all thresholds
+    status, failures, metrics = evaluate_pacing_metrics(
+        total_scheduled=100,
+        total_sent=100,
+        total_missed_deadlines=8,  # 8% <= 20%
+        target_interval_ms=20.0,
+        mean_interval_ms=21.5,  # 7.5% deviation <= 20%
+        p95_scheduler_lateness_ms=35.0,  # 35 ms <= 100 ms
+        nominal_transmission_s=1.98,
+        actual_transmission_s=2.10,  # 6.06% elongation <= 25%
+        criteria=criteria,
+    )
+    assert status == "PASS"
+    assert failures == []
+    assert round(metrics["missed_deadline_rate"], 4) == 0.08
+    assert round(metrics["mean_interval_deviation_pct"], 2) == 7.5
+    assert metrics["p95_scheduler_lateness_ms"] == 35.0
+    assert round(metrics["transmission_elongation_pct"], 2) == 6.06
+
+
+def test_evaluate_pacing_metrics_gross_degradation_all_violations() -> None:
+    """Verify evaluate_pacing_metrics flags each violated criterion with precise empirical diagnostics."""
+    criteria = PacingAcceptanceCriteria()
+
+    status, failures, metrics = evaluate_pacing_metrics(
+        total_scheduled=12500,
+        total_sent=12500,
+        total_missed_deadlines=12379,  # 99.03%
+        target_interval_ms=20.0,
+        mean_interval_ms=54.00,  # 170.0% deviation
+        p95_scheduler_lateness_ms=8163.29,  # 8163 ms
+        nominal_transmission_s=4.98,
+        actual_transmission_s=13.57,  # 172.49% elongation
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert len(failures) == 4
+    assert any(
+        "Missed deadline rate 99.03% exceeded threshold 20.00% (12379/12500 frames missed deadline)"
+        in f
+        for f in failures
+    )
+    assert any(
+        "Mean inter-frame interval 54.00 ms deviated by 170.00% from target 20.00 ms" in f
+        for f in failures
+    )
+    assert any(
+        "p95 scheduler lateness 8163.29 ms exceeded threshold 100.00 ms" in f for f in failures
+    )
+    assert any(
+        "Media transmission duration elongated by 172.49% (13.57s vs nominal 4.98s" in f
+        for f in failures
+    )
+    assert metrics["missed_deadline_rate"] == 12379 / 12500
+    assert metrics["mean_interval_deviation_pct"] == 170.0
+    assert metrics["p95_scheduler_lateness_ms"] == 8163.29
+
+
+def test_evaluate_pacing_metrics_missing_or_empty_data() -> None:
+    """Verify evaluate_pacing_metrics reports explicit failure when timing data is unavailable."""
+    criteria = PacingAcceptanceCriteria()
+
+    # Zero frames sent
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=10,
+        total_sent=0,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=None,
+        p95_scheduler_lateness_ms=None,
+        nominal_transmission_s=0.18,
+        actual_transmission_s=None,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("No audio frames were transmitted" in f for f in failures)
+
+    # Missing interval data
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=10,
+        total_sent=10,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=None,
+        p95_scheduler_lateness_ms=10.0,
+        nominal_transmission_s=0.18,
+        actual_transmission_s=0.18,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("Missing inter-frame scheduling interval measurements" in f for f in failures)
+
+    # Missing p95 lateness data
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=10,
+        total_sent=10,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=None,
+        nominal_transmission_s=0.18,
+        actual_transmission_s=0.18,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("Missing scheduler lateness measurements" in f for f in failures)
+
+    # Missing transmission duration
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=10,
+        total_sent=10,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=10.0,
+        nominal_transmission_s=0.18,
+        actual_transmission_s=None,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("Missing actual transmission duration measurement" in f for f in failures)
+
+
+def test_media_integrity_pass_does_not_override_pacing_fail() -> None:
+    """Verify that 100% media integrity cannot mask real-time pacing failure in stage evaluation."""
+
+    async def _run() -> None:
+        # Run stage with extremely strict pacing criteria (e.g. 0.0001% allowed deviation)
+        # to guarantee pacing fails while in-process media delivery passes 100% cleanly.
+        strict_criteria = PacingAcceptanceCriteria(
+            max_missed_deadline_rate=0.000001,
+            max_mean_interval_deviation_pct=0.0001,
+            max_p95_scheduler_lateness_ms=0.0001,
+            max_transmission_elongation_pct=0.0001,
+        )
+        stage = await run_paced_media_stage(
+            stage_name="test_pacing_fail_integrity_pass",
+            concurrency=1,
+            duration_seconds=0.10,
+            isolation_mode=ISOLATION_MODE_IN_PROCESS,
+            pacing_criteria=strict_criteria,
+        )
+        assert stage.media_integrity_status == "PASS"
+        assert stage.realtime_pacing_status == "FAIL"
+        assert stage.status == "FAIL"
+        assert len(stage.pacing_failure_reasons) > 0
+        assert len(stage.media_failure_reasons) == 0
+
+    asyncio.run(_run())
+
+
+def test_overall_evaluation_propagates_pacing_failure() -> None:
+    """Verify execute_media_load_evaluation aggregates media and pacing statuses correctly."""
+
+    async def _run() -> None:
+        strict_criteria = PacingAcceptanceCriteria(
+            max_missed_deadline_rate=0.000001,
+            max_mean_interval_deviation_pct=0.0001,
+        )
+        report = await execute_media_load_evaluation(
+            concurrencies=(1,),
+            duration_seconds=0.10,
+            include_faults=False,
+            isolation_mode=ISOLATION_MODE_IN_PROCESS,
+            pacing_criteria=strict_criteria,
+        )
+        assert report.media_integrity_status == "PASS"
+        assert report.realtime_pacing_status == "FAIL"
+        assert report.overall_status == "FAIL"
+
+    asyncio.run(_run())
+
+
+def test_cli_exit_code_and_json_report_on_pacing_failure(tmp_path: Path) -> None:
+    """Verify CLI main() returns exit code 1 on pacing failure while outputting complete JSON report."""
+    output_file = tmp_path / "test_pacing_fail_report.json"
+    exit_code = main(
+        [
+            "--stages",
+            "1",
+            "--duration",
+            "0.10",
+            "--isolation-mode",
+            ISOLATION_MODE_IN_PROCESS,
+            "--no-faults",
+            "--max-missed-deadline-rate",
+            "0.000001",
+            "--max-mean-interval-deviation-pct",
+            "0.0001",
+            "--output",
+            str(output_file),
+        ]
+    )
+    assert exit_code == 1
+    assert output_file.exists()
+
+    with output_file.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    assert data["media_integrity_status"] == "PASS"
+    assert data["realtime_pacing_status"] == "FAIL"
+    assert data["overall_status"] == "FAIL"
+    assert len(data["stages"]) == 1
+    st = data["stages"][0]
+    assert st["media_integrity_status"] == "PASS"
+    assert st["realtime_pacing_status"] == "FAIL"
+    assert st["status"] == "FAIL"
+    assert len(st["pacing_failure_reasons"]) > 0
+
+
+def test_reassess_stage_report_on_historical_m5_data() -> None:
+    """Verify offline reassess_stage_report correctly diagnoses historical 50 and 100 session reports."""
+    report_50_path = Path("reports/m5_load_50.json")
+    report_100_path = Path("reports/m5_load_100.json")
+
+    if report_50_path.exists():
+        with report_50_path.open("r", encoding="utf-8") as f:
+            stage_50_raw = json.load(f)["stages"][0]
+    else:
+        # Canonical snapshot matching untracked historical reports/m5_load_50.json
+        stage_50_raw = {
+            "stage_name": "S1_concurrency_50",
+            "media_correctness": {
+                "frames_scheduled": 12500,
+                "frames_sent": 12500,
+                "missed_deadlines": 12379,
+                "frames_missing": 0,
+                "duplicate_frames": 0,
+                "out_of_order_frames": 0,
+                "payload_mismatches": 0,
+                "unexpected_close_codes": 0,
+                "cleanup_failures": 0,
+            },
+            "timing_ms": {
+                "frame_scheduling_interval_ms": {"mean_ms": 54.0043},
+                "scheduler_lateness_ms": {"p95_ms": 8163.2899},
+            },
+            "configured_duration_seconds": 5.0,
+        }
+
+    result_50 = reassess_stage_report(stage_50_raw)
+
+    assert result_50["media_integrity_status"] == "PASS"
+    assert result_50["realtime_pacing_status"] == "FAIL"
+    assert result_50["overall_status"] == "FAIL"
+    assert result_50["media_failure_reasons"] == []
+    assert len(result_50["pacing_failure_reasons"]) == 3
+    assert any("Missed deadline rate 99.03%" in r for r in result_50["pacing_failure_reasons"])
+    assert any(
+        "Mean inter-frame interval 54.00 ms" in r for r in result_50["pacing_failure_reasons"]
+    )
+    assert any(
+        "p95 scheduler lateness 8163.29 ms" in r for r in result_50["pacing_failure_reasons"]
+    )
+
+    if report_100_path.exists():
+        with report_100_path.open("r", encoding="utf-8") as f:
+            stage_100_raw = json.load(f)["stages"][0]
+    else:
+        # Canonical snapshot matching untracked historical reports/m5_load_100.json
+        stage_100_raw = {
+            "stage_name": "S1_concurrency_100",
+            "media_correctness": {
+                "frames_scheduled": 25000,
+                "frames_sent": 25000,
+                "missed_deadlines": 24934,
+                "frames_missing": 0,
+                "duplicate_frames": 0,
+                "out_of_order_frames": 0,
+                "payload_mismatches": 0,
+                "unexpected_close_codes": 0,
+                "cleanup_failures": 0,
+            },
+            "timing_ms": {
+                "frame_scheduling_interval_ms": {"mean_ms": 49.5654},
+                "scheduler_lateness_ms": {"p95_ms": 7030.7719},
+            },
+            "configured_duration_seconds": 5.0,
+        }
+
+    result_100 = reassess_stage_report(stage_100_raw)
+
+    assert result_100["media_integrity_status"] == "PASS"
+    assert result_100["realtime_pacing_status"] == "FAIL"
+    assert result_100["overall_status"] == "FAIL"
+    assert result_100["media_failure_reasons"] == []
+    assert len(result_100["pacing_failure_reasons"]) == 3
+    assert any("Missed deadline rate 99.74%" in r for r in result_100["pacing_failure_reasons"])
+    assert any(
+        "Mean inter-frame interval 49.57 ms" in r for r in result_100["pacing_failure_reasons"]
+    )
+    assert any(
+        "p95 scheduler lateness 7030.77 ms" in r for r in result_100["pacing_failure_reasons"]
+    )
+
+
+# ==============================================================================
+# R5: P1/P2 Regression Tests: Strict Statistics Validation & Send Timestamps
+# ==============================================================================
+
+
+def test_pacing_evaluation_nan_and_infinity_rejection() -> None:
+    """Verify evaluate_pacing_metrics strictly rejects NaN, +inf, -inf in all measured stats (P1)."""
+    criteria = PacingAcceptanceCriteria()
+
+    # NaN mean interval
+    status, failures, metrics = evaluate_pacing_metrics(
+        total_scheduled=100,
+        total_sent=100,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=float("nan"),
+        p95_scheduler_lateness_ms=5.0,
+        nominal_transmission_s=1.98,
+        actual_transmission_s=1.98,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("Nonfinite mean interval measurement" in f for f in failures)
+    assert metrics["mean_interval_deviation_pct"] is None
+
+    # Positive and negative infinity mean interval
+    for inf_val in (float("inf"), float("-inf")):
+        status, failures, _ = evaluate_pacing_metrics(
+            total_scheduled=100,
+            total_sent=100,
+            total_missed_deadlines=0,
+            target_interval_ms=20.0,
+            mean_interval_ms=inf_val,
+            p95_scheduler_lateness_ms=5.0,
+            nominal_transmission_s=1.98,
+            actual_transmission_s=1.98,
+            criteria=criteria,
+        )
+        assert status == "FAIL"
+        assert any("Nonfinite mean interval measurement" in f for f in failures)
+
+    # NaN and infinity p95 lateness
+    for bad_late in (float("nan"), float("inf"), float("-inf")):
+        status, failures, metrics = evaluate_pacing_metrics(
+            total_scheduled=100,
+            total_sent=100,
+            total_missed_deadlines=0,
+            target_interval_ms=20.0,
+            mean_interval_ms=20.0,
+            p95_scheduler_lateness_ms=bad_late,
+            nominal_transmission_s=1.98,
+            actual_transmission_s=1.98,
+            criteria=criteria,
+        )
+        assert status == "FAIL"
+        assert any("Nonfinite p95 scheduler lateness measurement" in f for f in failures)
+        assert metrics["p95_scheduler_lateness_ms"] is None
+
+    # NaN and infinity actual transmission duration
+    for bad_tx in (float("nan"), float("inf"), float("-inf")):
+        status, failures, metrics = evaluate_pacing_metrics(
+            total_scheduled=100,
+            total_sent=100,
+            total_missed_deadlines=0,
+            target_interval_ms=20.0,
+            mean_interval_ms=20.0,
+            p95_scheduler_lateness_ms=5.0,
+            nominal_transmission_s=1.98,
+            actual_transmission_s=bad_tx,
+            criteria=criteria,
+        )
+        assert status == "FAIL"
+        assert any("Nonfinite actual transmission duration measurement" in f for f in failures)
+        assert metrics["actual_transmission_seconds"] is None
+
+
+def test_pacing_evaluation_negative_measurements_rejection() -> None:
+    """Verify evaluate_pacing_metrics rejects negative or nonpositive intervals, latencies, and durations."""
+    criteria = PacingAcceptanceCriteria()
+
+    # Nonpositive mean interval (<= 0)
+    for bad_interval in (0.0, -10.0):
+        status, failures, _ = evaluate_pacing_metrics(
+            total_scheduled=100,
+            total_sent=100,
+            total_missed_deadlines=0,
+            target_interval_ms=20.0,
+            mean_interval_ms=bad_interval,
+            p95_scheduler_lateness_ms=5.0,
+            nominal_transmission_s=1.98,
+            actual_transmission_s=1.98,
+            criteria=criteria,
+        )
+        assert status == "FAIL"
+        assert any("Nonpositive mean interval measurement" in f for f in failures)
+
+    # Negative p95 lateness
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=100,
+        total_sent=100,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=-0.1,
+        nominal_transmission_s=1.98,
+        actual_transmission_s=1.98,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("Negative p95 scheduler lateness measurement" in f for f in failures)
+
+    # Negative actual transmission duration
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=100,
+        total_sent=100,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=5.0,
+        nominal_transmission_s=1.98,
+        actual_transmission_s=-1.0,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("Negative actual transmission duration measurement" in f for f in failures)
+
+
+def test_pacing_evaluation_invalid_types_and_booleans() -> None:
+    """Verify evaluate_pacing_metrics rejects booleans and unexpected types across all fields."""
+    criteria = PacingAcceptanceCriteria()
+
+    # Boolean measurements
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=100,
+        total_sent=100,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=True,
+        p95_scheduler_lateness_ms=5.0,
+        nominal_transmission_s=1.98,
+        actual_transmission_s=1.98,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("Invalid mean interval measurement type: bool" in f for f in failures)
+
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=100,
+        total_sent=100,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=False,
+        nominal_transmission_s=1.98,
+        actual_transmission_s=1.98,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("Invalid p95 scheduler lateness measurement type: bool" in f for f in failures)
+
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=100,
+        total_sent=100,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=5.0,
+        nominal_transmission_s=1.98,
+        actual_transmission_s=True,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("Invalid actual transmission duration measurement type: bool" in f for f in failures)
+
+    # Boolean counters
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=True,
+        total_sent=100,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=5.0,
+        nominal_transmission_s=1.98,
+        actual_transmission_s=1.98,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("Invalid total_scheduled counter: True" in f for f in failures)
+
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=100,
+        total_sent=False,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=5.0,
+        nominal_transmission_s=1.98,
+        actual_transmission_s=1.98,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("Invalid total_sent counter: False" in f for f in failures)
+
+
+def test_pacing_evaluation_counter_inconsistencies() -> None:
+    """Verify evaluate_pacing_metrics detects counter relationship violations."""
+    criteria = PacingAcceptanceCriteria()
+
+    # total_sent > total_scheduled
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=10,
+        total_sent=15,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=5.0,
+        nominal_transmission_s=0.18,
+        actual_transmission_s=0.18,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("total_sent (15) cannot exceed total_scheduled (10)" in f for f in failures)
+
+    # total_missed_deadlines > total_scheduled
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=10,
+        total_sent=10,
+        total_missed_deadlines=15,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=5.0,
+        nominal_transmission_s=0.18,
+        actual_transmission_s=0.18,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any(
+        "total_missed_deadlines (15) cannot exceed total_scheduled (10)" in f for f in failures
+    )
+
+
+def test_pacing_evaluation_valid_boundary_behavior() -> None:
+    """Verify evaluate_pacing_metrics accepts legitimate 0-lateness and ideal boundary values."""
+    criteria = PacingAcceptanceCriteria()
+
+    status, failures, metrics = evaluate_pacing_metrics(
+        total_scheduled=50,
+        total_sent=50,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=0.0,  # Exact 0-lateness boundary
+        nominal_transmission_s=0.98,
+        actual_transmission_s=0.98,
+        criteria=criteria,
+    )
+    assert status == "PASS"
+    assert failures == []
+    assert metrics["missed_deadline_rate"] == 0.0
+    assert metrics["mean_interval_deviation_pct"] == 0.0
+    assert metrics["p95_scheduler_lateness_ms"] == 0.0
+    assert metrics["transmission_elongation_pct"] == 0.0
+
+
+def test_pacing_evaluation_zero_frame_and_single_frame_workloads() -> None:
+    """Verify evaluate_pacing_metrics defines correct semantics for 0-frame and 1-frame workloads."""
+    criteria = PacingAcceptanceCriteria()
+
+    # 0 frames: fails because no audio media was transmitted
+    status, failures, _ = evaluate_pacing_metrics(
+        total_scheduled=0,
+        total_sent=0,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=None,
+        p95_scheduler_lateness_ms=None,
+        nominal_transmission_s=0.0,
+        actual_transmission_s=None,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any(
+        "No audio frames were transmitted to evaluate real-time pacing" in f for f in failures
+    )
+
+    # 1 frame on-time: passes! No intervals or multi-frame elongation span to evaluate.
+    status, failures, metrics = evaluate_pacing_metrics(
+        total_scheduled=1,
+        total_sent=1,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=None,
+        p95_scheduler_lateness_ms=5.0,
+        nominal_transmission_s=0.02,
+        actual_transmission_s=0.0,
+        criteria=criteria,
+    )
+    assert status == "PASS"
+    assert failures == []
+    assert metrics["missed_deadline_rate"] == 0.0
+    assert metrics["mean_interval_deviation_pct"] is None
+    assert metrics["p95_scheduler_lateness_ms"] == 5.0
+    assert metrics["transmission_elongation_pct"] is None
+
+    # 1 frame late: fails due to missed deadline and scheduler lateness exceeding threshold
+    status, failures, metrics = evaluate_pacing_metrics(
+        total_scheduled=1,
+        total_sent=1,
+        total_missed_deadlines=1,
+        target_interval_ms=20.0,
+        mean_interval_ms=None,
+        p95_scheduler_lateness_ms=150.0,
+        nominal_transmission_s=0.02,
+        actual_transmission_s=0.0,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("Missed deadline rate 100.00% exceeded threshold" in f for f in failures)
+    assert any(
+        "p95 scheduler lateness 150.00 ms exceeded threshold 100.00 ms" in f for f in failures
+    )
+
+
+def test_delayed_echo_with_on_time_sends_does_not_fail_transmission_duration() -> None:
+    """Verify that delayed echo arrival cannot create a false transmission elongation failure (P2)."""
+    criteria = PacingAcceptanceCriteria()
+
+    # Scenario: 5 frames sent at exact 20 ms intervals:
+    # Frame 0 sent at t = 100.00
+    # Frame 4 sent at t = 100.08
+    # Nominal duration = (5 - 1) * 0.02 = 0.08 s
+    # Actual send duration = 100.08 - 100.00 = 0.08 s
+    # Final echo arrives at t = 102.50 (echo delayed by 2.42s due to network/server queue)
+    #
+    # With P2 dedicated send timestamp:
+    # actual_transmission_s = 0.08 s (elongation = 0.0% <= 25.0%) -> PASS!
+    #
+    # Under old logic (using last_frame_activity_s = 102.50):
+    # actual_transmission_s would have been 2.50 s (elongation = 3025.0% > 25.0%) -> false FAIL!
+    t_first_send = 100.00
+    t_last_send = 100.08
+    t_last_activity_echo = 102.50
+    nominal_tx_s = 0.08
+
+    actual_tx_s = t_last_send - t_first_send
+    status, failures, metrics = evaluate_pacing_metrics(
+        total_scheduled=5,
+        total_sent=5,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=2.0,
+        nominal_transmission_s=nominal_tx_s,
+        actual_transmission_s=actual_tx_s,
+        criteria=criteria,
+    )
+    assert status == "PASS"
+    assert failures == []
+    assert metrics["actual_transmission_seconds"] == 0.08
+    assert metrics["transmission_elongation_pct"] == 0.0
+
+    # Verify that if the contaminated echo timestamp were used, it would fail
+    contaminated_tx_s = t_last_activity_echo - t_first_send
+    status_bad, failures_bad, metrics_bad = evaluate_pacing_metrics(
+        total_scheduled=5,
+        total_sent=5,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=2.0,
+        nominal_transmission_s=nominal_tx_s,
+        actual_transmission_s=contaminated_tx_s,
+        criteria=criteria,
+    )
+    assert status_bad == "FAIL"
+    assert any("Media transmission duration elongated by 3025.00%" in f for f in failures_bad)
+
+
+def test_late_sends_with_fast_echoes_correctly_fails_transmission_duration() -> None:
+    """Verify that genuine client send dilation correctly triggers elongation failure even if echoes are fast (P2)."""
+    criteria = PacingAcceptanceCriteria()
+
+    # Scenario: 5 frames nominal 0.08s, but client sender loop stalled:
+    # Frame 0 sent at t = 100.00
+    # Frame 4 sent at t = 100.50 (actual send duration = 0.50 s, elongation = 525% > 25%)
+    # Echo arrives immediately at t = 100.51 (fast echo, 10 ms RTT)
+    t_first_send = 100.00
+    t_last_send = 100.50
+    nominal_tx_s = 0.08
+
+    actual_tx_s = t_last_send - t_first_send
+    status, failures, metrics = evaluate_pacing_metrics(
+        total_scheduled=5,
+        total_sent=5,
+        total_missed_deadlines=0,
+        target_interval_ms=20.0,
+        mean_interval_ms=20.0,
+        p95_scheduler_lateness_ms=5.0,
+        nominal_transmission_s=nominal_tx_s,
+        actual_transmission_s=actual_tx_s,
+        criteria=criteria,
+    )
+    assert status == "FAIL"
+    assert any("Media transmission duration elongated by 525.00%" in f for f in failures)
+    assert metrics["actual_transmission_seconds"] == 0.50
+    assert metrics["transmission_elongation_pct"] == 525.0

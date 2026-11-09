@@ -737,7 +737,10 @@ class TestVoiceBridgeNegativeAndFaultScenarios:
 
             await session.start()
             # Allow inbound to complete EOF
-            await asyncio.sleep(0.02)
+            for _ in range(50):
+                if session.inbound_completed:
+                    break
+                await asyncio.sleep(0.01)
             inbound_mid = session.inbound_completed
             outbound_mid = session.outbound_completed
             state_mid = session.state.value
@@ -750,7 +753,10 @@ class TestVoiceBridgeNegativeAndFaultScenarios:
             out1 = create_synthetic_pcm16le_frame(b"OUT_1", sequence=1)
             ai.push_frame(out0)
             ai.push_frame(out1)
-            await asyncio.sleep(0.02)
+            for _ in range(50):
+                if len(tel.sent_frames) == 2:
+                    break
+                await asyncio.sleep(0.01)
 
             assert len(tel.sent_frames) == 2
             assert tel.sent_frames[0].payload == b"OUT_0"
