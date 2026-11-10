@@ -2293,7 +2293,55 @@ class PacedStageResult:
         }
 
 
-def format_safe_worker_error(exc: BaseException) -> str:
+# Finite set of diagnostic categories that may cross the worker IPC boundary. Each maps to the
+# detail kinds that are legal for it (an empty detail is always legal). An exception whose class
+# name is not listed is reported as the fixed fallback category: an arbitrary class name, which
+# can be attacker- or secret-bearing, is never forwarded.
+_DETAIL_DEADLINE: Final = "deadline"
+_DETAIL_HTTP: Final = "http"
+_DETAIL_CODE: Final = "code"
+_DETAIL_SENT_CODE: Final = "sent_code"
+_DETAIL_URI: Final = "uri"
+_DETAIL_ERRNO: Final = "errno"
+_DETAIL_LINE: Final = "line"
+
+UNEXPECTED_ERROR_CATEGORY: Final = "UnexpectedWorkerError"
+
+_SAFE_ERROR_CATEGORIES: Final[Mapping[str, frozenset[str]]] = {
+    "TimeoutError": frozenset({_DETAIL_DEADLINE}),
+    "InvalidStatus": frozenset({_DETAIL_HTTP}),
+    "ConnectionClosed": frozenset({_DETAIL_CODE, _DETAIL_SENT_CODE}),
+    "ConnectionClosedOK": frozenset({_DETAIL_CODE, _DETAIL_SENT_CODE}),
+    "ConnectionClosedError": frozenset({_DETAIL_CODE, _DETAIL_SENT_CODE}),
+    "InvalidURI": frozenset({_DETAIL_URI}),
+    "OSError": frozenset({_DETAIL_ERRNO}),
+    "ConnectionError": frozenset({_DETAIL_ERRNO}),
+    "ConnectionRefusedError": frozenset({_DETAIL_ERRNO}),
+    "ConnectionResetError": frozenset({_DETAIL_ERRNO}),
+    "ConnectionAbortedError": frozenset({_DETAIL_ERRNO}),
+    "BrokenPipeError": frozenset({_DETAIL_ERRNO}),
+    "gaierror": frozenset({_DETAIL_ERRNO}),
+    "JSONDecodeError": frozenset({_DETAIL_LINE}),
+    "PayloadTooBig": frozenset(),
+    "ProtocolError": frozenset(),
+    "WebSocketProtocolError": frozenset(),
+    "BrokenBarrierError": frozenset(),
+    "RuntimeError": frozenset(),
+    "ValueError": frozenset(),
+    "TypeError": frozenset(),
+    "KeyError": frozenset(),
+    "AssertionError": frozenset(),
+    UNEXPECTED_ERROR_CATEGORY: frozenset(),
+}
+
+
+def _safe_category(exc: BaseException) -> str:
+    """The allowlisted category for `exc`, or the fixed fallback; never the raw class name."""
+    name = type(exc).__name__
+    return name if name in _SAFE_ERROR_CATEGORIES else UNEXPECTED_ERROR_CATEGORY
+
+
+def _format_worker_error_unchecked(exc: BaseException) -> str:
     """Format an exception into a fail-safe diagnostic identifier without disclosing arbitrary message text.
 
     Distinguishes timeout, connection rejection, protocol error, and network errors using
@@ -2301,7 +2349,7 @@ def format_safe_worker_error(exc: BaseException) -> str:
     Arbitrary message text (str(exc), repr(exc), tracebacks, headers, or query params)
     is strictly omitted to prevent credential disclosure.
     """
-    cls_name = type(exc).__name__
+    cls_name = _safe_category(exc)
 
     # 1. Timeout errors
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
@@ -2363,8 +2411,19 @@ def format_safe_worker_error(exc: BaseException) -> str:
             return f"{cls_name} (line {lineno})"
         return cls_name
 
-    # 9. Fallback for all other exceptions: emit ONLY the class name
+    # 9. Fallback for all other exceptions: an allowlisted name, else the fixed category
     return cls_name
+
+
+def format_safe_worker_error(exc: BaseException) -> str:
+    """Allowlisted category plus an optional detail that is legal for that category.
+
+    Whatever the branches above produce is re-validated against the same table the receiving side
+    uses, so a category/detail mismatch (for example a subclass reported under the fixed fallback)
+    degrades to the bare allowlisted category instead of being emitted.
+    """
+    candidate = _format_worker_error_unchecked(exc)
+    return candidate if _is_safe_error_item(candidate) else _safe_category(exc)
 
 
 # Maintain alias for backward compatibility with previous call sites
@@ -2372,12 +2431,45 @@ _sanitize_worker_error_message = format_safe_worker_error
 
 ALLOWED_IPC_EVENTS: frozenset[str] = frozenset({"ready", "done", "error", "start"})
 
-_SAFE_EXCEPTION_IDENTIFIER = r"[A-Za-z_][A-Za-z0-9_]*"
-_SAFE_DETAIL = r"\((?:deadline exceeded|HTTP \d+|code \d+|sent code \d+|invalid URI format|errno -?\d+|line \d+)\)"
-_SAFE_ERROR_ITEM = rf"{_SAFE_EXCEPTION_IDENTIFIER}(?: {_SAFE_DETAIL})?"
-_SAFE_MULTI_TASK_PATTERN = rf"Worker \d+ encountered \d+ failed call task\(s\): {_SAFE_ERROR_ITEM}(?:; {_SAFE_ERROR_ITEM}){{0,2}}"
-_SAFE_PROCESS_ERROR_PATTERN = rf"Worker process error: {_SAFE_ERROR_ITEM}"
-_SAFE_IPC_ERROR_RE = re.compile(rf"^(?:{_SAFE_MULTI_TASK_PATTERN}|{_SAFE_PROCESS_ERROR_PATTERN})$")
+_SAFE_DETAIL_PATTERNS: Final[Mapping[str, re.Pattern[str]]] = {
+    _DETAIL_DEADLINE: re.compile(r"deadline exceeded"),
+    _DETAIL_HTTP: re.compile(r"HTTP [1-5]\d{2}"),
+    _DETAIL_CODE: re.compile(r"code \d{4}"),
+    _DETAIL_SENT_CODE: re.compile(r"sent code \d{4}"),
+    _DETAIL_URI: re.compile(r"invalid URI format"),
+    _DETAIL_ERRNO: re.compile(r"errno -?\d{1,5}"),
+    _DETAIL_LINE: re.compile(r"line \d{1,9}"),
+}
+_SAFE_ERROR_ITEM_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(?: \(([^()]*)\))?")
+_SAFE_MULTI_TASK_RE = re.compile(r"Worker \d+ encountered \d+ failed call task\(s\): (.+)")
+_SAFE_PROCESS_ERROR_RE = re.compile(r"Worker process error: (.+)")
+_MAX_ERROR_ITEMS: Final = 3
+
+
+def _is_safe_error_item(item: str) -> bool:
+    """Whether `item` is an allowlisted category with a detail that is legal for that category."""
+    matched = _SAFE_ERROR_ITEM_RE.fullmatch(item)
+    if matched is None:
+        return False
+    category, detail = matched.group(1), matched.group(2)
+    allowed = _SAFE_ERROR_CATEGORIES.get(category)
+    if allowed is None:
+        return False
+    if detail is None:
+        return True
+    return any(
+        kind in allowed and _SAFE_DETAIL_PATTERNS[kind].fullmatch(detail) is not None
+        for kind in _SAFE_DETAIL_PATTERNS
+    )
+
+
+def _is_safe_ipc_error(clean: str) -> bool:
+    multi = _SAFE_MULTI_TASK_RE.fullmatch(clean)
+    if multi is not None:
+        items = multi.group(1).split("; ")
+        return len(items) <= _MAX_ERROR_ITEMS and all(_is_safe_error_item(i) for i in items)
+    process = _SAFE_PROCESS_ERROR_RE.fullmatch(clean)
+    return process is not None and _is_safe_error_item(process.group(1))
 
 
 def _normalize_ipc_event_name(raw: Any) -> str:
@@ -2394,7 +2486,7 @@ def sanitize_ipc_error_string(raw: Any) -> str:
     clean = raw.strip()
     if "\n" in clean or "\r" in clean:
         return "Worker reported abnormal task failure"
-    if _SAFE_IPC_ERROR_RE.fullmatch(clean):
+    if _is_safe_ipc_error(clean):
         return clean
     return "Worker reported abnormal task failure"
 
@@ -3017,9 +3109,7 @@ async def run_paced_media_stage(
                     failure_reasons.append(f"Multi-process client workers failed: {err}")
                 else:
                     safe_diag = format_safe_worker_error(err)
-                    failure_reasons.append(
-                        f"Multi-process client workers failed: {type(err).__name__}: {safe_diag}"
-                    )
+                    failure_reasons.append(f"Multi-process client workers failed: {safe_diag}")
         else:
             barrier = asyncio.Barrier(concurrency + 1)
             epoch_ready_event = asyncio.Event()

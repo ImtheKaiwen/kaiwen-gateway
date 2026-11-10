@@ -2877,3 +2877,143 @@ def test_coordinator_ipc_payload_validation_and_event_normalization() -> None:
         assert "session credential" not in str(exc3)
 
     asyncio.run(_run_all())
+
+
+# ---------------------------------------------------------------------------
+# IPC diagnostic allowlist: the grammar alone is not enough, the category must be known.
+# ---------------------------------------------------------------------------
+
+_ABNORMAL = "Worker reported abnormal task failure"
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "RuntimeError",
+        "ValueError",
+        "TimeoutError (deadline exceeded)",
+        "InvalidStatus (HTTP 401)",
+        "ConnectionClosed (code 1008)",
+        "ConnectionClosedError (sent code 1011)",
+        "InvalidURI (invalid URI format)",
+        "OSError (errno 111)",
+        "ConnectionRefusedError (errno -2)",
+        "JSONDecodeError (line 7)",
+        "BrokenBarrierError",
+        "UnexpectedWorkerError",
+    ],
+)
+def test_ipc_allowlist_accepts_known_categories_with_legal_details(item: str) -> None:
+    from tools.synthetic_media_load import sanitize_ipc_error_string
+
+    assert (
+        sanitize_ipc_error_string(f"Worker process error: {item}")
+        == f"Worker process error: {item}"
+    )
+    multi = f"Worker 2 encountered 5 failed call task(s): {item}"
+    assert sanitize_ipc_error_string(multi) == multi
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "SUPERSECRET123",
+        "AKIAIOSFODNN7EXAMPLE",
+        "Bearer_eyJhbGciOiJIUzI1NiJ9",
+        "RuntimeErrorX",
+        "runtimeerror",
+        "E1",
+        "SUPERSECRET123 (errno 5)",
+    ],
+)
+def test_ipc_allowlist_rejects_unknown_identifiers_even_when_syntactically_valid(
+    item: str,
+) -> None:
+    from tools.synthetic_media_load import sanitize_ipc_error_string
+
+    assert sanitize_ipc_error_string(f"Worker process error: {item}") == _ABNORMAL
+    assert (
+        sanitize_ipc_error_string(f"Worker 0 encountered 1 failed call task(s): {item}")
+        == _ABNORMAL
+    )
+    # One unknown item poisons the whole aggregate; known neighbours are not forwarded.
+    assert (
+        sanitize_ipc_error_string(
+            f"Worker 0 encountered 2 failed call task(s): RuntimeError; {item}"
+        )
+        == _ABNORMAL
+    )
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "RuntimeError (HTTP 401)",
+        "RuntimeError (deadline exceeded)",
+        "TimeoutError (errno 5)",
+        "InvalidStatus (code 1008)",
+        "InvalidStatus (HTTP 999)",
+        "InvalidStatus (HTTP 40)",
+        "ConnectionClosed (HTTP 500)",
+        "ConnectionClosed (code 99999)",
+        "OSError (line 3)",
+        "OSError (errno 1234567)",
+        "JSONDecodeError (errno 1)",
+        "UnexpectedWorkerError (errno 1)",
+        "OSError (errno 5) trailing",
+    ],
+)
+def test_ipc_allowlist_rejects_category_detail_mismatches(item: str) -> None:
+    from tools.synthetic_media_load import sanitize_ipc_error_string
+
+    assert sanitize_ipc_error_string(f"Worker process error: {item}") == _ABNORMAL
+
+
+def test_dynamically_named_exception_classes_cannot_leak_their_name() -> None:
+    from tools.synthetic_media_load import (
+        UNEXPECTED_ERROR_CATEGORY,
+        format_safe_worker_error,
+        sanitize_ipc_error_string,
+    )
+
+    secret_cls = type("SUPERSECRET123", (Exception,), {})
+    assert format_safe_worker_error(secret_cls("anything")) == UNEXPECTED_ERROR_CATEGORY
+
+    # A subclass of an allowlisted base is still reported under the fixed category, and its
+    # errno is not attached to a category that does not allow it.
+    leaky_os = type("TOKEN_abc123", (OSError,), {})
+    produced = format_safe_worker_error(leaky_os(111, "refused"))
+    assert produced == UNEXPECTED_ERROR_CATEGORY and "TOKEN" not in produced
+
+    for exc in (secret_cls("x"), leaky_os(5, "y"), RuntimeError("Bearer abc"), KeyError("k")):
+        for prefix in ("Worker process error: ", "Worker 1 encountered 1 failed call task(s): "):
+            wire = prefix + format_safe_worker_error(exc)
+            assert sanitize_ipc_error_string(wire) == wire  # the producer only emits legal output
+            assert "SUPERSECRET" not in wire and "TOKEN" not in wire
+
+
+def test_multi_task_errors_keep_distinct_safe_categories() -> None:
+    import unittest.mock
+
+    import websockets.exceptions
+    from tools.synthetic_media_load import format_safe_worker_error, sanitize_ipc_error_string
+
+    status = websockets.exceptions.InvalidStatus(unittest.mock.MagicMock(status_code=401))
+    parts = sorted(
+        {
+            format_safe_worker_error(TimeoutError("late")),
+            format_safe_worker_error(status),
+            format_safe_worker_error(type("Hidden_9", (Exception,), {})("s3cret")),
+        }
+    )
+    wire = f"Worker 3 encountered 9 failed call task(s): {'; '.join(parts)}"
+    assert sanitize_ipc_error_string(wire) == wire
+    assert "InvalidStatus (HTTP 401)" in wire and "TimeoutError (deadline exceeded)" in wire
+    assert "s3cret" not in wire and "Hidden_9" not in wire
+    # More than three listed items is not a legal aggregate.
+    assert (
+        sanitize_ipc_error_string(
+            "Worker 3 encountered 4 failed call task(s): RuntimeError; ValueError; TypeError; KeyError"
+        )
+        == _ABNORMAL
+    )
