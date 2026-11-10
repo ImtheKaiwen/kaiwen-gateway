@@ -2408,28 +2408,242 @@ def test_aggregate_cpu_utilization_accounting_reconciliation() -> None:
 
 
 def test_sanitize_worker_error_message_redacts_credentials() -> None:
-    """Verify _sanitize_worker_error_message redacts tokens, secrets, and auth headers."""
-    from tools.synthetic_media_load import _sanitize_worker_error_message
+    """Verify format_safe_worker_error provides fail-safe redaction without leaking arbitrary tokens, secrets, or URLs."""
+    import unittest.mock
 
+    import websockets.exceptions
+    from tools.synthetic_media_load import format_safe_worker_error
+
+    # 1. Unknown exception formats must not leak arbitrary message text
     exc_with_bearer = RuntimeError(
         "Failed connection to ws://127.0.0.1/ws with Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret"
     )
-    cleaned = _sanitize_worker_error_message(exc_with_bearer)
-    assert "Bearer [REDACTED]" in cleaned
+    cleaned = format_safe_worker_error(exc_with_bearer)
+    assert cleaned == "RuntimeError"
+    assert "Bearer" not in cleaned
     assert "eyJhbGciOi" not in cleaned
 
-    exc_with_params = ValueError("Invalid handshake response: token=abc1234xyz&secret=supersecret")
-    cleaned_params = _sanitize_worker_error_message(exc_with_params)
-    assert "token=[REDACTED]" in cleaned_params
-    assert "secret=[REDACTED]" in cleaned_params
-    assert "abc1234xyz" not in cleaned_params
-
-    exc_with_header = ConnectionError(
-        "Handshake rejected: Authorization: Bearer sensitive_pass_12345"
+    exc_unknown_format = ValueError(
+        "session credential: SECRET_KEY_99999_CLASSIFIED&unusual_auth_param=supersecret"
     )
-    cleaned_header = _sanitize_worker_error_message(exc_with_header)
-    assert "Authorization: [REDACTED]" in cleaned_header or "Bearer [REDACTED]" in cleaned_header
-    assert "sensitive_pass_12345" not in cleaned_header
+    cleaned_unknown = format_safe_worker_error(exc_unknown_format)
+    assert cleaned_unknown == "ValueError"
+    assert "SECRET_KEY_99999_CLASSIFIED" not in cleaned_unknown
+    assert "supersecret" not in cleaned_unknown
+    assert "session credential" not in cleaned_unknown
+
+    exc_with_url = ConnectionError(
+        "Handshake rejected: https://alice:secret_pass_12345@internal.telephony.net/ws"
+    )
+    cleaned_url = format_safe_worker_error(exc_with_url)
+    assert cleaned_url == "ConnectionError"
+    assert "secret_pass_12345" not in cleaned_url
+    assert "alice" not in cleaned_url
+
+    # 2. Allowlisted, stable error categories must be preserved
+    timeout_exc = TimeoutError("frame deadline exceeded after 20ms")
+    assert format_safe_worker_error(timeout_exc) == "TimeoutError (deadline exceeded)"
+
+    mock_resp = unittest.mock.MagicMock(status_code=401)
+    status_exc = websockets.exceptions.InvalidStatus(mock_resp)
+    assert format_safe_worker_error(status_exc) == "InvalidStatus (HTTP 401)"
+
+    mock_rcvd = unittest.mock.MagicMock(code=1008)
+    close_exc = websockets.exceptions.ConnectionClosed(rcvd=mock_rcvd, sent=None)
+    assert format_safe_worker_error(close_exc) == "ConnectionClosed (code 1008)"
+
+    os_exc = OSError(111, "Connection refused")
+    assert format_safe_worker_error(os_exc) == "OSError (errno 111)"
+
+
+def test_client_worker_task_failure_propagation_preserves_partial_records_and_redacts_secrets() -> (
+    None
+):
+    """Verify worker call task failure:
+    1. Worker fails with exit code 1.
+    2. Available successful records from other calls are preserved.
+    3. Error description is sanitized without disclosing arbitrary secrets.
+    4. Failed calls count is accurately recorded.
+    """
+    import io
+    import time
+    from unittest.mock import patch
+
+    from tools.synthetic_media_load import CallMediaRunRecord, _client_worker_subprocess_async
+
+    from kaiwen_gateway.modules.voice import LatencyDistributionSummary, MetricAvailabilityReason
+
+    async def _run() -> None:
+        config = {
+            "worker_index": 0,
+            "ws_url": "ws://127.0.0.1:8000/ws/test",
+            "frames_per_call": 5,
+            "interval_ms": 20.0,
+            "seed": 42,
+            "pattern": "deterministic",
+            "skip_threshold_ms": None,
+            "timeout": 2.0,
+            "latency_window_capacity": 32,
+            "calls": [
+                {
+                    "slot_id": 0,
+                    "tenant_id": "t1",
+                    "call_id": "c0",
+                    "token": "tok0",
+                    "phase_ms": 0.0,
+                },
+                {
+                    "slot_id": 1,
+                    "tenant_id": "t1",
+                    "call_id": "c1",
+                    "token": "tok1",
+                    "phase_ms": 0.0,
+                },
+            ],
+        }
+
+        call_0_record = CallMediaRunRecord(
+            session_slot_id=0,
+            admitted=True,
+            completed_cleanly=True,
+            close_code=1000,
+            frames_scheduled=5,
+            frames_sent=5,
+            frames_skipped=0,
+            missed_deadlines=0,
+            frames_echoed=5,
+            frames_missing=0,
+            duplicate_frames=0,
+            out_of_order_frames=0,
+            payload_mismatches=0,
+            cross_session_frames=0,
+            first_frame_sent_s=1.0,
+            last_frame_sent_s=1.08,
+            last_frame_activity_s=1.08,
+            handshake_ms=2.0,
+            call_start_rtt_ms=2.0,
+            call_end_rtt_ms=2.0,
+            total_call_duration_ms=100.0,
+            echo_rtt_summary=LatencyDistributionSummary.unavailable(
+                MetricAvailabilityReason.NO_SAMPLES
+            ),
+            echo_rtt_samples_ms=(),
+            scheduling_lateness_samples_ms=(),
+            scheduling_interval_samples_ms=(),
+            scheduling_jitter_samples_ms=(),
+        )
+
+        secret_to_leak = "CLASSIFIED_CREDENTIAL_KEY_99999_SESSION_SECRET"
+
+        async def _mock_single_call(**kwargs: Any) -> CallMediaRunRecord:
+            slot_id = kwargs["session_slot_id"]
+            barrier = kwargs["start_barrier"]
+            if barrier:
+                await barrier.wait()
+            if slot_id == 0:
+                return call_0_record
+            raise RuntimeError(f"session credential failure: {secret_to_leak}&param=sensitive_data")
+
+        start_payload = (
+            json.dumps({"event": "start", "shared_epoch_s": time.perf_counter() + 0.01}) + "\n"
+        )
+        captured_stdout = io.StringIO()
+
+        with (
+            patch(
+                "tools.synthetic_media_load.run_single_paced_media_call",
+                side_effect=_mock_single_call,
+            ),
+            patch("sys.stdin.readline", return_value=start_payload),
+            patch("sys.stdout.write", side_effect=captured_stdout.write),
+            patch("sys.stdout.flush"),
+        ):
+            exit_code = await _client_worker_subprocess_async(config)
+
+        assert exit_code == 1
+
+        output_str = captured_stdout.getvalue()
+        lines = [line.strip() for line in output_str.splitlines() if line.strip()]
+        assert len(lines) >= 1
+        payload = json.loads(lines[-1])
+        assert payload.get("event") == "error"
+        assert payload.get("failed_calls_count") == 1
+        assert payload.get("worker_index") == 0
+
+        recs = payload.get("records", [])
+        assert len(recs) == 1
+        assert recs[0]["session_slot_id"] == 0
+        assert recs[0]["completed_cleanly"] is True
+
+        assert secret_to_leak not in output_str
+        assert "session credential" not in output_str
+        assert "sensitive_data" not in output_str
+        assert payload["error"] == "Worker 0 encountered 1 failed call task(s): RuntimeError"
+
+    asyncio.run(_run())
+
+
+def test_coordinator_handles_worker_error_and_preserves_partial_records() -> None:
+    """Verify coordinator attaches partial records from failed worker and produces clean failure."""
+    from tools.synthetic_media_load import (
+        CallMediaRunRecord,
+        ClientWorkerExecutionError,
+        sanitize_ipc_error_string,
+    )
+
+    from kaiwen_gateway.modules.voice import LatencyDistributionSummary, MetricAvailabilityReason
+
+    assert (
+        sanitize_ipc_error_string("Worker 0 encountered 1 failed call task(s): RuntimeError")
+        == "Worker 0 encountered 1 failed call task(s): RuntimeError"
+    )
+    assert (
+        sanitize_ipc_error_string("Malicious error message with secret: SECRET_123")
+        == "Worker reported abnormal task failure"
+    )
+    assert sanitize_ipc_error_string("") == "Worker reported unspecified failure"
+    assert sanitize_ipc_error_string(None) == "Worker reported unspecified failure"
+
+    rec = CallMediaRunRecord(
+        session_slot_id=0,
+        admitted=True,
+        completed_cleanly=True,
+        close_code=1000,
+        frames_scheduled=5,
+        frames_sent=5,
+        frames_skipped=0,
+        missed_deadlines=0,
+        frames_echoed=5,
+        frames_missing=0,
+        duplicate_frames=0,
+        out_of_order_frames=0,
+        payload_mismatches=0,
+        cross_session_frames=0,
+        first_frame_sent_s=1.0,
+        last_frame_sent_s=1.08,
+        last_frame_activity_s=1.08,
+        handshake_ms=2.0,
+        call_start_rtt_ms=2.0,
+        call_end_rtt_ms=2.0,
+        total_call_duration_ms=100.0,
+        echo_rtt_summary=LatencyDistributionSummary.unavailable(
+            MetricAvailabilityReason.NO_SAMPLES
+        ),
+        echo_rtt_samples_ms=(),
+        scheduling_lateness_samples_ms=(),
+        scheduling_interval_samples_ms=(),
+        scheduling_jitter_samples_ms=(),
+    )
+    err = ClientWorkerExecutionError(
+        "Client worker 0 reported failure: Worker 0 encountered 1 failed call task(s): RuntimeError",
+        partial_records=[rec],
+    )
+    assert len(err.partial_records) == 1
+    assert err.partial_records[0].session_slot_id == 0
+    assert (
+        str(err)
+        == "Client worker 0 reported failure: Worker 0 encountered 1 failed call task(s): RuntimeError"
+    )
 
 
 def test_worker_call_exception_propagation_and_partial_records() -> None:
@@ -2442,9 +2656,10 @@ def test_worker_call_exception_propagation_and_partial_records() -> None:
             (1, "tenant_1", "call_2", "fake_token_2", 2.0),
         ]
 
-        # Patch run_single_paced_media_call inside child worker to raise on call_2
-        # In a multi-process test with bad token/endpoint, the server handshake will fail cleanly:
-        with pytest.raises(RuntimeError, match=r"Client worker \d+ reported (error|failure)"):
+        with pytest.raises(
+            RuntimeError,
+            match=r"Client worker \d+ (reported failure|reported error|exited prematurely)",
+        ):
             await _run_multi_process_client_workers(
                 client_workers=2,
                 call_specs=call_specs,

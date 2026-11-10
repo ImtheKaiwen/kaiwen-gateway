@@ -2293,23 +2293,99 @@ class PacedStageResult:
         }
 
 
-def _sanitize_worker_error_message(exc: BaseException) -> str:
-    """Produce a sanitized single-line error description without leaking tokens or headers."""
+def format_safe_worker_error(exc: BaseException) -> str:
+    """Format an exception into a fail-safe diagnostic identifier without disclosing arbitrary message text.
+
+    Distinguishes timeout, connection rejection, protocol error, and network errors using
+    safe exception class identifiers and allowlisted numeric attributes.
+    Arbitrary message text (str(exc), repr(exc), tracebacks, headers, or query params)
+    is strictly omitted to prevent credential disclosure.
+    """
     cls_name = type(exc).__name__
-    raw_msg = str(exc).splitlines()[0] if str(exc) else ""
-    cleaned = re.sub(
-        r"Bearer\s+[A-Za-z0-9_\-\.]+", "Bearer [REDACTED]", raw_msg, flags=re.IGNORECASE
-    )
-    cleaned = re.sub(
-        r"(token|secret|password|key)=[A-Za-z0-9_\-\.]+",
-        r"\1=[REDACTED]",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(
-        r"Authorization:\s+[^\s,]+", "Authorization: [REDACTED]", cleaned, flags=re.IGNORECASE
-    )
-    return f"{cls_name}: {cleaned}" if cleaned else cls_name
+
+    # 1. Timeout errors
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return f"{cls_name} (deadline exceeded)"
+
+    # 2. WebSocket connection rejection with HTTP status code
+    if isinstance(exc, websockets.exceptions.InvalidStatus):
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+        if isinstance(code, int):
+            return f"{cls_name} (HTTP {code})"
+        return cls_name
+
+    # 3. WebSocket connection closed with close code
+    if isinstance(exc, websockets.exceptions.ConnectionClosed):
+        code = getattr(getattr(exc, "rcvd", None), "code", None)
+        if isinstance(code, int):
+            return f"{cls_name} (code {code})"
+        code_sent = getattr(getattr(exc, "sent", None), "code", None)
+        if isinstance(code_sent, int):
+            return f"{cls_name} (sent code {code_sent})"
+        return cls_name
+
+    # 4. WebSocket URI errors
+    if isinstance(exc, websockets.exceptions.InvalidURI):
+        return f"{cls_name} (invalid URI format)"
+
+    # 5. WebSocket protocol errors
+    if isinstance(exc, (websockets.exceptions.PayloadTooBig,)) or cls_name in (
+        "WebSocketProtocolError",
+        "ProtocolError",
+    ):
+        return cls_name
+
+    # 6. Network socket errors with errno
+    if isinstance(
+        exc,
+        (
+            ConnectionRefusedError,
+            ConnectionResetError,
+            BrokenPipeError,
+            socket.gaierror,
+            socket.timeout,
+            OSError,
+        ),
+    ):
+        errno_val = getattr(exc, "errno", None)
+        if isinstance(errno_val, int):
+            return f"{cls_name} (errno {errno_val})"
+        return cls_name
+
+    # 7. Barrier synchronization
+    if isinstance(exc, asyncio.BrokenBarrierError):
+        return cls_name
+
+    # 8. IPC JSON errors
+    if isinstance(exc, json.JSONDecodeError):
+        lineno = getattr(exc, "lineno", None)
+        if isinstance(lineno, int):
+            return f"{cls_name} (line {lineno})"
+        return cls_name
+
+    # 9. Fallback for all other exceptions: emit ONLY the class name
+    return cls_name
+
+
+# Maintain alias for backward compatibility with previous call sites
+_sanitize_worker_error_message = format_safe_worker_error
+
+
+def sanitize_ipc_error_string(raw: Any) -> str:
+    """Sanitize IPC error string received from worker subprocess to prevent unauthorized text injection."""
+    if not isinstance(raw, str) or not raw.strip():
+        return "Worker reported unspecified failure"
+    clean = raw.strip().splitlines()[0]
+    # Allow safe structured worker error summary pattern:
+    # e.g. "Worker 0 encountered 1 failed call task(s): TimeoutError (deadline exceeded)"
+    # or "Worker process error: JSONDecodeError (line 1)"
+    if re.fullmatch(
+        r"Worker (?:\d+ encountered \d+ failed call task\(s\): [A-Za-z0-9_\-\.\:\(\)\s,;]+|process [A-Za-z0-9_\-\.\:\(\)\s,;]+)",
+        clean,
+    ):
+        return clean
+    # Fallback to safe generic error description
+    return "Worker reported abnormal task failure"
 
 
 async def _client_worker_subprocess_async(config: Mapping[str, Any]) -> int:
@@ -2379,10 +2455,18 @@ async def _client_worker_subprocess_async(config: Mapping[str, Any]) -> int:
     start_line = await asyncio.to_thread(sys.stdin.readline)
     if not start_line:
         raise RuntimeError(f"Client worker {worker_index} stdin closed before start signal")
-    start_payload = json.loads(start_line)
-    if start_payload.get("event") != "start":
+    try:
+        start_payload = json.loads(start_line)
+    except Exception as err:
         raise RuntimeError(
-            f"Client worker {worker_index} received unexpected start event: {start_payload}"
+            f"Client worker {worker_index} received malformed start payload (JSONDecodeError)"
+        ) from err
+    if start_payload.get("event") != "start":
+        event_name = (
+            start_payload.get("event") if isinstance(start_payload.get("event"), str) else "unknown"
+        )
+        raise RuntimeError(
+            f"Client worker {worker_index} received unexpected start event: {event_name!r}"
         )
 
     t_start_recv = time.perf_counter()
@@ -2469,8 +2553,8 @@ def run_client_worker_subprocess() -> int:
         config = json.loads(init_line)
         return asyncio.run(_client_worker_subprocess_async(config))
     except Exception as exc:
-        sanitized = _sanitize_worker_error_message(exc)
-        err_msg = {"event": "error", "error": f"Worker process error: {sanitized}"}
+        safe_diag = format_safe_worker_error(exc)
+        err_msg = {"event": "error", "error": f"Worker process error: {safe_diag}"}
         sys.stdout.write(json.dumps(err_msg) + "\n")
         sys.stdout.flush()
         return 1
@@ -2555,19 +2639,33 @@ async def _run_multi_process_client_workers(
             assert proc.stdout is not None
             line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout + 15.0)
             if not line:
-                stderr_text = ""
+                has_stderr = False
                 if proc.stderr:
                     with contextlib.suppress(Exception):
                         raw_err = await asyncio.wait_for(proc.stderr.read(), timeout=1.0)
-                        stderr_text = raw_err.decode(errors="replace")
-                raise RuntimeError(
-                    f"Client worker {idx} exited prematurely without ready: {stderr_text.strip()}"
+                        has_stderr = bool(raw_err and raw_err.strip())
+                err_detail = "stderr recorded" if has_stderr else "no stderr"
+                returncode_str = (
+                    str(proc.returncode) if proc.returncode is not None else "terminated"
                 )
-            msg = cast(dict[str, Any], json.loads(line.decode("utf-8")))
+                raise RuntimeError(
+                    f"Client worker {idx} exited prematurely without ready "
+                    f"(returncode: {returncode_str}, {err_detail})"
+                )
+            try:
+                msg = cast(dict[str, Any], json.loads(line.decode("utf-8")))
+            except Exception as err:
+                raise RuntimeError(
+                    f"Client worker {idx} emitted malformed IPC during ready phase (JSONDecodeError)"
+                ) from err
             if msg.get("event") == "error":
-                raise RuntimeError(f"Client worker {idx} reported error: {msg.get('error')}")
+                err_desc = sanitize_ipc_error_string(msg.get("error"))
+                raise RuntimeError(f"Client worker {idx} reported error: {err_desc}")
             if msg.get("event") != "ready":
-                raise RuntimeError(f"Client worker {idx} returned unexpected ready event: {msg}")
+                event_name = msg.get("event") if isinstance(msg.get("event"), str) else "unknown"
+                raise RuntimeError(
+                    f"Client worker {idx} returned unexpected event during ready phase: {event_name!r}"
+                )
             return msg
 
         await asyncio.gather(*[_read_ready(p, i) for i, p in enumerate(procs)])
@@ -2601,24 +2699,41 @@ async def _run_multi_process_client_workers(
             assert proc.stdout is not None
             line = await asyncio.wait_for(proc.stdout.readline(), timeout=max_duration)
             if not line:
-                stderr_text = ""
+                has_stderr = False
                 if proc.stderr:
                     with contextlib.suppress(Exception):
                         raw_err = await asyncio.wait_for(proc.stderr.read(), timeout=1.0)
-                        stderr_text = raw_err.decode(errors="replace")
-                raise RuntimeError(
-                    f"Client worker {idx} exited prematurely without done: {stderr_text.strip()}"
+                        has_stderr = bool(raw_err and raw_err.strip())
+                err_detail = "stderr recorded" if has_stderr else "no stderr"
+                returncode_str = (
+                    str(proc.returncode) if proc.returncode is not None else "terminated"
                 )
-            msg = cast(dict[str, Any], json.loads(line.decode("utf-8")))
+                raise RuntimeError(
+                    f"Client worker {idx} exited prematurely without done "
+                    f"(returncode: {returncode_str}, {err_detail})"
+                )
+            try:
+                msg = cast(dict[str, Any], json.loads(line.decode("utf-8")))
+            except Exception as err:
+                raise RuntimeError(
+                    f"Client worker {idx} emitted malformed IPC during completion phase (JSONDecodeError)"
+                ) from err
             if msg.get("event") == "error":
-                partial_recs = [CallMediaRunRecord.from_dict(r) for r in msg.get("records", [])]
-                err_msg = str(msg.get("error", "Unknown worker error"))
+                partial_recs: list[CallMediaRunRecord] = []
+                for r in msg.get("records", []):
+                    if isinstance(r, dict):
+                        with contextlib.suppress(Exception):
+                            partial_recs.append(CallMediaRunRecord.from_dict(r))
+                err_desc = sanitize_ipc_error_string(msg.get("error"))
                 raise ClientWorkerExecutionError(
-                    f"Client worker {idx} reported failure: {err_msg}",
+                    f"Client worker {idx} reported failure: {err_desc}",
                     partial_records=partial_recs,
                 )
             if msg.get("event") != "done":
-                raise RuntimeError(f"Client worker {idx} returned unexpected done event: {msg}")
+                event_name = msg.get("event") if isinstance(msg.get("event"), str) else "unknown"
+                raise RuntimeError(
+                    f"Client worker {idx} returned unexpected event during completion phase: {event_name!r}"
+                )
             return msg
 
         done_results = await asyncio.gather(*[_read_done(p, i) for i, p in enumerate(procs)])
@@ -2872,9 +2987,13 @@ async def run_paced_media_stage(
                 partial = getattr(err, "partial_records", None)
                 if partial and isinstance(partial, list):
                     records.extend(partial)
-                failure_reasons.append(
-                    f"Multi-process client workers failed: {type(err).__name__}: {err}"
-                )
+                if isinstance(err, (ClientWorkerExecutionError, RuntimeError)):
+                    failure_reasons.append(f"Multi-process client workers failed: {err}")
+                else:
+                    safe_diag = format_safe_worker_error(err)
+                    failure_reasons.append(
+                        f"Multi-process client workers failed: {type(err).__name__}: {safe_diag}"
+                    )
         else:
             barrier = asyncio.Barrier(concurrency + 1)
             epoch_ready_event = asyncio.Event()
