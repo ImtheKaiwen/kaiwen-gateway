@@ -44,7 +44,7 @@ import tracemalloc
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import Any, Final
 
 import uvicorn
 import websockets
@@ -2370,21 +2370,32 @@ def format_safe_worker_error(exc: BaseException) -> str:
 # Maintain alias for backward compatibility with previous call sites
 _sanitize_worker_error_message = format_safe_worker_error
 
+ALLOWED_IPC_EVENTS: frozenset[str] = frozenset({"ready", "done", "error", "start"})
+
+_SAFE_EXCEPTION_IDENTIFIER = r"[A-Za-z_][A-Za-z0-9_]*"
+_SAFE_DETAIL = r"\((?:deadline exceeded|HTTP \d+|code \d+|sent code \d+|invalid URI format|errno -?\d+|line \d+)\)"
+_SAFE_ERROR_ITEM = rf"{_SAFE_EXCEPTION_IDENTIFIER}(?: {_SAFE_DETAIL})?"
+_SAFE_MULTI_TASK_PATTERN = rf"Worker \d+ encountered \d+ failed call task\(s\): {_SAFE_ERROR_ITEM}(?:; {_SAFE_ERROR_ITEM}){{0,2}}"
+_SAFE_PROCESS_ERROR_PATTERN = rf"Worker process error: {_SAFE_ERROR_ITEM}"
+_SAFE_IPC_ERROR_RE = re.compile(rf"^(?:{_SAFE_MULTI_TASK_PATTERN}|{_SAFE_PROCESS_ERROR_PATTERN})$")
+
+
+def _normalize_ipc_event_name(raw: Any) -> str:
+    """Normalize IPC event name to an allowlisted identifier or safe placeholder."""
+    if isinstance(raw, str) and raw in ALLOWED_IPC_EVENTS:
+        return raw
+    return "unknown"
+
 
 def sanitize_ipc_error_string(raw: Any) -> str:
     """Sanitize IPC error string received from worker subprocess to prevent unauthorized text injection."""
     if not isinstance(raw, str) or not raw.strip():
         return "Worker reported unspecified failure"
-    clean = raw.strip().splitlines()[0]
-    # Allow safe structured worker error summary pattern:
-    # e.g. "Worker 0 encountered 1 failed call task(s): TimeoutError (deadline exceeded)"
-    # or "Worker process error: JSONDecodeError (line 1)"
-    if re.fullmatch(
-        r"Worker (?:\d+ encountered \d+ failed call task\(s\): [A-Za-z0-9_\-\.\:\(\)\s,;]+|process [A-Za-z0-9_\-\.\:\(\)\s,;]+)",
-        clean,
-    ):
+    clean = raw.strip()
+    if "\n" in clean or "\r" in clean:
+        return "Worker reported abnormal task failure"
+    if _SAFE_IPC_ERROR_RE.fullmatch(clean):
         return clean
-    # Fallback to safe generic error description
     return "Worker reported abnormal task failure"
 
 
@@ -2456,15 +2467,16 @@ async def _client_worker_subprocess_async(config: Mapping[str, Any]) -> int:
     if not start_line:
         raise RuntimeError(f"Client worker {worker_index} stdin closed before start signal")
     try:
-        start_payload = json.loads(start_line)
+        raw_start = json.loads(start_line)
     except Exception as err:
         raise RuntimeError(
             f"Client worker {worker_index} received malformed start payload (JSONDecodeError)"
         ) from err
+    if not isinstance(raw_start, dict):
+        raise RuntimeError(f"Client worker {worker_index} received non-dict start payload")
+    start_payload = raw_start
     if start_payload.get("event") != "start":
-        event_name = (
-            start_payload.get("event") if isinstance(start_payload.get("event"), str) else "unknown"
-        )
+        event_name = _normalize_ipc_event_name(start_payload.get("event"))
         raise RuntimeError(
             f"Client worker {worker_index} received unexpected start event: {event_name!r}"
         )
@@ -2550,8 +2562,10 @@ def run_client_worker_subprocess() -> int:
     if not init_line:
         return 1
     try:
-        config = json.loads(init_line)
-        return asyncio.run(_client_worker_subprocess_async(config))
+        raw_config = json.loads(init_line)
+        if not isinstance(raw_config, dict):
+            raise ValueError("Client worker init payload must be a JSON object")
+        return asyncio.run(_client_worker_subprocess_async(raw_config))
     except Exception as exc:
         safe_diag = format_safe_worker_error(exc)
         err_msg = {"event": "error", "error": f"Worker process error: {safe_diag}"}
@@ -2653,16 +2667,21 @@ async def _run_multi_process_client_workers(
                     f"(returncode: {returncode_str}, {err_detail})"
                 )
             try:
-                msg = cast(dict[str, Any], json.loads(line.decode("utf-8")))
+                raw_payload = json.loads(line.decode("utf-8"))
             except Exception as err:
                 raise RuntimeError(
                     f"Client worker {idx} emitted malformed IPC during ready phase (JSONDecodeError)"
                 ) from err
+            if not isinstance(raw_payload, dict):
+                raise RuntimeError(
+                    f"Client worker {idx} emitted non-dict IPC payload during ready phase"
+                )
+            msg = raw_payload
             if msg.get("event") == "error":
                 err_desc = sanitize_ipc_error_string(msg.get("error"))
                 raise RuntimeError(f"Client worker {idx} reported error: {err_desc}")
             if msg.get("event") != "ready":
-                event_name = msg.get("event") if isinstance(msg.get("event"), str) else "unknown"
+                event_name = _normalize_ipc_event_name(msg.get("event"))
                 raise RuntimeError(
                     f"Client worker {idx} returned unexpected event during ready phase: {event_name!r}"
                 )
@@ -2713,24 +2732,31 @@ async def _run_multi_process_client_workers(
                     f"(returncode: {returncode_str}, {err_detail})"
                 )
             try:
-                msg = cast(dict[str, Any], json.loads(line.decode("utf-8")))
+                raw_payload = json.loads(line.decode("utf-8"))
             except Exception as err:
                 raise RuntimeError(
                     f"Client worker {idx} emitted malformed IPC during completion phase (JSONDecodeError)"
                 ) from err
+            if not isinstance(raw_payload, dict):
+                raise RuntimeError(
+                    f"Client worker {idx} emitted non-dict IPC payload during completion phase"
+                )
+            msg = raw_payload
             if msg.get("event") == "error":
                 partial_recs: list[CallMediaRunRecord] = []
-                for r in msg.get("records", []):
-                    if isinstance(r, dict):
-                        with contextlib.suppress(Exception):
-                            partial_recs.append(CallMediaRunRecord.from_dict(r))
+                records_val = msg.get("records")
+                if isinstance(records_val, list):
+                    for r in records_val:
+                        if isinstance(r, dict):
+                            with contextlib.suppress(Exception):
+                                partial_recs.append(CallMediaRunRecord.from_dict(r))
                 err_desc = sanitize_ipc_error_string(msg.get("error"))
                 raise ClientWorkerExecutionError(
                     f"Client worker {idx} reported failure: {err_desc}",
                     partial_records=partial_recs,
                 )
             if msg.get("event") != "done":
-                event_name = msg.get("event") if isinstance(msg.get("event"), str) else "unknown"
+                event_name = _normalize_ipc_event_name(msg.get("event"))
                 raise RuntimeError(
                     f"Client worker {idx} returned unexpected event during completion phase: {event_name!r}"
                 )

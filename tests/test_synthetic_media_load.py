@@ -2601,10 +2601,67 @@ def test_coordinator_handles_worker_error_and_preserves_partial_records() -> Non
         == "Worker 0 encountered 1 failed call task(s): RuntimeError"
     )
     assert (
+        sanitize_ipc_error_string(
+            "Worker 0 encountered 1 failed call task(s): TimeoutError (deadline exceeded)"
+        )
+        == "Worker 0 encountered 1 failed call task(s): TimeoutError (deadline exceeded)"
+    )
+    assert (
+        sanitize_ipc_error_string(
+            "Worker 0 encountered 2 failed call task(s): InvalidStatus (HTTP 401); TimeoutError (deadline exceeded)"
+        )
+        == "Worker 0 encountered 2 failed call task(s): InvalidStatus (HTTP 401); TimeoutError (deadline exceeded)"
+    )
+    assert (
+        sanitize_ipc_error_string(
+            "Worker 0 encountered 3 failed call task(s): ConnectionClosed (code 1006); OSError (errno 111); JSONDecodeError (line 1)"
+        )
+        == "Worker 0 encountered 3 failed call task(s): ConnectionClosed (code 1006); OSError (errno 111); JSONDecodeError (line 1)"
+    )
+    assert (
+        sanitize_ipc_error_string("Worker process error: JSONDecodeError (line 1)")
+        == "Worker process error: JSONDecodeError (line 1)"
+    )
+    assert (
+        sanitize_ipc_error_string("Worker process error: BrokenBarrierError")
+        == "Worker process error: BrokenBarrierError"
+    )
+
+    # Fail-safe rejection of arbitrary words / credential leaks following valid prefixes
+    assert (
+        sanitize_ipc_error_string(
+            "Worker 0 encountered 1 failed call task(s): RuntimeError session credential SUPERSECRET123"
+        )
+        == "Worker reported abnormal task failure"
+    )
+    assert (
+        sanitize_ipc_error_string(
+            "Worker process error: RuntimeError session credential SUPERSECRET123"
+        )
+        == "Worker reported abnormal task failure"
+    )
+    assert (
+        sanitize_ipc_error_string(
+            "Worker 0 encountered 1 failed call task(s): RuntimeError (unapproved detail)"
+        )
+        == "Worker reported abnormal task failure"
+    )
+    assert (
+        sanitize_ipc_error_string("Worker 0 encountered 4 failed call task(s): E1; E2; E3; E4")
+        == "Worker reported abnormal task failure"
+    )
+    assert (
+        sanitize_ipc_error_string(
+            "Worker 0 encountered 1 failed call task(s): RuntimeError\nSECRET_LINE"
+        )
+        == "Worker reported abnormal task failure"
+    )
+    assert (
         sanitize_ipc_error_string("Malicious error message with secret: SECRET_123")
         == "Worker reported abnormal task failure"
     )
     assert sanitize_ipc_error_string("") == "Worker reported unspecified failure"
+    assert sanitize_ipc_error_string("   ") == "Worker reported unspecified failure"
     assert sanitize_ipc_error_string(None) == "Worker reported unspecified failure"
 
     rec = CallMediaRunRecord(
@@ -2707,3 +2764,116 @@ def test_start_synchronization_lead_time_and_late_sync_detection() -> None:
             assert isinstance(w["late_start_sync"], bool)
 
     asyncio.run(_run())
+
+
+def test_coordinator_ipc_payload_validation_and_event_normalization() -> None:
+    """Verify coordinator rejects non-dict payloads, normalizes unexpected event names, and sanitizes errors."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from tools.synthetic_media_load import (
+        ClientWorkerExecutionError,
+        _run_multi_process_client_workers,
+    )
+
+    class MockWorkerProcess:
+        def __init__(self, stdout_lines: list[bytes]) -> None:
+            self.stdin = AsyncMock()
+            self.stdin.write = MagicMock()
+            self.stdin.drain = AsyncMock()
+            self.stdout = asyncio.StreamReader()
+            for line in stdout_lines:
+                self.stdout.feed_data(line)
+            self.stderr = None
+            self.returncode: int | None = None
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+    call_specs = [(0, "tenant_1", "call_1", "fake_token_1", 0.0)]
+
+    async def _test_case(
+        stdout_lines: list[bytes], expected_exc: type[Exception], expected_pattern: str
+    ) -> Exception:
+        proc = MockWorkerProcess(stdout_lines)
+        with patch("asyncio.create_subprocess_exec", return_value=proc):
+            with pytest.raises(expected_exc, match=expected_pattern) as exc_info:
+                await _run_multi_process_client_workers(
+                    client_workers=1,
+                    call_specs=call_specs,
+                    ws_url="ws://127.0.0.1:8765",
+                    frames_per_call=5,
+                    interval_ms=20.0,
+                    seed=42,
+                    pattern="deterministic",
+                    skip_threshold_ms=None,
+                    timeout=1.0,
+                    latency_window_capacity=32,
+                )
+            return exc_info.value
+
+    async def _run_all() -> None:
+        # 1. Non-dict payload during ready phase
+        await _test_case(
+            [json.dumps([1, 2, 3]).encode("utf-8") + b"\n"],
+            RuntimeError,
+            r"Client worker 0 emitted non-dict IPC payload during ready phase",
+        )
+
+        # 2. Unexpected event name with sensitive token during ready phase
+        secret_event = "sensitive_token_leak_123"
+        exc = await _test_case(
+            [json.dumps({"event": secret_event}).encode("utf-8") + b"\n"],
+            RuntimeError,
+            r"Client worker 0 returned unexpected event during ready phase: 'unknown'",
+        )
+        assert secret_event not in str(exc)
+
+        # 3. Allowlisted but unexpected event during ready phase
+        await _test_case(
+            [json.dumps({"event": "start"}).encode("utf-8") + b"\n"],
+            RuntimeError,
+            r"Client worker 0 returned unexpected event during ready phase: 'start'",
+        )
+
+        # 4. Non-dict payload during completion phase
+        ready_line = (
+            json.dumps({"event": "ready", "worker_index": 0, "connected": 1}).encode("utf-8")
+            + b"\n"
+        )
+        await _test_case(
+            [ready_line, json.dumps(["done_list"]).encode("utf-8") + b"\n"],
+            RuntimeError,
+            r"Client worker 0 emitted non-dict IPC payload during completion phase",
+        )
+
+        # 5. Unexpected event name with sensitive token during completion phase
+        exc2 = await _test_case(
+            [ready_line, json.dumps({"event": secret_event}).encode("utf-8") + b"\n"],
+            RuntimeError,
+            r"Client worker 0 returned unexpected event during completion phase: 'unknown'",
+        )
+        assert secret_event not in str(exc2)
+
+        # 6. Credential-like string in worker error string during completion phase is sanitized
+        secret_word = "SUPERSECRET123"
+        injected_error = f"Worker 0 encountered 1 failed call task(s): RuntimeError session credential {secret_word}"
+        exc3 = await _test_case(
+            [
+                ready_line,
+                json.dumps({"event": "error", "error": injected_error, "records": []}).encode(
+                    "utf-8"
+                )
+                + b"\n",
+            ],
+            ClientWorkerExecutionError,
+            r"Client worker 0 reported failure: Worker reported abnormal task failure",
+        )
+        assert secret_word not in str(exc3)
+        assert "session credential" not in str(exc3)
+
+    asyncio.run(_run_all())
