@@ -6,7 +6,7 @@ import asyncio
 import json
 import unittest.mock
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from tools.synthetic_media_load import (
@@ -22,6 +22,7 @@ from tools.synthetic_media_load import (
     SCHEDULING_MODE_ALIGNED,
     SCHEDULING_MODE_STAGGERED,
     SUPPORTED_PATTERNS,
+    CallMediaRunRecord,
     EventLoopLagMonitor,
     MonotonicFramePacer,
     PacedMediaLoadReport,
@@ -2219,3 +2220,800 @@ def test_late_sends_with_fast_echoes_correctly_fails_transmission_duration() -> 
     assert any("Media transmission duration elongated by 525.00%" in f for f in failures)
     assert metrics["actual_transmission_seconds"] == 0.50
     assert metrics["transmission_elongation_pct"] == 525.0
+
+
+def test_call_media_run_record_serialization_roundtrip() -> None:
+    """Verify CallMediaRunRecord to_dict and from_dict preserve all fields including send wait."""
+    agg = BoundedLatencyAggregator(window_capacity=64)
+    agg.record(1.0)
+    rec = CallMediaRunRecord(
+        session_slot_id=3,
+        admitted=True,
+        completed_cleanly=True,
+        close_code=1000,
+        frames_scheduled=10,
+        frames_sent=10,
+        frames_skipped=0,
+        missed_deadlines=1,
+        frames_echoed=10,
+        frames_missing=0,
+        duplicate_frames=0,
+        out_of_order_frames=0,
+        payload_mismatches=0,
+        cross_session_frames=0,
+        first_frame_sent_s=100.0,
+        last_frame_activity_s=100.2,
+        handshake_ms=2.5,
+        call_start_rtt_ms=1.2,
+        call_end_rtt_ms=1.1,
+        total_call_duration_ms=210.0,
+        echo_rtt_summary=agg.snapshot(),
+        echo_rtt_samples_ms=(0.5, 1.0, 1.8),
+        scheduling_lateness_samples_ms=(0.1, 0.2),
+        scheduling_interval_samples_ms=(20.0, 20.1),
+        scheduling_jitter_samples_ms=(0.0, 0.1),
+        dispatch_skew_ms=0.5,
+        error_category=None,
+        last_frame_sent_s=100.18,
+        client_socket_send_wait_samples_ms=(0.05, 0.12, 0.08),
+    )
+    d = rec.to_dict()
+    assert d["session_slot_id"] == 3
+    assert d["client_socket_send_wait_samples_ms"] == [0.05, 0.12, 0.08]
+
+    reconstructed = CallMediaRunRecord.from_dict(d)
+    assert reconstructed.session_slot_id == rec.session_slot_id
+    assert reconstructed.client_socket_send_wait_samples_ms == (0.05, 0.12, 0.08)
+    assert reconstructed.last_frame_sent_s == 100.18
+    assert reconstructed.completed_cleanly is True
+
+
+def test_client_workers_parameter_validation() -> None:
+    """Verify validation of client_workers across run_paced_media_stage and execute_media_load_evaluation."""
+
+    async def _run() -> None:
+        # Bool rejection
+        with pytest.raises(TypeError, match="client_workers must be a positive integer"):
+            await run_paced_media_stage(
+                stage_name="val",
+                concurrency=2,
+                client_workers=cast(Any, True),
+            )
+
+        with pytest.raises(TypeError, match="client_workers must be a positive integer"):
+            await execute_media_load_evaluation(
+                concurrencies=(2,),
+                client_workers=cast(Any, False),
+            )
+
+        # Non-positive rejection
+        with pytest.raises(ValueError, match="client_workers must be a positive integer"):
+            await run_paced_media_stage(
+                stage_name="val",
+                concurrency=2,
+                client_workers=0,
+            )
+
+        with pytest.raises(ValueError, match="client_workers must be a positive integer"):
+            await execute_media_load_evaluation(
+                concurrencies=(2,),
+                client_workers=-1,
+            )
+
+        # Worker count exceeding concurrency
+        with pytest.raises(
+            ValueError, match=r"client_workers \(4\) cannot exceed concurrency \(2\)"
+        ):
+            await run_paced_media_stage(
+                stage_name="val",
+                concurrency=2,
+                client_workers=4,
+            )
+
+    asyncio.run(_run())
+
+
+def test_multi_process_client_workers_execution_and_metrics() -> None:
+    """Verify multi-process client workers execute and report pooled diagnostics and send wait."""
+
+    async def _run() -> None:
+        lenient_criteria = PacingAcceptanceCriteria(
+            max_missed_deadline_rate=1.0,
+            max_mean_interval_deviation_pct=500.0,
+            max_p95_scheduler_lateness_ms=5000.0,
+            max_transmission_elongation_pct=500.0,
+        )
+        stage = await run_paced_media_stage(
+            stage_name="test_mp_workers",
+            concurrency=2,
+            duration_seconds=0.1,
+            interval_ms=20.0,
+            client_workers=2,
+            isolation_mode=ISOLATION_MODE_IN_PROCESS,
+            pacing_criteria=lenient_criteria,
+        )
+        assert stage.status == "PASS"
+        assert stage.requested_concurrency == 2
+        assert stage.achieved_media_concurrency == 2
+        assert stage.completed_calls == 2
+        assert stage.media_correctness["frames_sent"] == 10  # 5 frames * 2 calls
+        assert stage.media_correctness["frames_echoed"] == 10
+        assert stage.media_correctness["frames_missing"] == 0
+
+        # Timing and send wait metrics
+        assert stage.timing_ms["client_workers"] == 2
+        assert "client_socket_send_wait_ms" in stage.timing_ms
+        send_wait = stage.timing_ms["client_socket_send_wait_ms"]
+        assert send_wait["available"] is True
+        assert send_wait["sample_count"] == 10
+        assert send_wait["p50_ms"] is not None
+
+        # Resource and worker diagnostics
+        assert stage.resources["client_workers"] == 2
+        worker_diags = stage.resources["client_worker_diagnostics"]
+        assert len(worker_diags) == 2
+        assert {w["worker_index"] for w in worker_diags} == {0, 1}
+        for w in worker_diags:
+            assert "cpu_duration_s" in w
+            assert "worker_lag" in w
+
+    asyncio.run(_run())
+
+
+def test_aggregate_cpu_utilization_accounting_reconciliation() -> None:
+    """Verify aggregate CPU duration includes workers and matches utilization percentages exactly."""
+
+    async def _run() -> None:
+        lenient_criteria = PacingAcceptanceCriteria(
+            max_missed_deadline_rate=1.0,
+            max_mean_interval_deviation_pct=500.0,
+            max_p95_scheduler_lateness_ms=5000.0,
+            max_transmission_elongation_pct=500.0,
+        )
+        stage = await run_paced_media_stage(
+            stage_name="test_cpu_reconcile",
+            concurrency=2,
+            duration_seconds=0.15,
+            interval_ms=20.0,
+            client_workers=2,
+            isolation_mode=ISOLATION_MODE_IN_PROCESS,
+            pacing_criteria=lenient_criteria,
+        )
+        assert stage.status == "PASS"
+        res = stage.resources
+
+        client_cpu = res["client_process_cpu_time_seconds"]
+        worker_cpu = res["client_worker_cpu_time_seconds"]
+        server_cpu = res["server_process_cpu_time_seconds"]
+        total_cpu = res["process_cpu_time_seconds"]
+        wall_sec = res["wall_clock_duration_seconds"]
+        logical_cpus = res["logical_cpu_count"]
+
+        # 1. Total CPU must equal sum of coordinator, workers and server
+        expected_total = round(client_cpu + worker_cpu + server_cpu, 4)
+        assert abs(total_cpu - expected_total) <= 0.0002
+
+        # 2. Worker CPU must be non-zero and populated from child processes
+        assert worker_cpu >= 0.0
+        assert len(res["client_worker_diagnostics"]) == 2
+
+        # 3. Utilization percentages must be derived from the exact same total_cpu population
+        expected_single_core_pct = round((total_cpu / wall_sec) * 100.0, 2)
+        assert abs(res["cpu_utilization_pct_single_core"] - expected_single_core_pct) <= 0.05
+
+        expected_all_cores_pct = round((total_cpu / (wall_sec * float(logical_cpus))) * 100.0, 2)
+        assert abs(res["cpu_utilization_pct_all_cores"] - expected_all_cores_pct) <= 0.05
+
+    asyncio.run(_run())
+
+
+def test_sanitize_worker_error_message_redacts_credentials() -> None:
+    """Verify format_safe_worker_error provides fail-safe redaction without leaking arbitrary tokens, secrets, or URLs."""
+    import unittest.mock
+
+    import websockets.exceptions
+    from tools.synthetic_media_load import format_safe_worker_error
+
+    # 1. Unknown exception formats must not leak arbitrary message text
+    exc_with_bearer = RuntimeError(
+        "Failed connection to ws://127.0.0.1/ws with Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret"
+    )
+    cleaned = format_safe_worker_error(exc_with_bearer)
+    assert cleaned == "RuntimeError"
+    assert "Bearer" not in cleaned
+    assert "eyJhbGciOi" not in cleaned
+
+    exc_unknown_format = ValueError(
+        "session credential: SECRET_KEY_99999_CLASSIFIED&unusual_auth_param=supersecret"
+    )
+    cleaned_unknown = format_safe_worker_error(exc_unknown_format)
+    assert cleaned_unknown == "ValueError"
+    assert "SECRET_KEY_99999_CLASSIFIED" not in cleaned_unknown
+    assert "supersecret" not in cleaned_unknown
+    assert "session credential" not in cleaned_unknown
+
+    exc_with_url = ConnectionError(
+        "Handshake rejected: https://alice:secret_pass_12345@internal.telephony.net/ws"
+    )
+    cleaned_url = format_safe_worker_error(exc_with_url)
+    assert cleaned_url == "ConnectionError"
+    assert "secret_pass_12345" not in cleaned_url
+    assert "alice" not in cleaned_url
+
+    # 2. Allowlisted, stable error categories must be preserved
+    timeout_exc = TimeoutError("frame deadline exceeded after 20ms")
+    assert format_safe_worker_error(timeout_exc) == "TimeoutError (deadline exceeded)"
+
+    mock_resp = unittest.mock.MagicMock(status_code=401)
+    status_exc = websockets.exceptions.InvalidStatus(mock_resp)
+    assert format_safe_worker_error(status_exc) == "InvalidStatus (HTTP 401)"
+
+    mock_rcvd = unittest.mock.MagicMock(code=1008)
+    close_exc = websockets.exceptions.ConnectionClosed(rcvd=mock_rcvd, sent=None)
+    assert format_safe_worker_error(close_exc) == "ConnectionClosed (code 1008)"
+
+    os_exc = OSError(111, "Connection refused")
+    assert format_safe_worker_error(os_exc) in (
+        "OSError (errno 111)",
+        "ConnectionRefusedError (errno 111)",
+    )
+
+
+def test_client_worker_task_failure_propagation_preserves_partial_records_and_redacts_secrets() -> (
+    None
+):
+    """Verify worker call task failure:
+    1. Worker fails with exit code 1.
+    2. Available successful records from other calls are preserved.
+    3. Error description is sanitized without disclosing arbitrary secrets.
+    4. Failed calls count is accurately recorded.
+    """
+    import io
+    import time
+    from unittest.mock import patch
+
+    from tools.synthetic_media_load import CallMediaRunRecord, _client_worker_subprocess_async
+
+    from kaiwen_gateway.modules.voice import LatencyDistributionSummary, MetricAvailabilityReason
+
+    async def _run() -> None:
+        config = {
+            "worker_index": 0,
+            "ws_url": "ws://127.0.0.1:8000/ws/test",
+            "frames_per_call": 5,
+            "interval_ms": 20.0,
+            "seed": 42,
+            "pattern": "deterministic",
+            "skip_threshold_ms": None,
+            "timeout": 2.0,
+            "latency_window_capacity": 32,
+            "calls": [
+                {
+                    "slot_id": 0,
+                    "tenant_id": "t1",
+                    "call_id": "c0",
+                    "token": "tok0",
+                    "phase_ms": 0.0,
+                },
+                {
+                    "slot_id": 1,
+                    "tenant_id": "t1",
+                    "call_id": "c1",
+                    "token": "tok1",
+                    "phase_ms": 0.0,
+                },
+            ],
+        }
+
+        call_0_record = CallMediaRunRecord(
+            session_slot_id=0,
+            admitted=True,
+            completed_cleanly=True,
+            close_code=1000,
+            frames_scheduled=5,
+            frames_sent=5,
+            frames_skipped=0,
+            missed_deadlines=0,
+            frames_echoed=5,
+            frames_missing=0,
+            duplicate_frames=0,
+            out_of_order_frames=0,
+            payload_mismatches=0,
+            cross_session_frames=0,
+            first_frame_sent_s=1.0,
+            last_frame_sent_s=1.08,
+            last_frame_activity_s=1.08,
+            handshake_ms=2.0,
+            call_start_rtt_ms=2.0,
+            call_end_rtt_ms=2.0,
+            total_call_duration_ms=100.0,
+            echo_rtt_summary=LatencyDistributionSummary.unavailable(
+                MetricAvailabilityReason.NO_SAMPLES
+            ),
+            echo_rtt_samples_ms=(),
+            scheduling_lateness_samples_ms=(),
+            scheduling_interval_samples_ms=(),
+            scheduling_jitter_samples_ms=(),
+        )
+
+        secret_to_leak = "CLASSIFIED_CREDENTIAL_KEY_99999_SESSION_SECRET"
+
+        async def _mock_single_call(**kwargs: Any) -> CallMediaRunRecord:
+            slot_id = kwargs["session_slot_id"]
+            barrier = kwargs["start_barrier"]
+            if barrier:
+                await barrier.wait()
+            if slot_id == 0:
+                return call_0_record
+            raise RuntimeError(f"session credential failure: {secret_to_leak}&param=sensitive_data")
+
+        start_payload = (
+            json.dumps({"event": "start", "shared_epoch_s": time.perf_counter() + 0.01}) + "\n"
+        )
+        captured_stdout = io.StringIO()
+
+        with (
+            patch(
+                "tools.synthetic_media_load.run_single_paced_media_call",
+                side_effect=_mock_single_call,
+            ),
+            patch("sys.stdin.readline", return_value=start_payload),
+            patch("sys.stdout.write", side_effect=captured_stdout.write),
+            patch("sys.stdout.flush"),
+        ):
+            exit_code = await _client_worker_subprocess_async(config)
+
+        assert exit_code == 1
+
+        output_str = captured_stdout.getvalue()
+        lines = [line.strip() for line in output_str.splitlines() if line.strip()]
+        assert len(lines) >= 1
+        payload = json.loads(lines[-1])
+        assert payload.get("event") == "error"
+        assert payload.get("failed_calls_count") == 1
+        assert payload.get("worker_index") == 0
+
+        recs = payload.get("records", [])
+        assert len(recs) == 1
+        assert recs[0]["session_slot_id"] == 0
+        assert recs[0]["completed_cleanly"] is True
+
+        assert secret_to_leak not in output_str
+        assert "session credential" not in output_str
+        assert "sensitive_data" not in output_str
+        assert payload["error"] == "Worker 0 encountered 1 failed call task(s): RuntimeError"
+
+    asyncio.run(_run())
+
+
+def test_coordinator_handles_worker_error_and_preserves_partial_records() -> None:
+    """Verify coordinator attaches partial records from failed worker and produces clean failure."""
+    from tools.synthetic_media_load import (
+        CallMediaRunRecord,
+        ClientWorkerExecutionError,
+        sanitize_ipc_error_string,
+    )
+
+    from kaiwen_gateway.modules.voice import LatencyDistributionSummary, MetricAvailabilityReason
+
+    assert (
+        sanitize_ipc_error_string("Worker 0 encountered 1 failed call task(s): RuntimeError")
+        == "Worker 0 encountered 1 failed call task(s): RuntimeError"
+    )
+    assert (
+        sanitize_ipc_error_string(
+            "Worker 0 encountered 1 failed call task(s): TimeoutError (deadline exceeded)"
+        )
+        == "Worker 0 encountered 1 failed call task(s): TimeoutError (deadline exceeded)"
+    )
+    assert (
+        sanitize_ipc_error_string(
+            "Worker 0 encountered 2 failed call task(s): InvalidStatus (HTTP 401); TimeoutError (deadline exceeded)"
+        )
+        == "Worker 0 encountered 2 failed call task(s): InvalidStatus (HTTP 401); TimeoutError (deadline exceeded)"
+    )
+    assert (
+        sanitize_ipc_error_string(
+            "Worker 0 encountered 3 failed call task(s): ConnectionClosed (code 1006); OSError (errno 111); JSONDecodeError (line 1)"
+        )
+        == "Worker 0 encountered 3 failed call task(s): ConnectionClosed (code 1006); OSError (errno 111); JSONDecodeError (line 1)"
+    )
+    assert (
+        sanitize_ipc_error_string("Worker process error: JSONDecodeError (line 1)")
+        == "Worker process error: JSONDecodeError (line 1)"
+    )
+    assert (
+        sanitize_ipc_error_string("Worker process error: BrokenBarrierError")
+        == "Worker process error: BrokenBarrierError"
+    )
+
+    # Fail-safe rejection of arbitrary words / credential leaks following valid prefixes
+    assert (
+        sanitize_ipc_error_string(
+            "Worker 0 encountered 1 failed call task(s): RuntimeError session credential SUPERSECRET123"
+        )
+        == "Worker reported abnormal task failure"
+    )
+    assert (
+        sanitize_ipc_error_string(
+            "Worker process error: RuntimeError session credential SUPERSECRET123"
+        )
+        == "Worker reported abnormal task failure"
+    )
+    assert (
+        sanitize_ipc_error_string(
+            "Worker 0 encountered 1 failed call task(s): RuntimeError (unapproved detail)"
+        )
+        == "Worker reported abnormal task failure"
+    )
+    assert (
+        sanitize_ipc_error_string("Worker 0 encountered 4 failed call task(s): E1; E2; E3; E4")
+        == "Worker reported abnormal task failure"
+    )
+    assert (
+        sanitize_ipc_error_string(
+            "Worker 0 encountered 1 failed call task(s): RuntimeError\nSECRET_LINE"
+        )
+        == "Worker reported abnormal task failure"
+    )
+    assert (
+        sanitize_ipc_error_string("Malicious error message with secret: SECRET_123")
+        == "Worker reported abnormal task failure"
+    )
+    assert sanitize_ipc_error_string("") == "Worker reported unspecified failure"
+    assert sanitize_ipc_error_string("   ") == "Worker reported unspecified failure"
+    assert sanitize_ipc_error_string(None) == "Worker reported unspecified failure"
+
+    rec = CallMediaRunRecord(
+        session_slot_id=0,
+        admitted=True,
+        completed_cleanly=True,
+        close_code=1000,
+        frames_scheduled=5,
+        frames_sent=5,
+        frames_skipped=0,
+        missed_deadlines=0,
+        frames_echoed=5,
+        frames_missing=0,
+        duplicate_frames=0,
+        out_of_order_frames=0,
+        payload_mismatches=0,
+        cross_session_frames=0,
+        first_frame_sent_s=1.0,
+        last_frame_sent_s=1.08,
+        last_frame_activity_s=1.08,
+        handshake_ms=2.0,
+        call_start_rtt_ms=2.0,
+        call_end_rtt_ms=2.0,
+        total_call_duration_ms=100.0,
+        echo_rtt_summary=LatencyDistributionSummary.unavailable(
+            MetricAvailabilityReason.NO_SAMPLES
+        ),
+        echo_rtt_samples_ms=(),
+        scheduling_lateness_samples_ms=(),
+        scheduling_interval_samples_ms=(),
+        scheduling_jitter_samples_ms=(),
+    )
+    err = ClientWorkerExecutionError(
+        "Client worker 0 reported failure: Worker 0 encountered 1 failed call task(s): RuntimeError",
+        partial_records=[rec],
+    )
+    assert len(err.partial_records) == 1
+    assert err.partial_records[0].session_slot_id == 0
+    assert (
+        str(err)
+        == "Client worker 0 reported failure: Worker 0 encountered 1 failed call task(s): RuntimeError"
+    )
+
+
+def test_worker_call_exception_propagation_and_partial_records() -> None:
+    """Verify worker subprocess fails stage and reports error when a call task raises an exception."""
+    from tools.synthetic_media_load import _run_multi_process_client_workers
+
+    async def _run() -> None:
+        call_specs = [
+            (0, "tenant_1", "call_1", "fake_token_1", 0.0),
+            (1, "tenant_1", "call_2", "fake_token_2", 2.0),
+        ]
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"Client worker \d+ (reported failure|reported error|exited prematurely)",
+        ):
+            await _run_multi_process_client_workers(
+                client_workers=2,
+                call_specs=call_specs,
+                ws_url="ws://127.0.0.1:9/invalid_port",
+                frames_per_call=5,
+                interval_ms=20.0,
+                seed=42,
+                pattern="deterministic",
+                skip_threshold_ms=None,
+                timeout=1.0,
+                latency_window_capacity=32,
+            )
+
+    asyncio.run(_run())
+
+
+def test_start_synchronization_lead_time_and_late_sync_detection() -> None:
+    """Verify start synchronization future epoch delivery and late-start diagnostic tracking."""
+
+    async def _run() -> None:
+        lenient_criteria = PacingAcceptanceCriteria(
+            max_missed_deadline_rate=1.0,
+            max_mean_interval_deviation_pct=500.0,
+            max_p95_scheduler_lateness_ms=5000.0,
+            max_transmission_elongation_pct=500.0,
+        )
+        stage = await run_paced_media_stage(
+            stage_name="test_sync_epoch",
+            concurrency=2,
+            duration_seconds=0.1,
+            interval_ms=20.0,
+            client_workers=2,
+            isolation_mode=ISOLATION_MODE_IN_PROCESS,
+            pacing_criteria=lenient_criteria,
+        )
+        assert stage.status == "PASS"
+        diags = stage.resources["client_worker_diagnostics"]
+        assert len(diags) == 2
+        for w in diags:
+            assert "start_sync_skew_ms" in w
+            assert "late_start_sync" in w
+            assert isinstance(w["late_start_sync"], bool)
+
+    asyncio.run(_run())
+
+
+def test_coordinator_ipc_payload_validation_and_event_normalization() -> None:
+    """Verify coordinator rejects non-dict payloads, normalizes unexpected event names, and sanitizes errors."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from tools.synthetic_media_load import (
+        ClientWorkerExecutionError,
+        _run_multi_process_client_workers,
+    )
+
+    class MockWorkerProcess:
+        def __init__(self, stdout_lines: list[bytes]) -> None:
+            self.stdin = AsyncMock()
+            self.stdin.write = MagicMock()
+            self.stdin.drain = AsyncMock()
+            self.stdout = asyncio.StreamReader()
+            for line in stdout_lines:
+                self.stdout.feed_data(line)
+            self.stderr = None
+            self.returncode: int | None = None
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+    call_specs = [(0, "tenant_1", "call_1", "fake_token_1", 0.0)]
+
+    async def _test_case(
+        stdout_lines: list[bytes], expected_exc: type[Exception], expected_pattern: str
+    ) -> Exception:
+        proc = MockWorkerProcess(stdout_lines)
+        with patch("asyncio.create_subprocess_exec", return_value=proc):
+            with pytest.raises(expected_exc, match=expected_pattern) as exc_info:
+                await _run_multi_process_client_workers(
+                    client_workers=1,
+                    call_specs=call_specs,
+                    ws_url="ws://127.0.0.1:8765",
+                    frames_per_call=5,
+                    interval_ms=20.0,
+                    seed=42,
+                    pattern="deterministic",
+                    skip_threshold_ms=None,
+                    timeout=1.0,
+                    latency_window_capacity=32,
+                )
+            return exc_info.value
+
+    async def _run_all() -> None:
+        # 1. Non-dict payload during ready phase
+        await _test_case(
+            [json.dumps([1, 2, 3]).encode("utf-8") + b"\n"],
+            RuntimeError,
+            r"Client worker 0 emitted non-dict IPC payload during ready phase",
+        )
+
+        # 2. Unexpected event name with sensitive token during ready phase
+        secret_event = "sensitive_token_leak_123"
+        exc = await _test_case(
+            [json.dumps({"event": secret_event}).encode("utf-8") + b"\n"],
+            RuntimeError,
+            r"Client worker 0 returned unexpected event during ready phase: 'unknown'",
+        )
+        assert secret_event not in str(exc)
+
+        # 3. Allowlisted but unexpected event during ready phase
+        await _test_case(
+            [json.dumps({"event": "start"}).encode("utf-8") + b"\n"],
+            RuntimeError,
+            r"Client worker 0 returned unexpected event during ready phase: 'start'",
+        )
+
+        # 4. Non-dict payload during completion phase
+        ready_line = (
+            json.dumps({"event": "ready", "worker_index": 0, "connected": 1}).encode("utf-8")
+            + b"\n"
+        )
+        await _test_case(
+            [ready_line, json.dumps(["done_list"]).encode("utf-8") + b"\n"],
+            RuntimeError,
+            r"Client worker 0 emitted non-dict IPC payload during completion phase",
+        )
+
+        # 5. Unexpected event name with sensitive token during completion phase
+        exc2 = await _test_case(
+            [ready_line, json.dumps({"event": secret_event}).encode("utf-8") + b"\n"],
+            RuntimeError,
+            r"Client worker 0 returned unexpected event during completion phase: 'unknown'",
+        )
+        assert secret_event not in str(exc2)
+
+        # 6. Credential-like string in worker error string during completion phase is sanitized
+        secret_word = "SUPERSECRET123"
+        injected_error = f"Worker 0 encountered 1 failed call task(s): RuntimeError session credential {secret_word}"
+        exc3 = await _test_case(
+            [
+                ready_line,
+                json.dumps({"event": "error", "error": injected_error, "records": []}).encode(
+                    "utf-8"
+                )
+                + b"\n",
+            ],
+            ClientWorkerExecutionError,
+            r"Client worker 0 reported failure: Worker reported abnormal task failure",
+        )
+        assert secret_word not in str(exc3)
+        assert "session credential" not in str(exc3)
+
+    asyncio.run(_run_all())
+
+
+# ---------------------------------------------------------------------------
+# IPC diagnostic allowlist: the grammar alone is not enough, the category must be known.
+# ---------------------------------------------------------------------------
+
+_ABNORMAL = "Worker reported abnormal task failure"
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "RuntimeError",
+        "ValueError",
+        "TimeoutError (deadline exceeded)",
+        "InvalidStatus (HTTP 401)",
+        "ConnectionClosed (code 1008)",
+        "ConnectionClosedError (sent code 1011)",
+        "InvalidURI (invalid URI format)",
+        "OSError (errno 111)",
+        "ConnectionRefusedError (errno -2)",
+        "JSONDecodeError (line 7)",
+        "BrokenBarrierError",
+        "UnexpectedWorkerError",
+    ],
+)
+def test_ipc_allowlist_accepts_known_categories_with_legal_details(item: str) -> None:
+    from tools.synthetic_media_load import sanitize_ipc_error_string
+
+    assert (
+        sanitize_ipc_error_string(f"Worker process error: {item}")
+        == f"Worker process error: {item}"
+    )
+    multi = f"Worker 2 encountered 5 failed call task(s): {item}"
+    assert sanitize_ipc_error_string(multi) == multi
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "SUPERSECRET123",
+        "AKIAIOSFODNN7EXAMPLE",
+        "Bearer_eyJhbGciOiJIUzI1NiJ9",
+        "RuntimeErrorX",
+        "runtimeerror",
+        "E1",
+        "SUPERSECRET123 (errno 5)",
+    ],
+)
+def test_ipc_allowlist_rejects_unknown_identifiers_even_when_syntactically_valid(
+    item: str,
+) -> None:
+    from tools.synthetic_media_load import sanitize_ipc_error_string
+
+    assert sanitize_ipc_error_string(f"Worker process error: {item}") == _ABNORMAL
+    assert (
+        sanitize_ipc_error_string(f"Worker 0 encountered 1 failed call task(s): {item}")
+        == _ABNORMAL
+    )
+    # One unknown item poisons the whole aggregate; known neighbours are not forwarded.
+    assert (
+        sanitize_ipc_error_string(
+            f"Worker 0 encountered 2 failed call task(s): RuntimeError; {item}"
+        )
+        == _ABNORMAL
+    )
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "RuntimeError (HTTP 401)",
+        "RuntimeError (deadline exceeded)",
+        "TimeoutError (errno 5)",
+        "InvalidStatus (code 1008)",
+        "InvalidStatus (HTTP 999)",
+        "InvalidStatus (HTTP 40)",
+        "ConnectionClosed (HTTP 500)",
+        "ConnectionClosed (code 99999)",
+        "OSError (line 3)",
+        "OSError (errno 1234567)",
+        "JSONDecodeError (errno 1)",
+        "UnexpectedWorkerError (errno 1)",
+        "OSError (errno 5) trailing",
+    ],
+)
+def test_ipc_allowlist_rejects_category_detail_mismatches(item: str) -> None:
+    from tools.synthetic_media_load import sanitize_ipc_error_string
+
+    assert sanitize_ipc_error_string(f"Worker process error: {item}") == _ABNORMAL
+
+
+def test_dynamically_named_exception_classes_cannot_leak_their_name() -> None:
+    from tools.synthetic_media_load import (
+        UNEXPECTED_ERROR_CATEGORY,
+        format_safe_worker_error,
+        sanitize_ipc_error_string,
+    )
+
+    secret_cls = type("SUPERSECRET123", (Exception,), {})
+    assert format_safe_worker_error(secret_cls("anything")) == UNEXPECTED_ERROR_CATEGORY
+
+    # A subclass of an allowlisted base is still reported under the fixed category, and its
+    # errno is not attached to a category that does not allow it.
+    leaky_os = type("TOKEN_abc123", (OSError,), {})
+    produced = format_safe_worker_error(leaky_os(111, "refused"))
+    assert produced == UNEXPECTED_ERROR_CATEGORY and "TOKEN" not in produced
+
+    for exc in (secret_cls("x"), leaky_os(5, "y"), RuntimeError("Bearer abc"), KeyError("k")):
+        for prefix in ("Worker process error: ", "Worker 1 encountered 1 failed call task(s): "):
+            wire = prefix + format_safe_worker_error(exc)
+            assert sanitize_ipc_error_string(wire) == wire  # the producer only emits legal output
+            assert "SUPERSECRET" not in wire and "TOKEN" not in wire
+
+
+def test_multi_task_errors_keep_distinct_safe_categories() -> None:
+    import unittest.mock
+
+    import websockets.exceptions
+    from tools.synthetic_media_load import format_safe_worker_error, sanitize_ipc_error_string
+
+    status = websockets.exceptions.InvalidStatus(unittest.mock.MagicMock(status_code=401))
+    parts = sorted(
+        {
+            format_safe_worker_error(TimeoutError("late")),
+            format_safe_worker_error(status),
+            format_safe_worker_error(type("Hidden_9", (Exception,), {})("s3cret")),
+        }
+    )
+    wire = f"Worker 3 encountered 9 failed call task(s): {'; '.join(parts)}"
+    assert sanitize_ipc_error_string(wire) == wire
+    assert "InvalidStatus (HTTP 401)" in wire and "TimeoutError (deadline exceeded)" in wire
+    assert "s3cret" not in wire and "Hidden_9" not in wire
+    # More than three listed items is not a legal aggregate.
+    assert (
+        sanitize_ipc_error_string(
+            "Worker 3 encountered 4 failed call task(s): RuntimeError; ValueError; TypeError; KeyError"
+        )
+        == _ABNORMAL
+    )

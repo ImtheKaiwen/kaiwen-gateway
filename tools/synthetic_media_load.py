@@ -33,6 +33,7 @@ import json
 import math
 import os
 import platform
+import re
 import secrets
 import socket
 import struct
@@ -1780,6 +1781,108 @@ class CallMediaRunRecord:
     dispatch_skew_ms: float = 0.0
     error_category: str | None = None
     last_frame_sent_s: float | None = None
+    client_socket_send_wait_samples_ms: tuple[float, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize run record to a JSON-serializable dictionary."""
+        return {
+            "session_slot_id": self.session_slot_id,
+            "admitted": self.admitted,
+            "completed_cleanly": self.completed_cleanly,
+            "close_code": self.close_code,
+            "frames_scheduled": self.frames_scheduled,
+            "frames_sent": self.frames_sent,
+            "frames_skipped": self.frames_skipped,
+            "missed_deadlines": self.missed_deadlines,
+            "frames_echoed": self.frames_echoed,
+            "frames_missing": self.frames_missing,
+            "duplicate_frames": self.duplicate_frames,
+            "out_of_order_frames": self.out_of_order_frames,
+            "payload_mismatches": self.payload_mismatches,
+            "cross_session_frames": self.cross_session_frames,
+            "first_frame_sent_s": self.first_frame_sent_s,
+            "last_frame_activity_s": self.last_frame_activity_s,
+            "handshake_ms": self.handshake_ms,
+            "call_start_rtt_ms": self.call_start_rtt_ms,
+            "call_end_rtt_ms": self.call_end_rtt_ms,
+            "total_call_duration_ms": self.total_call_duration_ms,
+            "echo_rtt_summary": self.echo_rtt_summary.to_dict(),
+            "echo_rtt_samples_ms": list(self.echo_rtt_samples_ms),
+            "scheduling_lateness_samples_ms": list(self.scheduling_lateness_samples_ms),
+            "scheduling_interval_samples_ms": list(self.scheduling_interval_samples_ms),
+            "scheduling_jitter_samples_ms": list(self.scheduling_jitter_samples_ms),
+            "dispatch_skew_ms": self.dispatch_skew_ms,
+            "error_category": self.error_category,
+            "last_frame_sent_s": self.last_frame_sent_s,
+            "client_socket_send_wait_samples_ms": list(self.client_socket_send_wait_samples_ms),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> CallMediaRunRecord:
+        """Reconstruct a CallMediaRunRecord from a serialized dictionary."""
+        return cls(
+            session_slot_id=int(data["session_slot_id"]),
+            admitted=bool(data["admitted"]),
+            completed_cleanly=bool(data["completed_cleanly"]),
+            close_code=int(data["close_code"]),
+            frames_scheduled=int(data["frames_scheduled"]),
+            frames_sent=int(data["frames_sent"]),
+            frames_skipped=int(data["frames_skipped"]),
+            missed_deadlines=int(data["missed_deadlines"]),
+            frames_echoed=int(data["frames_echoed"]),
+            frames_missing=int(data["frames_missing"]),
+            duplicate_frames=int(data["duplicate_frames"]),
+            out_of_order_frames=int(data["out_of_order_frames"]),
+            payload_mismatches=int(data["payload_mismatches"]),
+            cross_session_frames=int(data["cross_session_frames"]),
+            first_frame_sent_s=(
+                float(data["first_frame_sent_s"])
+                if data.get("first_frame_sent_s") is not None
+                else None
+            ),
+            last_frame_activity_s=(
+                float(data["last_frame_activity_s"])
+                if data.get("last_frame_activity_s") is not None
+                else None
+            ),
+            handshake_ms=float(data["handshake_ms"]),
+            call_start_rtt_ms=float(data["call_start_rtt_ms"]),
+            call_end_rtt_ms=float(data["call_end_rtt_ms"]),
+            total_call_duration_ms=float(data["total_call_duration_ms"]),
+            echo_rtt_summary=_reconstruct_latency_summary(data.get("echo_rtt_summary", {})),
+            echo_rtt_samples_ms=tuple(float(x) for x in data.get("echo_rtt_samples_ms", ())),
+            scheduling_lateness_samples_ms=tuple(
+                float(x) for x in data.get("scheduling_lateness_samples_ms", ())
+            ),
+            scheduling_interval_samples_ms=tuple(
+                float(x) for x in data.get("scheduling_interval_samples_ms", ())
+            ),
+            scheduling_jitter_samples_ms=tuple(
+                float(x) for x in data.get("scheduling_jitter_samples_ms", ())
+            ),
+            dispatch_skew_ms=float(data.get("dispatch_skew_ms", 0.0)),
+            error_category=(
+                str(data["error_category"]) if data.get("error_category") is not None else None
+            ),
+            last_frame_sent_s=(
+                float(data["last_frame_sent_s"])
+                if data.get("last_frame_sent_s") is not None
+                else None
+            ),
+            client_socket_send_wait_samples_ms=tuple(
+                float(x) for x in data.get("client_socket_send_wait_samples_ms", ())
+            ),
+        )
+
+
+class ClientWorkerExecutionError(RuntimeError):
+    """Raised when a client worker subprocess reports a runtime failure."""
+
+    def __init__(
+        self, message: str, partial_records: list[CallMediaRunRecord] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.partial_records: list[CallMediaRunRecord] = partial_records or []
 
 
 async def run_single_paced_media_call(
@@ -1883,6 +1986,7 @@ async def run_single_paced_media_call(
             effective_epoch_s = time.perf_counter()
 
         dispatch_skew_ms = 0.0
+        send_wait_samples: list[float] = []
 
         all_sent_event = asyncio.Event()
         all_echoed_event = asyncio.Event()
@@ -1898,7 +2002,10 @@ async def run_single_paced_media_call(
                     continue
                 payload = payloads[sent_seq]
                 t_send = time.perf_counter()
+                t_before_send = t_send
                 await ws.send(payload)
+                t_after_send = time.perf_counter()
+                send_wait_samples.append(max(0.0, (t_after_send - t_before_send) * 1000.0))
                 if first_sent_s is None:
                     first_sent_s = t_send
                     target_slot0_s = effective_epoch_s + pacer.phase_offset_s
@@ -1990,6 +2097,7 @@ async def run_single_paced_media_call(
         scheduling_interval_samples_ms=tuple(interval_samples),
         scheduling_jitter_samples_ms=tuple(jitter_samples),
         dispatch_skew_ms=round(dispatch_skew_ms, 4),
+        client_socket_send_wait_samples_ms=tuple(send_wait_samples),
     )
 
 
@@ -2185,6 +2293,601 @@ class PacedStageResult:
         }
 
 
+# Finite set of diagnostic categories that may cross the worker IPC boundary. Each maps to the
+# detail kinds that are legal for it (an empty detail is always legal). An exception whose class
+# name is not listed is reported as the fixed fallback category: an arbitrary class name, which
+# can be attacker- or secret-bearing, is never forwarded.
+_DETAIL_DEADLINE: Final = "deadline"
+_DETAIL_HTTP: Final = "http"
+_DETAIL_CODE: Final = "code"
+_DETAIL_SENT_CODE: Final = "sent_code"
+_DETAIL_URI: Final = "uri"
+_DETAIL_ERRNO: Final = "errno"
+_DETAIL_LINE: Final = "line"
+
+UNEXPECTED_ERROR_CATEGORY: Final = "UnexpectedWorkerError"
+
+_SAFE_ERROR_CATEGORIES: Final[Mapping[str, frozenset[str]]] = {
+    "TimeoutError": frozenset({_DETAIL_DEADLINE}),
+    "InvalidStatus": frozenset({_DETAIL_HTTP}),
+    "ConnectionClosed": frozenset({_DETAIL_CODE, _DETAIL_SENT_CODE}),
+    "ConnectionClosedOK": frozenset({_DETAIL_CODE, _DETAIL_SENT_CODE}),
+    "ConnectionClosedError": frozenset({_DETAIL_CODE, _DETAIL_SENT_CODE}),
+    "InvalidURI": frozenset({_DETAIL_URI}),
+    "OSError": frozenset({_DETAIL_ERRNO}),
+    "ConnectionError": frozenset({_DETAIL_ERRNO}),
+    "ConnectionRefusedError": frozenset({_DETAIL_ERRNO}),
+    "ConnectionResetError": frozenset({_DETAIL_ERRNO}),
+    "ConnectionAbortedError": frozenset({_DETAIL_ERRNO}),
+    "BrokenPipeError": frozenset({_DETAIL_ERRNO}),
+    "gaierror": frozenset({_DETAIL_ERRNO}),
+    "JSONDecodeError": frozenset({_DETAIL_LINE}),
+    "PayloadTooBig": frozenset(),
+    "ProtocolError": frozenset(),
+    "WebSocketProtocolError": frozenset(),
+    "BrokenBarrierError": frozenset(),
+    "RuntimeError": frozenset(),
+    "ValueError": frozenset(),
+    "TypeError": frozenset(),
+    "KeyError": frozenset(),
+    "AssertionError": frozenset(),
+    UNEXPECTED_ERROR_CATEGORY: frozenset(),
+}
+
+
+def _safe_category(exc: BaseException) -> str:
+    """The allowlisted category for `exc`, or the fixed fallback; never the raw class name."""
+    name = type(exc).__name__
+    return name if name in _SAFE_ERROR_CATEGORIES else UNEXPECTED_ERROR_CATEGORY
+
+
+def _format_worker_error_unchecked(exc: BaseException) -> str:
+    """Format an exception into a fail-safe diagnostic identifier without disclosing arbitrary message text.
+
+    Distinguishes timeout, connection rejection, protocol error, and network errors using
+    safe exception class identifiers and allowlisted numeric attributes.
+    Arbitrary message text (str(exc), repr(exc), tracebacks, headers, or query params)
+    is strictly omitted to prevent credential disclosure.
+    """
+    cls_name = _safe_category(exc)
+
+    # 1. Timeout errors
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return f"{cls_name} (deadline exceeded)"
+
+    # 2. WebSocket connection rejection with HTTP status code
+    if isinstance(exc, websockets.exceptions.InvalidStatus):
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+        if isinstance(code, int):
+            return f"{cls_name} (HTTP {code})"
+        return cls_name
+
+    # 3. WebSocket connection closed with close code
+    if isinstance(exc, websockets.exceptions.ConnectionClosed):
+        code = getattr(getattr(exc, "rcvd", None), "code", None)
+        if isinstance(code, int):
+            return f"{cls_name} (code {code})"
+        code_sent = getattr(getattr(exc, "sent", None), "code", None)
+        if isinstance(code_sent, int):
+            return f"{cls_name} (sent code {code_sent})"
+        return cls_name
+
+    # 4. WebSocket URI errors
+    if isinstance(exc, websockets.exceptions.InvalidURI):
+        return f"{cls_name} (invalid URI format)"
+
+    # 5. WebSocket protocol errors
+    if isinstance(exc, (websockets.exceptions.PayloadTooBig,)) or cls_name in (
+        "WebSocketProtocolError",
+        "ProtocolError",
+    ):
+        return cls_name
+
+    # 6. Network socket errors with errno
+    if isinstance(
+        exc,
+        (
+            ConnectionRefusedError,
+            ConnectionResetError,
+            BrokenPipeError,
+            socket.gaierror,
+            socket.timeout,
+            OSError,
+        ),
+    ):
+        errno_val = getattr(exc, "errno", None)
+        if isinstance(errno_val, int):
+            return f"{cls_name} (errno {errno_val})"
+        return cls_name
+
+    # 7. Barrier synchronization
+    if isinstance(exc, asyncio.BrokenBarrierError):
+        return cls_name
+
+    # 8. IPC JSON errors
+    if isinstance(exc, json.JSONDecodeError):
+        lineno = getattr(exc, "lineno", None)
+        if isinstance(lineno, int):
+            return f"{cls_name} (line {lineno})"
+        return cls_name
+
+    # 9. Fallback for all other exceptions: an allowlisted name, else the fixed category
+    return cls_name
+
+
+def format_safe_worker_error(exc: BaseException) -> str:
+    """Allowlisted category plus an optional detail that is legal for that category.
+
+    Whatever the branches above produce is re-validated against the same table the receiving side
+    uses, so a category/detail mismatch (for example a subclass reported under the fixed fallback)
+    degrades to the bare allowlisted category instead of being emitted.
+    """
+    candidate = _format_worker_error_unchecked(exc)
+    return candidate if _is_safe_error_item(candidate) else _safe_category(exc)
+
+
+# Maintain alias for backward compatibility with previous call sites
+_sanitize_worker_error_message = format_safe_worker_error
+
+ALLOWED_IPC_EVENTS: frozenset[str] = frozenset({"ready", "done", "error", "start"})
+
+_SAFE_DETAIL_PATTERNS: Final[Mapping[str, re.Pattern[str]]] = {
+    _DETAIL_DEADLINE: re.compile(r"deadline exceeded"),
+    _DETAIL_HTTP: re.compile(r"HTTP [1-5]\d{2}"),
+    _DETAIL_CODE: re.compile(r"code \d{4}"),
+    _DETAIL_SENT_CODE: re.compile(r"sent code \d{4}"),
+    _DETAIL_URI: re.compile(r"invalid URI format"),
+    _DETAIL_ERRNO: re.compile(r"errno -?\d{1,5}"),
+    _DETAIL_LINE: re.compile(r"line \d{1,9}"),
+}
+_SAFE_ERROR_ITEM_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(?: \(([^()]*)\))?")
+_SAFE_MULTI_TASK_RE = re.compile(r"Worker \d+ encountered \d+ failed call task\(s\): (.+)")
+_SAFE_PROCESS_ERROR_RE = re.compile(r"Worker process error: (.+)")
+_MAX_ERROR_ITEMS: Final = 3
+
+
+def _is_safe_error_item(item: str) -> bool:
+    """Whether `item` is an allowlisted category with a detail that is legal for that category."""
+    matched = _SAFE_ERROR_ITEM_RE.fullmatch(item)
+    if matched is None:
+        return False
+    category, detail = matched.group(1), matched.group(2)
+    allowed = _SAFE_ERROR_CATEGORIES.get(category)
+    if allowed is None:
+        return False
+    if detail is None:
+        return True
+    return any(
+        kind in allowed and _SAFE_DETAIL_PATTERNS[kind].fullmatch(detail) is not None
+        for kind in _SAFE_DETAIL_PATTERNS
+    )
+
+
+def _is_safe_ipc_error(clean: str) -> bool:
+    multi = _SAFE_MULTI_TASK_RE.fullmatch(clean)
+    if multi is not None:
+        items = multi.group(1).split("; ")
+        return len(items) <= _MAX_ERROR_ITEMS and all(_is_safe_error_item(i) for i in items)
+    process = _SAFE_PROCESS_ERROR_RE.fullmatch(clean)
+    return process is not None and _is_safe_error_item(process.group(1))
+
+
+def _normalize_ipc_event_name(raw: Any) -> str:
+    """Normalize IPC event name to an allowlisted identifier or safe placeholder."""
+    if isinstance(raw, str) and raw in ALLOWED_IPC_EVENTS:
+        return raw
+    return "unknown"
+
+
+def sanitize_ipc_error_string(raw: Any) -> str:
+    """Sanitize IPC error string received from worker subprocess to prevent unauthorized text injection."""
+    if not isinstance(raw, str) or not raw.strip():
+        return "Worker reported unspecified failure"
+    clean = raw.strip()
+    if "\n" in clean or "\r" in clean:
+        return "Worker reported abnormal task failure"
+    if _is_safe_ipc_error(clean):
+        return clean
+    return "Worker reported abnormal task failure"
+
+
+async def _client_worker_subprocess_async(config: Mapping[str, Any]) -> int:
+    """Run client worker coroutine inside a dedicated subprocess."""
+    worker_index = int(config.get("worker_index", 0))
+    ws_url = str(config["ws_url"])
+    frames_per_call = int(config["frames_per_call"])
+    interval_ms = float(config["interval_ms"])
+    seed = int(config["seed"])
+    pattern = str(config["pattern"])
+    skip_threshold_ms = (
+        float(config["skip_threshold_ms"]) if config.get("skip_threshold_ms") is not None else None
+    )
+    timeout = float(config.get("timeout", 20.0))
+    capacity = int(config.get("latency_window_capacity", DEFAULT_LATENCY_WINDOW_SIZE))
+    call_items = list(config.get("calls", []))
+
+    t_cpu_start = time.process_time()
+
+    lag_monitor = EventLoopLagMonitor(probe_interval_s=0.010, window_capacity=capacity)
+    lag_monitor.start()
+
+    barrier = asyncio.Barrier(len(call_items) + 1)
+    shared_epoch_holder: list[float] = []
+    epoch_ready_event = asyncio.Event()
+    records: list[CallMediaRunRecord] = []
+
+    async def _single_call_runner(item: Mapping[str, Any]) -> None:
+        rec = await run_single_paced_media_call(
+            ws_url=ws_url,
+            token=str(item["token"]),
+            call_id=str(item["call_id"]),
+            session_slot_id=int(item["slot_id"]),
+            frames_to_schedule=frames_per_call,
+            interval_ms=interval_ms,
+            seed=seed,
+            pattern=pattern,
+            skip_threshold_ms=skip_threshold_ms,
+            phase_offset_ms=float(item.get("phase_ms", 0.0)),
+            start_barrier=barrier,
+            shared_epoch_holder=shared_epoch_holder,
+            epoch_ready_event=epoch_ready_event,
+            timeout=timeout,
+            latency_window_capacity=capacity,
+        )
+        records.append(rec)
+
+    call_tasks = [asyncio.create_task(_single_call_runner(c)) for c in call_items]
+
+    # Wait for all calls in this worker to reach the start barrier
+    await asyncio.wait_for(barrier.wait(), timeout=timeout)
+
+    # Signal ready to coordinator
+    sys.stdout.write(
+        json.dumps(
+            {
+                "event": "ready",
+                "worker_index": worker_index,
+                "connected": len(call_items),
+            }
+        )
+        + "\n"
+    )
+    sys.stdout.flush()
+
+    # Await start message on stdin from coordinator
+    start_line = await asyncio.to_thread(sys.stdin.readline)
+    if not start_line:
+        raise RuntimeError(f"Client worker {worker_index} stdin closed before start signal")
+    try:
+        raw_start = json.loads(start_line)
+    except Exception as err:
+        raise RuntimeError(
+            f"Client worker {worker_index} received malformed start payload (JSONDecodeError)"
+        ) from err
+    if not isinstance(raw_start, dict):
+        raise RuntimeError(f"Client worker {worker_index} received non-dict start payload")
+    start_payload = raw_start
+    if start_payload.get("event") != "start":
+        event_name = _normalize_ipc_event_name(start_payload.get("event"))
+        raise RuntimeError(
+            f"Client worker {worker_index} received unexpected start event: {event_name!r}"
+        )
+
+    t_start_recv = time.perf_counter()
+    shared_epoch_s = start_payload.get("shared_epoch_s")
+    start_sync_skew_ms = 0.0
+    late_start_sync = False
+    if shared_epoch_s is not None:
+        epoch_val = float(shared_epoch_s)
+        shared_epoch_holder.append(epoch_val)
+        if t_start_recv > epoch_val:
+            late_start_sync = True
+            start_sync_skew_ms = (t_start_recv - epoch_val) * 1000.0
+    epoch_ready_event.set()
+
+    # Wait for calls to complete and inspect outcomes
+    call_outcomes = await asyncio.gather(*call_tasks, return_exceptions=True)
+    task_errors = [e for e in call_outcomes if isinstance(e, BaseException)]
+
+    lag_summary = await lag_monitor.stop()
+    cpu_duration_s = max(0.0, time.process_time() - t_cpu_start)
+    rss_after = measure_process_rss_kib()
+
+    if task_errors:
+        sanitized_errors = [_sanitize_worker_error_message(e) for e in task_errors]
+        err_detail = (
+            f"Worker {worker_index} encountered {len(task_errors)} failed call task(s): "
+            f"{'; '.join(sorted(set(sanitized_errors))[:3])}"
+        )
+        err_payload = {
+            "event": "error",
+            "worker_index": worker_index,
+            "error": err_detail,
+            "failed_calls_count": len(task_errors),
+            "records": [r.to_dict() for r in records],
+            "worker_lag": lag_summary.to_dict(),
+            "cpu_duration_s": cpu_duration_s,
+            "rss_peak_kib": (
+                rss_after.peak_rss_kib
+                if rss_after.available and rss_after.peak_rss_kib is not None
+                else 0.0
+            ),
+            "rss_current_kib": (
+                rss_after.current_rss_kib
+                if rss_after.available and rss_after.current_rss_kib is not None
+                else 0.0
+            ),
+            "start_sync_skew_ms": round(start_sync_skew_ms, 3),
+            "late_start_sync": late_start_sync,
+        }
+        sys.stdout.write(json.dumps(err_payload) + "\n")
+        sys.stdout.flush()
+        return 1
+
+    result_payload = {
+        "event": "done",
+        "worker_index": worker_index,
+        "records": [r.to_dict() for r in records],
+        "worker_lag": lag_summary.to_dict(),
+        "cpu_duration_s": cpu_duration_s,
+        "rss_peak_kib": (
+            rss_after.peak_rss_kib
+            if rss_after.available and rss_after.peak_rss_kib is not None
+            else 0.0
+        ),
+        "rss_current_kib": (
+            rss_after.current_rss_kib
+            if rss_after.available and rss_after.current_rss_kib is not None
+            else 0.0
+        ),
+        "start_sync_skew_ms": round(start_sync_skew_ms, 3),
+        "late_start_sync": late_start_sync,
+    }
+    sys.stdout.write(json.dumps(result_payload) + "\n")
+    sys.stdout.flush()
+    return 0
+
+
+def run_client_worker_subprocess() -> int:
+    """Entrypoint for client worker subprocess reading config from stdin."""
+    init_line = sys.stdin.readline()
+    if not init_line:
+        return 1
+    try:
+        raw_config = json.loads(init_line)
+        if not isinstance(raw_config, dict):
+            raise ValueError("Client worker init payload must be a JSON object")
+        return asyncio.run(_client_worker_subprocess_async(raw_config))
+    except Exception as exc:
+        safe_diag = format_safe_worker_error(exc)
+        err_msg = {"event": "error", "error": f"Worker process error: {safe_diag}"}
+        sys.stdout.write(json.dumps(err_msg) + "\n")
+        sys.stdout.flush()
+        return 1
+
+
+async def _run_multi_process_client_workers(
+    *,
+    client_workers: int,
+    call_specs: list[tuple[int, str, str, str, float]],
+    ws_url: str,
+    frames_per_call: int,
+    interval_ms: float,
+    seed: int,
+    pattern: str,
+    skip_threshold_ms: float | None,
+    timeout: float,
+    latency_window_capacity: int,
+    start_lead_time_s: float = 0.050,
+    on_ready_callback: Callable[[], None] | None = None,
+) -> tuple[list[CallMediaRunRecord], list[dict[str, Any]]]:
+    """Execute synthetic calls across multiple client worker child processes."""
+    worker_specs: list[list[dict[str, Any]]] = [[] for _ in range(client_workers)]
+    for i, (slot_id, tenant_id, call_id, token, phase_ms) in enumerate(call_specs):
+        worker_specs[i % client_workers].append(
+            {
+                "slot_id": slot_id,
+                "tenant_id": tenant_id,
+                "call_id": call_id,
+                "token": token,
+                "phase_ms": phase_ms,
+            }
+        )
+
+    repo_dir = Path(__file__).resolve().parent.parent
+    src_dir = repo_dir / "src"
+    env = dict(os.environ)
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(
+        [p for p in (str(src_dir), str(repo_dir), existing_pythonpath) if p]
+    )
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "tools.synthetic_media_load",
+        "--client-worker-subprocess",
+    ]
+    procs: list[asyncio.subprocess.Process] = []
+    try:
+        for _ in range(client_workers):
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=16 * 1024 * 1024,
+                cwd=str(repo_dir),
+                env=env,
+            )
+            procs.append(proc)
+
+        # Write config to each worker
+        for w_idx, proc in enumerate(procs):
+            assert proc.stdin is not None
+            config_payload = {
+                "worker_index": w_idx,
+                "ws_url": ws_url,
+                "frames_per_call": frames_per_call,
+                "interval_ms": interval_ms,
+                "seed": seed,
+                "pattern": pattern,
+                "skip_threshold_ms": skip_threshold_ms,
+                "timeout": timeout,
+                "latency_window_capacity": latency_window_capacity,
+                "calls": worker_specs[w_idx],
+            }
+            proc.stdin.write(json.dumps(config_payload).encode("utf-8") + b"\n")
+            await proc.stdin.drain()
+
+        # Wait for ready signal from all workers
+        async def _read_ready(proc: asyncio.subprocess.Process, idx: int) -> dict[str, Any]:
+            assert proc.stdout is not None
+            line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout + 15.0)
+            if not line:
+                has_stderr = False
+                if proc.stderr:
+                    with contextlib.suppress(Exception):
+                        raw_err = await asyncio.wait_for(proc.stderr.read(), timeout=1.0)
+                        has_stderr = bool(raw_err and raw_err.strip())
+                err_detail = "stderr recorded" if has_stderr else "no stderr"
+                returncode_str = (
+                    str(proc.returncode) if proc.returncode is not None else "terminated"
+                )
+                raise RuntimeError(
+                    f"Client worker {idx} exited prematurely without ready "
+                    f"(returncode: {returncode_str}, {err_detail})"
+                )
+            try:
+                raw_payload = json.loads(line.decode("utf-8"))
+            except Exception as err:
+                raise RuntimeError(
+                    f"Client worker {idx} emitted malformed IPC during ready phase (JSONDecodeError)"
+                ) from err
+            if not isinstance(raw_payload, dict):
+                raise RuntimeError(
+                    f"Client worker {idx} emitted non-dict IPC payload during ready phase"
+                )
+            msg = raw_payload
+            if msg.get("event") == "error":
+                err_desc = sanitize_ipc_error_string(msg.get("error"))
+                raise RuntimeError(f"Client worker {idx} reported error: {err_desc}")
+            if msg.get("event") != "ready":
+                event_name = _normalize_ipc_event_name(msg.get("event"))
+                raise RuntimeError(
+                    f"Client worker {idx} returned unexpected event during ready phase: {event_name!r}"
+                )
+            return msg
+
+        await asyncio.gather(*[_read_ready(p, i) for i, p in enumerate(procs)])
+
+        if on_ready_callback is not None:
+            on_ready_callback()
+
+        # Coordinated monotonic start epoch with bounded future lead time
+        lead_time = max(0.0, float(start_lead_time_s))
+        shared_epoch_s = time.perf_counter() + lead_time
+
+        # Send start signal to all workers
+        for proc in procs:
+            assert proc.stdin is not None
+            proc.stdin.write(
+                json.dumps(
+                    {
+                        "event": "start",
+                        "shared_epoch_s": shared_epoch_s,
+                        "lead_time_s": lead_time,
+                    }
+                ).encode("utf-8")
+                + b"\n"
+            )
+            await proc.stdin.drain()
+
+        # Wait for done signal from all workers
+        max_duration = timeout + (frames_per_call * interval_ms / 1000.0) + 30.0
+
+        async def _read_done(proc: asyncio.subprocess.Process, idx: int) -> dict[str, Any]:
+            assert proc.stdout is not None
+            line = await asyncio.wait_for(proc.stdout.readline(), timeout=max_duration)
+            if not line:
+                has_stderr = False
+                if proc.stderr:
+                    with contextlib.suppress(Exception):
+                        raw_err = await asyncio.wait_for(proc.stderr.read(), timeout=1.0)
+                        has_stderr = bool(raw_err and raw_err.strip())
+                err_detail = "stderr recorded" if has_stderr else "no stderr"
+                returncode_str = (
+                    str(proc.returncode) if proc.returncode is not None else "terminated"
+                )
+                raise RuntimeError(
+                    f"Client worker {idx} exited prematurely without done "
+                    f"(returncode: {returncode_str}, {err_detail})"
+                )
+            try:
+                raw_payload = json.loads(line.decode("utf-8"))
+            except Exception as err:
+                raise RuntimeError(
+                    f"Client worker {idx} emitted malformed IPC during completion phase (JSONDecodeError)"
+                ) from err
+            if not isinstance(raw_payload, dict):
+                raise RuntimeError(
+                    f"Client worker {idx} emitted non-dict IPC payload during completion phase"
+                )
+            msg = raw_payload
+            if msg.get("event") == "error":
+                partial_recs: list[CallMediaRunRecord] = []
+                records_val = msg.get("records")
+                if isinstance(records_val, list):
+                    for r in records_val:
+                        if isinstance(r, dict):
+                            with contextlib.suppress(Exception):
+                                partial_recs.append(CallMediaRunRecord.from_dict(r))
+                err_desc = sanitize_ipc_error_string(msg.get("error"))
+                raise ClientWorkerExecutionError(
+                    f"Client worker {idx} reported failure: {err_desc}",
+                    partial_records=partial_recs,
+                )
+            if msg.get("event") != "done":
+                event_name = _normalize_ipc_event_name(msg.get("event"))
+                raise RuntimeError(
+                    f"Client worker {idx} returned unexpected event during completion phase: {event_name!r}"
+                )
+            return msg
+
+        done_results = await asyncio.gather(*[_read_done(p, i) for i, p in enumerate(procs)])
+
+        # Await clean worker termination
+        await asyncio.gather(*[p.wait() for p in procs])
+
+        records: list[CallMediaRunRecord] = []
+        worker_diagnostics: list[dict[str, Any]] = []
+        for res in done_results:
+            for r_dict in res.get("records", []):
+                records.append(CallMediaRunRecord.from_dict(r_dict))
+            worker_diagnostics.append(
+                {
+                    "worker_index": res.get("worker_index"),
+                    "cpu_duration_s": float(res.get("cpu_duration_s", 0.0)),
+                    "rss_peak_kib": float(res.get("rss_peak_kib", 0.0)),
+                    "rss_current_kib": float(res.get("rss_current_kib", 0.0)),
+                    "start_sync_skew_ms": res.get("start_sync_skew_ms"),
+                    "late_start_sync": bool(res.get("late_start_sync", False)),
+                    "worker_lag": res.get("worker_lag", {}),
+                }
+            )
+
+        # Sort records by session_slot_id to guarantee deterministic ordering
+        records.sort(key=lambda r: r.session_slot_id)
+        return records, worker_diagnostics
+    finally:
+        for p in procs:
+            if p.returncode is None:
+                with contextlib.suppress(Exception):
+                    p.kill()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(p.wait(), timeout=2.0)
+
+
 async def run_paced_media_stage(
     *,
     stage_name: str,
@@ -2203,6 +2906,7 @@ async def run_paced_media_stage(
     timeout: float = 20.0,
     isolation_mode: str = ISOLATION_MODE_PROCESS_ISOLATED,
     scheduling_mode: str = SCHEDULING_MODE_ALIGNED,
+    client_workers: int = 1,
 ) -> PacedStageResult:
     """Run a synchronized, 20 ms-paced synthetic media stage at `concurrency` simultaneous calls."""
     if isolation_mode not in SUPPORTED_ISOLATION_MODES:
@@ -2212,6 +2916,17 @@ async def run_paced_media_stage(
     if scheduling_mode not in SUPPORTED_SCHEDULING_MODES:
         raise ValueError(
             f"Unsupported scheduling_mode {scheduling_mode!r}; must be one of {SUPPORTED_SCHEDULING_MODES}"
+        )
+
+    if isinstance(client_workers, bool) or not isinstance(client_workers, int):
+        raise TypeError(
+            f"client_workers must be a positive integer, not bool or {type(client_workers).__name__}"
+        )
+    if client_workers <= 0:
+        raise ValueError(f"client_workers must be a positive integer, got {client_workers!r}")
+    if client_workers > concurrency:
+        raise ValueError(
+            f"client_workers ({client_workers}) cannot exceed concurrency ({concurrency})"
         )
 
     if pacing_criteria is not None and not isinstance(pacing_criteria, PacingAcceptanceCriteria):
@@ -2313,9 +3028,6 @@ async def run_paced_media_stage(
 
     async with server_cm as server_ctx:
         ws_url = f"{server_ctx.ws_base_url}{SYNTHETIC_MEDIA_WS_ENDPOINT_PATH}"
-        barrier = asyncio.Barrier(concurrency + 1)
-        epoch_ready_event = asyncio.Event()
-        shared_epoch_holder: list[float] = []
         lag_monitor = EventLoopLagMonitor(
             probe_interval_s=0.010,
             window_capacity=latency_window_capacity,
@@ -2344,91 +3056,150 @@ async def run_paced_media_stage(
                 call_specs.append((slot_counter, tenant_id, call_id, token, phase_ms))
                 slot_counter += 1
 
-        async def _client_worker(slot_id: int, call_id: str, tok: str, phase_ms: float) -> None:
-            nonlocal unexpected_rejections, unexpected_disconnects
+        worker_diagnostics: list[dict[str, Any]] = []
+        if client_workers > 1:
+
+            def _on_ready() -> None:
+                nonlocal \
+                    admitted_at_barrier, \
+                    active_calls_at_barrier, \
+                    active_voice_at_barrier, \
+                    achieved_media_concurrency
+                if isinstance(server_ctx, RunningMediaServerContext):
+                    snap_mid = server_ctx.controller.snapshot()
+                    admitted_at_barrier = snap_mid.active_connections
+                    active_calls_at_barrier = len(server_ctx.auth_bridge._active_calls)
+                    active_voice_at_barrier = server_ctx.telemetry_sink.active_sessions
+                    achieved_media_concurrency = min(
+                        admitted_at_barrier,
+                        active_calls_at_barrier,
+                        active_voice_at_barrier,
+                    )
+                else:
+                    admitted_at_barrier = concurrency
+                    active_calls_at_barrier = concurrency
+                    active_voice_at_barrier = concurrency
+                    achieved_media_concurrency = concurrency
+
             try:
-                rec = await run_single_paced_media_call(
+                worker_records, worker_diagnostics = await _run_multi_process_client_workers(
+                    client_workers=client_workers,
+                    call_specs=call_specs,
                     ws_url=ws_url,
-                    token=tok,
-                    call_id=call_id,
-                    session_slot_id=slot_id,
-                    frames_to_schedule=frames_per_call,
+                    frames_per_call=frames_per_call,
                     interval_ms=interval_ms,
                     seed=seed,
                     pattern=pattern,
                     skip_threshold_ms=skip_threshold_ms,
-                    phase_offset_ms=phase_ms,
-                    start_barrier=barrier,
-                    shared_epoch_holder=shared_epoch_holder,
-                    epoch_ready_event=epoch_ready_event,
                     timeout=timeout,
                     latency_window_capacity=latency_window_capacity,
+                    on_ready_callback=_on_ready,
                 )
-                records.append(rec)
-            except websockets.exceptions.InvalidStatus as err:
-                unexpected_rejections += 1
-                with contextlib.suppress(Exception):
-                    await barrier.abort()
-                raise RuntimeError(f"Unexpected HTTP handshake rejection: {err}") from err
-            except websockets.exceptions.ConnectionClosed as err:
-                if err.rcvd is not None and err.rcvd.code == 1008:
-                    unexpected_rejections += 1
+                records.extend(worker_records)
+                if achieved_media_concurrency != concurrency:
+                    failure_reasons.append(
+                        f"Achieved active media concurrency ({achieved_media_concurrency}) "
+                        f"did not match requested concurrency ({concurrency})"
+                    )
+            except Exception as err:
+                partial = getattr(err, "partial_records", None)
+                if partial and isinstance(partial, list):
+                    records.extend(partial)
+                if isinstance(err, (ClientWorkerExecutionError, RuntimeError)):
+                    failure_reasons.append(f"Multi-process client workers failed: {err}")
                 else:
+                    safe_diag = format_safe_worker_error(err)
+                    failure_reasons.append(f"Multi-process client workers failed: {safe_diag}")
+        else:
+            barrier = asyncio.Barrier(concurrency + 1)
+            epoch_ready_event = asyncio.Event()
+            shared_epoch_holder: list[float] = []
+
+            async def _client_worker(slot_id: int, call_id: str, tok: str, phase_ms: float) -> None:
+                nonlocal unexpected_rejections, unexpected_disconnects
+                try:
+                    rec = await run_single_paced_media_call(
+                        ws_url=ws_url,
+                        token=tok,
+                        call_id=call_id,
+                        session_slot_id=slot_id,
+                        frames_to_schedule=frames_per_call,
+                        interval_ms=interval_ms,
+                        seed=seed,
+                        pattern=pattern,
+                        skip_threshold_ms=skip_threshold_ms,
+                        phase_offset_ms=phase_ms,
+                        start_barrier=barrier,
+                        shared_epoch_holder=shared_epoch_holder,
+                        epoch_ready_event=epoch_ready_event,
+                        timeout=timeout,
+                        latency_window_capacity=latency_window_capacity,
+                    )
+                    records.append(rec)
+                except websockets.exceptions.InvalidStatus as err:
+                    unexpected_rejections += 1
+                    with contextlib.suppress(Exception):
+                        await barrier.abort()
+                    raise RuntimeError(f"Unexpected HTTP handshake rejection: {err}") from err
+                except websockets.exceptions.ConnectionClosed as err:
+                    if err.rcvd is not None and err.rcvd.code == 1008:
+                        unexpected_rejections += 1
+                    else:
+                        unexpected_disconnects += 1
+                    with contextlib.suppress(Exception):
+                        await barrier.abort()
+                    raise
+                except Exception:
                     unexpected_disconnects += 1
+                    with contextlib.suppress(Exception):
+                        await barrier.abort()
+                    raise
+
+            client_tasks = [
+                asyncio.create_task(
+                    _client_worker(slot_id, call_id, tok, phase_ms),
+                    name=f"paced-client-{stage_name}-{slot_id}",
+                )
+                for slot_id, _, call_id, tok, phase_ms in call_specs
+            ]
+
+            try:
+                await asyncio.wait_for(barrier.wait(), timeout=timeout)
+                shared_epoch_holder.append(time.perf_counter())
+                epoch_ready_event.set()
+                if isinstance(server_ctx, RunningMediaServerContext):
+                    snap_mid = server_ctx.controller.snapshot()
+                    admitted_at_barrier = snap_mid.active_connections
+                    active_calls_at_barrier = len(server_ctx.auth_bridge._active_calls)
+                    active_voice_at_barrier = server_ctx.telemetry_sink.active_sessions
+                    achieved_media_concurrency = min(
+                        admitted_at_barrier,
+                        active_calls_at_barrier,
+                        active_voice_at_barrier,
+                    )
+                else:
+                    admitted_at_barrier = concurrency
+                    active_calls_at_barrier = concurrency
+                    active_voice_at_barrier = concurrency
+                    achieved_media_concurrency = concurrency
+
+                if achieved_media_concurrency != concurrency:
+                    failure_reasons.append(
+                        f"Achieved active media concurrency ({achieved_media_concurrency}) "
+                        f"did not match requested concurrency ({concurrency})"
+                    )
+            except (TimeoutError, asyncio.BrokenBarrierError) as err:
+                failure_reasons.append(f"Concurrency start barrier failed: {type(err).__name__}")
                 with contextlib.suppress(Exception):
                     await barrier.abort()
-                raise
-            except Exception:
-                unexpected_disconnects += 1
-                with contextlib.suppress(Exception):
-                    await barrier.abort()
-                raise
+                for t in client_tasks:
+                    if not t.done():
+                        t.cancel()
 
-        client_tasks = [
-            asyncio.create_task(
-                _client_worker(slot_id, call_id, tok, phase_ms),
-                name=f"paced-client-{stage_name}-{slot_id}",
-            )
-            for slot_id, _, call_id, tok, phase_ms in call_specs
-        ]
-
-        try:
-            await asyncio.wait_for(barrier.wait(), timeout=timeout)
-            shared_epoch_holder.append(time.perf_counter())
-            epoch_ready_event.set()
-            if isinstance(server_ctx, RunningMediaServerContext):
-                snap_mid = server_ctx.controller.snapshot()
-                admitted_at_barrier = snap_mid.active_connections
-                active_calls_at_barrier = len(server_ctx.auth_bridge._active_calls)
-                active_voice_at_barrier = server_ctx.telemetry_sink.active_sessions
-                achieved_media_concurrency = min(
-                    admitted_at_barrier,
-                    active_calls_at_barrier,
-                    active_voice_at_barrier,
-                )
-            else:
-                admitted_at_barrier = concurrency
-                active_calls_at_barrier = concurrency
-                active_voice_at_barrier = concurrency
-                achieved_media_concurrency = concurrency
-
-            if achieved_media_concurrency != concurrency:
-                failure_reasons.append(
-                    f"Achieved active media concurrency ({achieved_media_concurrency}) "
-                    f"did not match requested concurrency ({concurrency})"
-                )
-        except (TimeoutError, asyncio.BrokenBarrierError) as err:
-            failure_reasons.append(f"Concurrency start barrier failed: {type(err).__name__}")
-            with contextlib.suppress(Exception):
-                await barrier.abort()
-            for t in client_tasks:
-                if not t.done():
-                    t.cancel()
-
-        task_outcomes = await asyncio.gather(*client_tasks, return_exceptions=True)
-        for outcome in task_outcomes:
-            if isinstance(outcome, Exception):
-                failure_reasons.append(f"Client session failed with {type(outcome).__name__}")
+            task_outcomes = await asyncio.gather(*client_tasks, return_exceptions=True)
+            for outcome in task_outcomes:
+                if isinstance(outcome, Exception):
+                    failure_reasons.append(f"Client session failed with {type(outcome).__name__}")
 
         lag_summary = await lag_monitor.stop()
 
@@ -2525,11 +3296,15 @@ async def run_paced_media_stage(
     t_cpu_end = time.process_time()
     wall_duration_s = max(1e-6, t_wall_end - t_wall_start)
     cpu_duration_s = max(0.0, t_cpu_end - t_cpu_start)
-    total_cpu_duration_s = (
-        cpu_duration_s
-        if isolation_mode == ISOLATION_MODE_IN_PROCESS
-        else cpu_duration_s + server_cpu_duration_s
+    worker_cpu_duration_s = (
+        sum(w.get("cpu_duration_s", 0.0) for w in worker_diagnostics) if client_workers > 1 else 0.0
     )
+    worker_rss_peak_kib = (
+        max([float(w.get("rss_peak_kib", 0.0)) for w in worker_diagnostics] + [0.0])
+        if client_workers > 1
+        else 0.0
+    )
+    total_cpu_duration_s = cpu_duration_s + server_cpu_duration_s + worker_cpu_duration_s
 
     heap_current_bytes, heap_peak_bytes = tracemalloc.get_traced_memory()
     if not was_tracing:
@@ -2627,6 +3402,9 @@ async def run_paced_media_stage(
     all_handshakes = [r.handshake_ms for r in records]
     all_start_rtts = [r.call_start_rtt_ms for r in records]
     all_end_rtts = [r.call_end_rtt_ms for r in records]
+    all_send_waits = [
+        x for r in records for x in getattr(r, "client_socket_send_wait_samples_ms", ())
+    ]
     session_echo_p95s = [
         r.echo_rtt_summary.p95_ms
         for r in records
@@ -2777,11 +3555,25 @@ async def run_paced_media_stage(
     combined_p95_summary = _summarize_samples(combined_session_p95s, window_capacity=None)
 
     client_lag_samples = lag_summary.to_dict().get("raw_samples", [])
-    client_lag_dict = (
-        _summarize_pooled_stage_samples(client_lag_samples)
-        if client_lag_samples
-        else lag_summary.to_dict()
-    )
+    if client_workers > 1 and worker_diagnostics:
+        pooled_worker_lags: list[float] = []
+        for w in worker_diagnostics:
+            raw_s = w.get("worker_lag", {}).get("raw_samples", [])
+            pooled_worker_lags.extend(raw_s)
+        if pooled_worker_lags:
+            client_lag_dict = _summarize_pooled_stage_samples(pooled_worker_lags)
+        else:
+            client_lag_dict = (
+                _summarize_pooled_stage_samples(client_lag_samples)
+                if client_lag_samples
+                else lag_summary.to_dict()
+            )
+    else:
+        client_lag_dict = (
+            _summarize_pooled_stage_samples(client_lag_samples)
+            if client_lag_samples
+            else lag_summary.to_dict()
+        )
     server_lag_samples = server_lag_dict.get("raw_samples", [])
     server_lag_summary_dict = (
         _summarize_pooled_stage_samples(server_lag_samples)
@@ -2792,6 +3584,14 @@ async def run_paced_media_stage(
     timing_ms = {
         "isolation_mode": isolation_mode,
         "scheduling_mode": scheduling_mode,
+        "client_workers": client_workers,
+        "client_socket_send_wait_ms": _summarize_pooled_stage_samples(
+            all_send_waits,
+            note=(
+                "Exact pooled duration in milliseconds spent awaiting client WebSocket send(payload) "
+                "across all sessions in this stage; directly measures client TCP/WebSocket send backpressure."
+            ),
+        ),
         "frame_scheduling_interval_ms": _summarize_pooled_stage_samples(all_intervals),
         "scheduler_lateness_ms": _summarize_pooled_stage_samples(all_lateness),
         "scheduler_jitter_ms": _summarize_pooled_stage_samples(all_jitter),
@@ -2873,8 +3673,10 @@ async def run_paced_media_stage(
     resources = {
         "isolation_mode": isolation_mode,
         "scheduling_mode": scheduling_mode,
+        "client_workers": client_workers,
         "process_cpu_time_seconds": round(total_cpu_duration_s, 4),
         "client_process_cpu_time_seconds": round(cpu_duration_s, 4),
+        "client_worker_cpu_time_seconds": round(worker_cpu_duration_s, 4),
         "server_process_cpu_time_seconds": round(server_cpu_duration_s, 4),
         "wall_clock_duration_seconds": round(wall_duration_s, 4),
         "logical_cpu_count": logical_cpus,
@@ -2882,7 +3684,8 @@ async def run_paced_media_stage(
         "cpu_utilization_pct_all_cores": round(cpu_pct_all_cores, 2),
         "cpu_normalization_note": (
             "cpu_utilization_pct_single_core = (process_cpu_time_seconds / wall_clock_duration_seconds) * 100 "
-            "(100% = 1 logical core); cpu_utilization_pct_all_cores divides by logical_cpu_count."
+            "(100% = 1 logical core equivalent; can exceed 100% across multiple worker/server processes); "
+            "cpu_utilization_pct_all_cores divides by logical_cpu_count."
         ),
         "python_heap_current_kib": round(float(heap_current_bytes) / 1024.0, 2),
         "python_heap_peak_kib": round(float(heap_peak_bytes) / 1024.0, 2),
@@ -2893,10 +3696,15 @@ async def run_paced_media_stage(
         "process_rss_peak_kib": (
             rss_after.peak_rss_kib
             if isolation_mode == ISOLATION_MODE_IN_PROCESS
-            else max(rss_after.peak_rss_kib or 0, server_rss_peak_kib)
+            else max(
+                rss_after.peak_rss_kib or 0, server_rss_peak_kib, int(round(worker_rss_peak_kib))
+            )
         ),
+        "process_rss_peak_note": "Maximum peak RSS observed among individual coordinator, server, and worker child processes.",
         "process_rss_source": rss_after.source,
         "client_rss_peak_kib": rss_after.peak_rss_kib,
+        "client_worker_rss_peak_kib": round(worker_rss_peak_kib, 2),
+        "client_worker_diagnostics": worker_diagnostics if client_workers > 1 else [],
         "server_rss_peak_kib": server_rss_peak_kib,
         "server_rss_after_kib": server_rss_after_kib,
     }
@@ -3827,6 +4635,7 @@ async def execute_media_load_evaluation(
     include_faults: bool = True,
     isolation_mode: str = ISOLATION_MODE_PROCESS_ISOLATED,
     scheduling_mode: str = SCHEDULING_MODE_ALIGNED,
+    client_workers: int = 1,
 ) -> PacedMediaLoadReport:
     """Execute the configured paced media concurrency stages and optional fault suite."""
     effective_max_concurrent = (
@@ -3847,6 +4656,13 @@ async def execute_media_load_evaluation(
     effective_pacing_criteria = (
         pacing_criteria if pacing_criteria is not None else PacingAcceptanceCriteria()
     )
+
+    if isinstance(client_workers, bool) or not isinstance(client_workers, int):
+        raise TypeError(
+            f"client_workers must be a positive integer, not bool or {type(client_workers).__name__}"
+        )
+    if client_workers <= 0:
+        raise ValueError(f"client_workers must be a positive integer, got {client_workers!r}")
 
     if isinstance(effective_max_concurrent, bool) or not isinstance(effective_max_concurrent, int):
         raise TypeError(
@@ -3880,6 +4696,7 @@ async def execute_media_load_evaluation(
     stage_results: list[PacedStageResult] = []
     for idx, conc in enumerate(concurrencies, start=1):
         stage_name = f"S{idx}_concurrency_{conc}"
+        effective_workers = min(client_workers, conc)
         res = await run_paced_media_stage(
             stage_name=stage_name,
             concurrency=conc,
@@ -3895,6 +4712,7 @@ async def execute_media_load_evaluation(
             pacing_criteria=effective_pacing_criteria,
             isolation_mode=isolation_mode,
             scheduling_mode=scheduling_mode,
+            client_workers=effective_workers,
         )
         stage_results.append(res)
 
@@ -3951,6 +4769,7 @@ async def execute_media_load_evaluation(
             "backpressure_timeout_seconds": backpressure_timeout,
             "skip_threshold_ms": skip_threshold_ms,
             "missed_deadline_policy": "monotonic_fixed_schedule_rate_limited_catchup",
+            "client_workers": client_workers,
             "include_faults": include_faults,
             "isolation_mode": isolation_mode,
             "scheduling_mode": scheduling_mode,
@@ -4104,7 +4923,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--max-mean-interval-deviation-pct",
         type=float,
         default=DEFAULT_MAX_MEAN_INTERVAL_DEVIATION_PCT,
-        help=f"Maximum allowed percent deviation of mean interval from nominal (default: {DEFAULT_MAX_MEAN_INTERVAL_DEVIATION_PCT}%).",
+        help=f"Maximum allowed percent deviation of mean interval from nominal (default: {DEFAULT_MAX_MEAN_INTERVAL_DEVIATION_PCT}%%).",
     )
     parser.add_argument(
         "--max-p95-scheduler-lateness-ms",
@@ -4116,7 +4935,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--max-transmission-elongation-pct",
         type=float,
         default=DEFAULT_MAX_TRANSMISSION_ELONGATION_PCT,
-        help=f"Maximum allowed percent elongation of transmission duration (default: {DEFAULT_MAX_TRANSMISSION_ELONGATION_PCT}%).",
+        help=f"Maximum allowed percent elongation of transmission duration (default: {DEFAULT_MAX_TRANSMISSION_ELONGATION_PCT}%%).",
+    )
+    parser.add_argument(
+        "--client-workers",
+        type=int,
+        default=1,
+        help="Number of multi-process client workers to partition concurrent sessions across (default: 1).",
+    )
+    parser.add_argument(
+        "--client-worker-subprocess",
+        action="store_true",
+        help="Internal flag: run as child client worker process communicating via JSON IPC over stdio.",
     )
     return parser
 
@@ -4124,6 +4954,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
+
+    if args.client_worker_subprocess:
+        return run_client_worker_subprocess()
 
     if args.server_subprocess:
         return run_isolated_server_process(
@@ -4184,6 +5017,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else None
             ),
             pacing_criteria=pacing_criteria,
+            client_workers=int(args.client_workers),
         )
     )
 
@@ -4211,15 +5045,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             out_p95 = tm["gateway_outbound_processing_ms"]["p95_ms"]
             echo_p95 = tm["client_synthetic_echo_rtt_ms"]["p95_ms"]
             lag_p95 = tm["event_loop_lag_ms"]["p95_ms"]
-            missed_rate = mc.get("missed_deadline_rate", 0.0)
+            send_wait_p95 = tm.get("client_socket_send_wait_ms", {}).get("p95_ms")
+            raw_missed_rate = mc.get("missed_deadline_rate")
+            missed_rate_str = (
+                f"{raw_missed_rate:.2%}" if isinstance(raw_missed_rate, (int, float)) else "N/A"
+            )
+            workers_count = tm.get("client_workers", 1)
             print(
                 f"[{st.stage_name}] status={st.status} (media={st.media_integrity_status}, pacing={st.realtime_pacing_status}) "
                 f"concurrency={st.achieved_media_concurrency}/{st.requested_concurrency} "
+                f"workers={workers_count} "
                 f"calls={st.completed_calls} sent={mc['frames_sent']} echoed={mc['frames_echoed']} "
-                f"missed_deadlines={mc['missed_deadlines']} ({missed_rate:.2%}) "
+                f"missed_deadlines={mc['missed_deadlines']} ({missed_rate_str}) "
                 f"missing={mc['frames_missing']} dup={mc['duplicate_frames']} "
                 f"ooo={mc['out_of_order_frames']} mismatch={mc['payload_mismatches']} "
                 f"in_p95={in_p95}ms out_p95={out_p95}ms echo_rtt_p95={echo_p95}ms "
+                f"send_wait_p95={send_wait_p95}ms "
                 f"loop_lag_p95={lag_p95}ms cpu_1core={res['cpu_utilization_pct_single_core']}% "
                 f"heap_peak={res['python_heap_peak_kib']}KiB rss_peak={res['process_rss_peak_kib']}KiB"
             )
