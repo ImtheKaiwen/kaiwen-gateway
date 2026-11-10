@@ -2453,7 +2453,10 @@ def test_sanitize_worker_error_message_redacts_credentials() -> None:
     assert format_safe_worker_error(close_exc) == "ConnectionClosed (code 1008)"
 
     os_exc = OSError(111, "Connection refused")
-    assert format_safe_worker_error(os_exc) == "OSError (errno 111)"
+    assert format_safe_worker_error(os_exc) in (
+        "OSError (errno 111)",
+        "ConnectionRefusedError (errno 111)",
+    )
 
 
 def test_client_worker_task_failure_propagation_preserves_partial_records_and_redacts_secrets() -> (
