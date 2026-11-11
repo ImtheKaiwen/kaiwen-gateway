@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import statistics
 import sys
 from collections.abc import Mapping, Sequence
@@ -38,6 +39,24 @@ REQUIRED_CLEANUP_COUNTERS = (
     "final_active_calls",
     "final_active_voice_sessions",
     "leaked_asyncio_tasks",
+)
+
+SENSITIVE_KEY_SUBSTRINGS = (
+    "password",
+    "secret",
+    "private_key",
+    "api_key",
+    "auth_token",
+    "access_token",
+    "refresh_token",
+)
+
+SENSITIVE_VALUE_PATTERNS = (
+    re.compile(r"(?i)bearer\s+[a-z0-9_\-\.]{10,}"),
+    re.compile(r"(?i)basic\s+[a-z0-9+/=]{10,}"),
+    re.compile(r"ghp_[A-Za-z0-9_]{20,}"),
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),
+    re.compile(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----"),
 )
 
 
@@ -123,6 +142,40 @@ class ConfigurationSummary:
     trial_files: tuple[str, ...]
 
 
+def scan_for_sensitive_data(obj: Any, path: str = "") -> tuple[int, list[str]]:
+    """Recursively scan an object for sensitive keys and credential patterns.
+
+    Returns:
+        (scanned_field_count, list_of_findings)
+    """
+    scanned_count = 0
+    findings: list[str] = []
+
+    if isinstance(obj, Mapping):
+        for key, val in obj.items():
+            scanned_count += 1
+            cur_path = f"{path}.{key}" if path else str(key)
+            lower_key = str(key).lower()
+            for forbidden_key in SENSITIVE_KEY_SUBSTRINGS:
+                if forbidden_key in lower_key:
+                    findings.append(f"Suspicious key {cur_path!r} contains {forbidden_key!r}")
+            sub_count, sub_findings = scan_for_sensitive_data(val, cur_path)
+            scanned_count += sub_count
+            findings.extend(sub_findings)
+    elif isinstance(obj, (list, tuple)):
+        for idx, item in enumerate(obj):
+            sub_count, sub_findings = scan_for_sensitive_data(item, f"{path}[{idx}]")
+            scanned_count += sub_count
+            findings.extend(sub_findings)
+    elif isinstance(obj, str):
+        scanned_count += 1
+        for pattern in SENSITIVE_VALUE_PATTERNS:
+            if pattern.search(obj):
+                findings.append(f"Sensitive pattern match {pattern.pattern!r} found at {path}")
+
+    return scanned_count, findings
+
+
 def compute_file_sha256(path: Path | str) -> str:
     """Compute hex SHA-256 digest of a file."""
     h = hashlib.sha256()
@@ -178,9 +231,7 @@ def extract_stage_snapshot(
 
     validation_errors: list[str] = []
 
-    # --- Phase A1: Strict cleanup verification ---
-    # Actual schema: final_active_connections, final_active_tenants, final_active_calls,
-    # final_active_voice_sessions, leaked_asyncio_tasks (all must be 0) and cleanup_failures == 0.
+    # --- Strict cleanup verification ---
     cleanup_success = True
     if not isinstance(cl, dict):
         cleanup_success = False
@@ -205,7 +256,7 @@ def extract_stage_snapshot(
             f"media_correctness cleanup_failures={mc['cleanup_failures']!r} (expected 0)"
         )
 
-    # --- Phase A2: CPU / RSS extraction ---
+    # --- CPU / RSS extraction ---
     server_rss: float | None = None
     server_cpu: float | None = None
     if isinstance(res, dict):
@@ -225,7 +276,7 @@ def extract_stage_snapshot(
         ):
             server_cpu = (float(srv_time) / float(wall_time)) * 100.0
 
-    # --- Phase A3: Required latencies extraction ---
+    # --- Required latencies extraction ---
     def _extract_metric_p95(obj: Any) -> float | None:
         if isinstance(obj, dict) and obj.get("available") is True:
             val = obj.get("p95_ms")
@@ -237,7 +288,6 @@ def extract_stage_snapshot(
     echo_rtt = _extract_metric_p95(tm.get("client_synthetic_echo_rtt_ms"))
     client_send_wait = _extract_metric_p95(tm.get("client_socket_send_wait_ms"))
 
-    # Event loop lag: check event_loop_lag_ms or client_event_loop_lag_ms
     client_loop_lag = _extract_metric_p95(tm.get("event_loop_lag_ms"))
     if client_loop_lag is None:
         client_loop_lag = _extract_metric_p95(tm.get("client_event_loop_lag_ms"))
@@ -259,7 +309,7 @@ def extract_stage_snapshot(
     if gw_loop_lag is None:
         gw_loop_lag = _extract_metric_p95(tm.get("server_event_loop_lag_ms"))
 
-    # --- Phase A4: Frame accounting and status consistency ---
+    # --- Frame accounting and status consistency ---
     frames_scheduled = int(mc.get("frames_scheduled", 0))
     frames_sent = int(mc.get("frames_sent", 0))
     frames_skipped = int(mc.get("frames_skipped", 0))
@@ -308,7 +358,6 @@ def extract_stage_snapshot(
     media_st = str(st.get("media_integrity_status", ""))
     pacing_st = str(st.get("realtime_pacing_status", ""))
 
-    # Status consistency checks
     if overall_st == "PASS":
         if media_st != "PASS" or pacing_st != "PASS":
             validation_errors.append(
@@ -438,7 +487,6 @@ def aggregate_configuration_trials(
     pacing_pass_count = sum(1 for s in snapshots if s.realtime_pacing_status == "PASS")
     cleanup_pass_count = sum(1 for s in snapshots if s.cleanup_success)
 
-    # Classification rules:
     if invalid_count > 0:
         classification = CLASSIFICATION_INVALID_EXPERIMENT
     elif trial_count >= 3 and pass_count == trial_count and cleanup_pass_count == trial_count:
@@ -448,7 +496,6 @@ def aggregate_configuration_trials(
     elif 0 < pass_count < trial_count:
         classification = CLASSIFICATION_MIXED_RESULTS
     elif trial_count < 3 and pass_count == trial_count:
-        # Less than 3 trials cannot be certified as REPEATABLY_PASSING
         classification = CLASSIFICATION_MIXED_RESULTS
     else:
         classification = CLASSIFICATION_INVALID_EXPERIMENT
@@ -537,6 +584,7 @@ def format_markdown_summary_table(summaries: Sequence[ConfigurationSummary]) -> 
         "Classification",
         "Missed DL % (Med/Worst)",
         "Sched Late p95 ms (Med/Worst)",
+        "Echo RTT p95 ms (Med/Worst)",
         "GW In Q Wait p95 ms",
         "GW Out Q Wait p95 ms",
         "GW In Proc p95 ms",
@@ -574,6 +622,11 @@ def format_markdown_summary_table(summaries: Sequence[ConfigurationSummary]) -> 
             if s.median_p95_scheduler_lateness_ms is not None
             else "N/A"
         )
+        echo_rtt = (
+            f"{s.median_p95_echo_rtt_ms:.1f} / {s.worst_p95_echo_rtt_ms:.1f}"
+            if s.median_p95_echo_rtt_ms is not None
+            else "N/A"
+        )
         client_lag = (
             f"{s.median_p95_client_loop_lag_ms:.1f}"
             if s.median_p95_client_loop_lag_ms is not None
@@ -587,6 +640,7 @@ def format_markdown_summary_table(summaries: Sequence[ConfigurationSummary]) -> 
             f"`{s.classification}`",
             f"{s.median_missed_deadline_rate_pct:.2f}% / {s.worst_missed_deadline_rate_pct:.2f}%",
             sched_late,
+            echo_rtt,
             in_q,
             out_q,
             in_proc,
@@ -600,7 +654,7 @@ def format_markdown_summary_table(summaries: Sequence[ConfigurationSummary]) -> 
 
 def process_report_files(
     paths: Sequence[Path | str],
-) -> tuple[list[ConfigurationSummary], list[TrialMetricSnapshot]]:
+) -> tuple[list[ConfigurationSummary], list[TrialMetricSnapshot], dict[str, dict[str, Any]]]:
     """Load, validate, and aggregate a collection of report file paths.
 
     Validates that report file paths and contents (SHA-256) are non-duplicate.
@@ -609,6 +663,7 @@ def process_report_files(
     seen_hashes: dict[str, str] = {}
     snapshots_by_config: dict[tuple[int, int], list[TrialMetricSnapshot]] = {}
     all_snapshots: list[TrialMetricSnapshot] = []
+    raw_reports: dict[str, dict[str, Any]] = {}
 
     for p in paths:
         path_obj = Path(p).resolve()
@@ -624,6 +679,7 @@ def process_report_files(
         seen_hashes[sha] = path_obj.name
 
         report = load_and_validate_report(path_obj)
+        raw_reports[path_obj.name] = report
         for stage_idx in range(len(report.get("stages", []))):
             snap = extract_stage_snapshot(
                 path_obj.name, report, stage_index=stage_idx, file_sha256=sha
@@ -637,12 +693,13 @@ def process_report_files(
         summary = aggregate_configuration_trials(snapshots_by_config[key])
         summaries.append(summary)
 
-    return summaries, all_snapshots
+    return summaries, all_snapshots, raw_reports
 
 
 def build_qualification_manifest(
     snapshots: Sequence[TrialMetricSnapshot],
     summaries: Sequence[ConfigurationSummary],
+    raw_reports: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a reviewable qualification manifest mapping trial files to metadata and metrics."""
     if not snapshots:
@@ -656,13 +713,14 @@ def build_qualification_manifest(
         max_conn = max(25, s.requested_concurrency)
         reconstructed_cli = (
             f"uv run python -m tools.synthetic_media_load "
-            f"--concurrencies {s.requested_concurrency} "
+            f"--concurrency {s.requested_concurrency} "
             f"--client-workers {s.client_workers} "
             f"--duration {s.duration_s} "
             f"--interval-ms {s.interval_ms} "
             f"--max-concurrent-connections {max_conn} "
             f"--max-connections-per-tenant 10 "
-            f"--report-output reports/{s.filename}"
+            f"--no-faults "
+            f"--output reports/{s.filename}"
         )
         trials_manifest.append(
             {
@@ -706,6 +764,27 @@ def build_qualification_manifest(
     all_cleanups_clean = all(s.cleanup_success for s in snapshots)
     all_experiments_valid = all(s.is_valid_experiment for s in snapshots)
 
+    total_scanned_fields = 0
+    all_sensitive_findings: list[str] = []
+    if raw_reports:
+        for fname, r_dict in raw_reports.items():
+            scanned, findings = scan_for_sensitive_data(r_dict)
+            total_scanned_fields += scanned
+            for f in findings:
+                all_sensitive_findings.append(f"[{fname}] {f}")
+
+    sensitive_validation = {
+        "status": "VALIDATED_CLEAN" if not all_sensitive_findings else "FINDINGS_DETECTED",
+        "scanned_fields_count": total_scanned_fields,
+        "findings_count": len(all_sensitive_findings),
+        "findings": all_sensitive_findings,
+        "scan_limitations": (
+            "Rule-based heuristic pattern matching across all JSON keys and string values "
+            "for known credential, secret, API token, and authorization header formats. "
+            "Does not perform semantic NLP or offline entity extraction."
+        ),
+    }
+
     return {
         "manifest_version": "1.0.0",
         "generated_at_utc": datetime.now(UTC).isoformat(),
@@ -714,13 +793,13 @@ def build_qualification_manifest(
             "os_platform": common_platform,
             "total_trials": len(snapshots),
             "configuration_groups": len(summaries),
-            "sensitive_data_scan": "PASSED (zero tokens, credentials, or raw audio payloads)",
         },
         "integrity_verification": {
             "all_sha256_unique": all_unique_hashes,
             "all_cleanups_clean": all_cleanups_clean,
             "all_experiments_valid": all_experiments_valid,
         },
+        "sensitive_data_validation": sensitive_validation,
         "trials": trials_manifest,
     }
 
@@ -776,7 +855,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     try:
-        summaries, snapshots = process_report_files(resolved_paths)
+        summaries, snapshots, raw_reports = process_report_files(resolved_paths)
     except Exception as exc:
         sys.stderr.write(f"Aggregation failed: {exc}\n")
         return 1
@@ -797,7 +876,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         out_p.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     if args.manifest_output:
-        manifest_payload = build_qualification_manifest(snapshots, summaries)
+        manifest_payload = build_qualification_manifest(
+            snapshots, summaries, raw_reports=raw_reports
+        )
         manifest_p = Path(args.manifest_output)
         manifest_p.parent.mkdir(parents=True, exist_ok=True)
         manifest_p.write_text(json.dumps(manifest_payload, indent=2) + "\n", encoding="utf-8")

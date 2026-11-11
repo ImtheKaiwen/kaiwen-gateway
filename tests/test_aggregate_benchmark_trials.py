@@ -1,6 +1,7 @@
 """Unit tests for offline multi-trial benchmark aggregator (tools.aggregate_benchmark_trials)."""
 
 import json
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,9 @@ from tools.aggregate_benchmark_trials import (
     extract_stage_snapshot,
     load_and_validate_report,
     process_report_files,
+    scan_for_sensitive_data,
 )
+from tools.synthetic_media_load import _build_arg_parser
 
 
 def _make_dummy_report(
@@ -251,7 +254,6 @@ def test_required_latencies_and_no_zero_substitution() -> None:
 
 
 def test_frame_accounting_violations() -> None:
-    # scheduled != sent + skipped
     rep = _make_dummy_report(frames_skipped=10)
     rep["stages"][0]["media_correctness"]["frames_scheduled"] = 100
     rep["stages"][0]["media_correctness"]["frames_sent"] = 50
@@ -264,7 +266,6 @@ def test_frame_accounting_violations() -> None:
 
 
 def test_status_contradiction_detection() -> None:
-    # Report claims PASS but cleanup failed
     rep = _make_dummy_report(status="PASS", leaked_tasks=2)
     snap = extract_stage_snapshot("contradiction.json", rep, stage_index=0)
     assert snap.is_valid_experiment is False
@@ -338,16 +339,16 @@ def test_process_report_files_duplicate_content(tmp_path: Path) -> None:
         process_report_files([p1, p2])
 
 
-def test_manifest_building(tmp_path: Path) -> None:
+def test_manifest_building_and_cli_reconstruction(tmp_path: Path) -> None:
     paths = []
     for i in range(3):
-        rep = _make_dummy_report(concurrency=10, workers=1, lateness=10.0 + i)
+        rep = _make_dummy_report(concurrency=10, workers=2, lateness=10.0 + i)
         p = tmp_path / f"trial_manifest_{i}.json"
         p.write_text(json.dumps(rep), encoding="utf-8")
         paths.append(p)
 
-    summaries, snapshots = process_report_files(paths)
-    manifest = build_qualification_manifest(snapshots, summaries)
+    summaries, snapshots, raw_reports = process_report_files(paths)
+    manifest = build_qualification_manifest(snapshots, summaries, raw_reports=raw_reports)
 
     assert manifest["manifest_version"] == "1.0.0"
     assert manifest["integrity_verification"]["all_sha256_unique"] is True
@@ -355,3 +356,45 @@ def test_manifest_building(tmp_path: Path) -> None:
     assert manifest["integrity_verification"]["all_experiments_valid"] is True
     assert len(manifest["trials"]) == 3
     assert manifest["provenance"]["git_commit"] == "425a88350803aa42414b81e6cb50f45f62c83f11"
+
+    # Regression test: validate reconstructed CLI command against synthetic_media_load parser
+    parser = _build_arg_parser()
+    for trial_entry in manifest["trials"]:
+        cli_cmd = trial_entry["reconstructed_cli"]
+        prefix = "uv run python -m tools.synthetic_media_load "
+        assert cli_cmd.startswith(prefix)
+        args_str = cli_cmd[len(prefix) :]
+        parsed_args = parser.parse_args(shlex.split(args_str))
+
+        assert parsed_args.concurrency == trial_entry["concurrency"]
+        assert parsed_args.client_workers == trial_entry["client_workers"]
+        assert parsed_args.duration == trial_entry["duration_seconds"]
+        assert parsed_args.interval_ms == trial_entry["interval_ms"]
+        assert parsed_args.no_faults is True
+        assert parsed_args.output == f"reports/{trial_entry['filename']}"
+
+
+def test_scan_for_sensitive_data() -> None:
+    # 1. Clean data
+    clean_data = {
+        "status": "PASS",
+        "concurrency": 100,
+        "notes": "Regular benchmark output without credentials",
+    }
+    c1, f1 = scan_for_sensitive_data(clean_data)
+    assert c1 > 0
+    assert len(f1) == 0
+
+    # 2. Suspicious key
+    bad_key_data = {
+        "api_key": "mysecret123",
+    }
+    c2, f2 = scan_for_sensitive_data(bad_key_data)
+    assert any("api_key" in f for f in f2)
+
+    # 3. Suspicious token pattern in value
+    bad_token_data = {
+        "header": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.token123",
+    }
+    c3, f3 = scan_for_sensitive_data(bad_token_data)
+    assert any("bearer" in f.lower() for f in f3)

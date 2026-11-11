@@ -1,17 +1,23 @@
 {
   "manifest_version": "1.0.0",
-  "generated_at_utc": "2026-11-11T19:52:11.061203+00:00",
+  "generated_at_utc": "2026-11-11T20:13:29.710123+00:00",
   "provenance": {
     "git_commit": "425a88350803aa42414b81e6cb50f45f62c83f11",
     "os_platform": "Windows-11-10.0.26200-SP0",
     "total_trials": 18,
-    "configuration_groups": 6,
-    "sensitive_data_scan": "PASSED (zero tokens, credentials, or raw audio payloads)"
+    "configuration_groups": 6
   },
   "integrity_verification": {
     "all_sha256_unique": true,
     "all_cleanups_clean": true,
     "all_experiments_valid": true
+  },
+  "sensitive_data_validation": {
+    "status": "VALIDATED_CLEAN",
+    "scanned_fields_count": 13323,
+    "findings_count": 0,
+    "findings": [],
+    "scan_limitations": "Rule-based heuristic pattern matching across all JSON keys and string values for known credential, secret, API token, and authorization header formats. Does not perform semantic NLP or offline entity extraction."
   },
   "trials": [
     {
@@ -29,7 +35,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 100 --client-workers 4 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 100 --max-connections-per-tenant 10 --report-output reports/trial_100_workers_4_run_1.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 100 --client-workers 4 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 100 --max-connections-per-tenant 10 --no-faults --output reports/trial_100_workers_4_run_1.json",
       "metrics": {
         "frames_scheduled": 25000,
         "frames_sent": 25000,
@@ -64,7 +70,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 100 --client-workers 4 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 100 --max-connections-per-tenant 10 --report-output reports/trial_100_workers_4_run_2.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 100 --client-workers 4 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 100 --max-connections-per-tenant 10 --no-faults --output reports/trial_100_workers_4_run_2.json",
       "metrics": {
         "frames_scheduled": 25000,
         "frames_sent": 25000,
@@ -99,7 +105,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 100 --client-workers 4 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 100 --max-connections-per-tenant 10 --report-output reports/trial_100_workers_4_run_3.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 100 --client-workers 4 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 100 --max-connections-per-tenant 10 --no-faults --output reports/trial_100_workers_4_run_3.json",
       "metrics": {
         "frames_scheduled": 25000,
         "frames_sent": 25000,
@@ -134,7 +140,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 1 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --report-output reports/trial_1_workers_1_run_1.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 1 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --no-faults --output reports/trial_1_workers_1_run_1.json",
       "metrics": {
         "frames_scheduled": 250,
         "frames_sent": 250,
@@ -169,7 +175,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 1 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --report-output reports/trial_1_workers_1_run_2.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 1 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --no-faults --output reports/trial_1_workers_1_run_2.json",
       "metrics": {
         "frames_scheduled": 250,
         "frames_sent": 250,
@@ -204,7 +210,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 1 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --report-output reports/trial_1_workers_1_run_3.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 1 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --no-faults --output reports/trial_1_workers_1_run_3.json",
       "metrics": {
         "frames_scheduled": 250,
         "frames_sent": 250,
@@ -239,7 +245,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 25 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --report-output reports/trial_25_workers_1_run_1.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 25 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --no-faults --output reports/trial_25_workers_1_run_1.json",
       "metrics": {
         "frames_scheduled": 6250,
         "frames_sent": 6250,
@@ -274,7 +280,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 25 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --report-output reports/trial_25_workers_1_run_2.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 25 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --no-faults --output reports/trial_25_workers_1_run_2.json",
       "metrics": {
         "frames_scheduled": 6250,
         "frames_sent": 6250,
@@ -309,7 +315,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 25 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --report-output reports/trial_25_workers_1_run_3.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 25 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --no-faults --output reports/trial_25_workers_1_run_3.json",
       "metrics": {
         "frames_scheduled": 6250,
         "frames_sent": 6250,
@@ -344,7 +350,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 25 --client-workers 2 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --report-output reports/trial_25_workers_2_run_1.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 25 --client-workers 2 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --no-faults --output reports/trial_25_workers_2_run_1.json",
       "metrics": {
         "frames_scheduled": 6250,
         "frames_sent": 6250,
@@ -379,7 +385,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 25 --client-workers 2 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --report-output reports/trial_25_workers_2_run_2.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 25 --client-workers 2 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --no-faults --output reports/trial_25_workers_2_run_2.json",
       "metrics": {
         "frames_scheduled": 6250,
         "frames_sent": 6250,
@@ -414,7 +420,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 25 --client-workers 2 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --report-output reports/trial_25_workers_2_run_3.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 25 --client-workers 2 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --no-faults --output reports/trial_25_workers_2_run_3.json",
       "metrics": {
         "frames_scheduled": 6250,
         "frames_sent": 6250,
@@ -449,7 +455,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 50 --client-workers 2 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 50 --max-connections-per-tenant 10 --report-output reports/trial_50_workers_2_run_1.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 50 --client-workers 2 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 50 --max-connections-per-tenant 10 --no-faults --output reports/trial_50_workers_2_run_1.json",
       "metrics": {
         "frames_scheduled": 12500,
         "frames_sent": 12500,
@@ -484,7 +490,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 50 --client-workers 2 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 50 --max-connections-per-tenant 10 --report-output reports/trial_50_workers_2_run_2.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 50 --client-workers 2 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 50 --max-connections-per-tenant 10 --no-faults --output reports/trial_50_workers_2_run_2.json",
       "metrics": {
         "frames_scheduled": 12500,
         "frames_sent": 12500,
@@ -519,7 +525,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 50 --client-workers 2 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 50 --max-connections-per-tenant 10 --report-output reports/trial_50_workers_2_run_3.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 50 --client-workers 2 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 50 --max-connections-per-tenant 10 --no-faults --output reports/trial_50_workers_2_run_3.json",
       "metrics": {
         "frames_scheduled": 12500,
         "frames_sent": 12500,
@@ -554,7 +560,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 5 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --report-output reports/trial_5_workers_1_run_1.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 5 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --no-faults --output reports/trial_5_workers_1_run_1.json",
       "metrics": {
         "frames_scheduled": 1250,
         "frames_sent": 1250,
@@ -589,7 +595,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 5 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --report-output reports/trial_5_workers_1_run_2.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 5 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --no-faults --output reports/trial_5_workers_1_run_2.json",
       "metrics": {
         "frames_scheduled": 1250,
         "frames_sent": 1250,
@@ -624,7 +630,7 @@
       "cleanup_success": true,
       "is_valid_experiment": true,
       "validation_errors": [],
-      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrencies 5 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --report-output reports/trial_5_workers_1_run_3.json",
+      "reconstructed_cli": "uv run python -m tools.synthetic_media_load --concurrency 5 --client-workers 1 --duration 5.0 --interval-ms 20.0 --max-concurrent-connections 25 --max-connections-per-tenant 10 --no-faults --output reports/trial_5_workers_1_run_3.json",
       "metrics": {
         "frames_scheduled": 1250,
         "frames_sent": 1250,
