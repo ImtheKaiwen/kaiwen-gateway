@@ -194,19 +194,23 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
             raise MediaPortClosedError("WebSocketTelephonyMediaAdapter is closed")
 
         try:
-            if self._backpressure_timeout is not None:
-                async with asyncio.timeout(self._backpressure_timeout):
+            self._inbound_queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            try:
+                if self._backpressure_timeout is not None:
+                    async with asyncio.timeout(self._backpressure_timeout):
+                        await self._inbound_queue.put(frame)
+                else:
                     await self._inbound_queue.put(frame)
-            else:
-                await self._inbound_queue.put(frame)
-            depth = self._inbound_queue.qsize()
-            if depth > self._inbound_queue_high_water_mark:
-                self._inbound_queue_high_water_mark = depth
-        except TimeoutError as exc:
-            raise MediaBackpressureOverflowError(
-                f"Inbound media buffer overflowed (capacity={self._queue_capacity}) "
-                f"after {self._backpressure_timeout}s backpressure timeout"
-            ) from exc
+            except TimeoutError as exc:
+                raise MediaBackpressureOverflowError(
+                    f"Inbound media buffer overflowed (capacity={self._queue_capacity}) "
+                    f"after {self._backpressure_timeout}s backpressure timeout"
+                ) from exc
+
+        depth = self._inbound_queue.qsize()
+        if depth > self._inbound_queue_high_water_mark:
+            self._inbound_queue_high_water_mark = depth
 
     async def push_inbound_eof(self, *, timeout: float | None = 2.0) -> None:
         """Signal clean EOF to the inbound pump, waiting if queue is full.

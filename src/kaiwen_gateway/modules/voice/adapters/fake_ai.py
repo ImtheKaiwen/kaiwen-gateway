@@ -144,16 +144,19 @@ class BoundedFakeAIEchoPort(AIRealtimeMediaPort):
 
         # Enqueue with bounded backpressure
         try:
-            if self._backpressure_timeout is not None:
-                async with asyncio.timeout(self._backpressure_timeout):
+            self._output_queue.put_nowait(echo_frame)
+        except asyncio.QueueFull:
+            try:
+                if self._backpressure_timeout is not None:
+                    async with asyncio.timeout(self._backpressure_timeout):
+                        await self._output_queue.put(echo_frame)
+                else:
                     await self._output_queue.put(echo_frame)
-            else:
-                await self._output_queue.put(echo_frame)
-        except TimeoutError as exc:
-            raise MediaBackpressureOverflowError(
-                f"Echo output queue overflowed (capacity={self._queue_capacity}) "
-                f"after {self._backpressure_timeout}s backpressure timeout"
-            ) from exc
+            except TimeoutError as exc:
+                raise MediaBackpressureOverflowError(
+                    f"Echo output queue overflowed (capacity={self._queue_capacity}) "
+                    f"after {self._backpressure_timeout}s backpressure timeout"
+                ) from exc
 
         self._frames_received += 1
         self._bytes_received += len(frame.payload)

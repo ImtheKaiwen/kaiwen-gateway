@@ -1132,19 +1132,22 @@ class VoiceBridgeSession:
 
                 t_pre_enqueue = time.perf_counter()
                 try:
-                    if self._backpressure_timeout is not None:
-                        try:
-                            await asyncio.wait_for(
-                                self._inbound_queue.put(frame),
-                                timeout=self._backpressure_timeout,
-                            )
-                        except TimeoutError as err:
-                            raise MediaBackpressureOverflowError(
-                                f"Inbound queue capacity {self._queue_capacity} exceeded "
-                                f"and backpressure timed out after {self._backpressure_timeout}s"
-                            ) from err
-                    else:
-                        await self._inbound_queue.put(frame)
+                    try:
+                        self._inbound_queue.put_nowait(frame)
+                    except asyncio.QueueFull:
+                        if self._backpressure_timeout is not None:
+                            try:
+                                await asyncio.wait_for(
+                                    self._inbound_queue.put(frame),
+                                    timeout=self._backpressure_timeout,
+                                )
+                            except TimeoutError as err:
+                                raise MediaBackpressureOverflowError(
+                                    f"Inbound queue capacity {self._queue_capacity} exceeded "
+                                    f"and backpressure timed out after {self._backpressure_timeout}s"
+                                ) from err
+                        else:
+                            await self._inbound_queue.put(frame)
                 except (asyncio.CancelledError, Exception):
                     self._unforwarded_inbound_frames += 1
                     raise
@@ -1302,19 +1305,22 @@ class VoiceBridgeSession:
 
                 t_pre_enqueue = time.perf_counter()
                 try:
-                    if self._backpressure_timeout is not None:
-                        try:
-                            await asyncio.wait_for(
-                                self._outbound_queue.put(frame),
-                                timeout=self._backpressure_timeout,
-                            )
-                        except TimeoutError as err:
-                            raise MediaBackpressureOverflowError(
-                                f"Outbound queue capacity {self._queue_capacity} exceeded "
-                                f"and backpressure timed out after {self._backpressure_timeout}s"
-                            ) from err
-                    else:
-                        await self._outbound_queue.put(frame)
+                    try:
+                        self._outbound_queue.put_nowait(frame)
+                    except asyncio.QueueFull:
+                        if self._backpressure_timeout is not None:
+                            try:
+                                await asyncio.wait_for(
+                                    self._outbound_queue.put(frame),
+                                    timeout=self._backpressure_timeout,
+                                )
+                            except TimeoutError as err:
+                                raise MediaBackpressureOverflowError(
+                                    f"Outbound queue capacity {self._queue_capacity} exceeded "
+                                    f"and backpressure timed out after {self._backpressure_timeout}s"
+                                ) from err
+                        else:
+                            await self._outbound_queue.put(frame)
                 except (asyncio.CancelledError, Exception):
                     self._unforwarded_outbound_frames += 1
                     raise
