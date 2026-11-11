@@ -597,8 +597,285 @@ async def _async_run_demo(
     return 0
 
 
+async def _async_run_media_demo(
+    *,
+    port: int,
+    timeout: float,
+    log_level: str,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    import json
+    import secrets
+    import socket
+    import time
+
+    import uvicorn
+    import websockets
+    import websockets.exceptions
+
+    from kaiwen_gateway.core.admission import AdmissionController
+    from kaiwen_gateway.core.config import INGRESS_MODE_SYNTHETIC, CoreConfig
+    from kaiwen_gateway.core.draining import InstanceDrainCoordinator
+    from kaiwen_gateway.server.app import create_gateway_app
+    from kaiwen_gateway.transports.synthetic import (
+        EVENT_CALL_END,
+        EVENT_CALL_ENDED,
+        EVENT_CALL_INTERRUPT,
+        EVENT_CALL_INTERRUPTED,
+        EVENT_CALL_START,
+        EVENT_CALL_STARTED,
+        EVENT_SESSION_READY,
+        PCM16LE_FRAME_BYTES,
+        SYNTHETIC_MEDIA_WS_ENDPOINT_PATH,
+        SyntheticAuthBridge,
+        SyntheticTokenVerifier,
+    )
+
+    # Pre-check port if specified explicitly (> 0)
+    if port > 0:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_check:
+                s_check.bind(("127.0.0.1", port))
+        except OSError as sock_err:
+            stderr.write(f"Error: Port {port} is not available on 127.0.0.1: {sock_err}\n")
+            return 1
+
+    stdout.write("[1/7] Initializing ephemeral synthetic server with binary media enabled...")
+    stdout.flush()
+
+    secret_key = secrets.token_bytes(32)
+    verifier = SyntheticTokenVerifier(secret_key=secret_key, enable_replay_protection=True)
+    bridge = SyntheticAuthBridge(verifier=verifier, enforce_call_exclusivity=True)
+    config = CoreConfig(
+        instance_name="synthetic-media-demo",
+        ingress_mode=INGRESS_MODE_SYNTHETIC,
+        max_concurrent_connections=10,
+        max_connections_per_tenant=5,
+    )
+    admission = AdmissionController(config)
+    coordinator = InstanceDrainCoordinator(controller=admission)
+    app = create_gateway_app(
+        config=config,
+        admission_controller=admission,
+        drain_coordinator=coordinator,
+        synthetic_auth_bridge=bridge,
+        enable_synthetic_media=True,
+    )
+
+    uv_cfg = uvicorn.Config(
+        app=app,
+        host="127.0.0.1",
+        port=port,
+        log_level=log_level,
+        ws="auto",
+    )
+    server = uvicorn.Server(uv_cfg)
+    server_task = asyncio.create_task(server.serve())
+
+    start_deadline = time.monotonic() + min(timeout, 5.0)
+    while not server.started:
+        if time.monotonic() > start_deadline:
+            stderr.write(
+                f"\nSynthetic media demo error: Server failed to start on 127.0.0.1 within {min(timeout, 5.0)}s\n"
+            )
+            server.should_exit = True
+            await asyncio.gather(server_task, return_exceptions=True)
+            return 1
+        await asyncio.sleep(0.01)
+
+    # Determine bound port
+    bound_port = port
+    if bound_port == 0:
+        for s in getattr(server, "servers", []):
+            for sock in getattr(s, "sockets", []):
+                s_name = sock.getsockname()
+                if isinstance(s_name, tuple) and len(s_name) >= 2:
+                    bound_port = int(s_name[1])
+                    break
+            if bound_port > 0:
+                break
+
+    stdout.write(f" on 127.0.0.1:{bound_port}... OK\n")
+    stdout.flush()
+
+    tenant_id = "demo-media-tenant"
+    call_id = "demo-media-call-001"
+    token = verifier.issue_token(
+        provider_id="demo_provider",
+        tenant_id=tenant_id,
+        call_id=call_id,
+        allowed_scopes=["voice.stream"],
+        ttl_seconds=120,
+    )
+    stdout.write("[2/7] Minting authenticated bearer token (scope: voice.stream)... OK\n")
+    stdout.flush()
+
+    uri = f"ws://127.0.0.1:{bound_port}{SYNTHETIC_MEDIA_WS_ENDPOINT_PATH}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    demo_err: str | None = None
+    try:
+        stdout.write("[3/7] Connecting to /ws/synthetic-media/v1 and receiving session.ready...")
+        stdout.flush()
+        async with websockets.connect(
+            uri,
+            additional_headers=headers,
+            max_size=1024 * 1024,
+        ) as ws:
+            ready_raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            if not isinstance(ready_raw, str):
+                raise ValueError(
+                    f"Expected text JSON session.ready greeting, got {type(ready_raw).__name__}"
+                )
+            ready_json = json.loads(ready_raw)
+            if ready_json.get("event") != EVENT_SESSION_READY:
+                raise ValueError(
+                    f"Expected event {EVENT_SESSION_READY}, got {ready_json.get('event')}"
+                )
+            if ready_json.get("call_id") != call_id:
+                raise ValueError(
+                    f"call_id mismatch: expected {call_id}, got {ready_json.get('call_id')}"
+                )
+            stdout.write(" OK\n")
+            stdout.flush()
+
+            stdout.write("[4/7] Initiating call (call.start -> call.started)...")
+            stdout.flush()
+            await ws.send(json.dumps({"event": EVENT_CALL_START, "call_id": call_id}))
+            started_raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            if not isinstance(started_raw, str):
+                raise ValueError(
+                    f"Expected text JSON call.started, got {type(started_raw).__name__}"
+                )
+            started_json = json.loads(started_raw)
+            if started_json.get("event") != EVENT_CALL_STARTED:
+                raise ValueError(
+                    f"Expected event {EVENT_CALL_STARTED}, got {started_json.get('event')}"
+                )
+            stdout.write(" OK\n")
+            stdout.flush()
+
+            stdout.write(
+                "[5/7] Streaming 25 binary PCM16LE frames and verifying bidirectional echo..."
+            )
+            stdout.flush()
+            frame_count = 25
+            sent_payloads: list[bytes] = []
+            received_payloads: list[bytes] = []
+            for i in range(frame_count):
+                prefix = f"PCM_{i:04d}_".encode("ascii")
+                sent_payloads.append(prefix + b"\x42" * (PCM16LE_FRAME_BYTES - len(prefix)))
+
+            async def _sender() -> None:
+                for p in sent_payloads:
+                    await ws.send(p)
+                    await asyncio.sleep(0.005)
+
+            async def _receiver() -> None:
+                while len(received_payloads) < frame_count:
+                    resp = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                    if isinstance(resp, bytes):
+                        received_payloads.append(resp)
+
+            await asyncio.gather(_sender(), _receiver())
+            for idx, (sp, rp) in enumerate(zip(sent_payloads, received_payloads, strict=False)):
+                if sp != rp:
+                    raise ValueError(f"Echoed frame payload mismatch at sequence {idx}")
+            stdout.write(f" OK ({frame_count} frames, {frame_count * PCM16LE_FRAME_BYTES} bytes)\n")
+            stdout.flush()
+
+            stdout.write(
+                "[6/7] Simulating barge-in interruption (call.interrupt -> call.interrupted)..."
+            )
+            stdout.flush()
+            interrupt_cmd = {
+                "event": EVENT_CALL_INTERRUPT,
+                "call_id": call_id,
+                "turn_id": 1,
+                "request_id": "demo-req-turn1",
+            }
+            await ws.send(json.dumps(interrupt_cmd))
+            interrupted_raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            if not isinstance(interrupted_raw, str):
+                raise ValueError(
+                    f"Expected text JSON call.interrupted, got {type(interrupted_raw).__name__}"
+                )
+            interrupted_json = json.loads(interrupted_raw)
+            if interrupted_json.get("event") != EVENT_CALL_INTERRUPTED:
+                raise ValueError(
+                    f"Expected event {EVENT_CALL_INTERRUPTED}, got {interrupted_json.get('event')}"
+                )
+            if interrupted_json.get("new_turn_id") != 2:
+                raise ValueError(
+                    f"Expected new_turn_id=2, got {interrupted_json.get('new_turn_id')}"
+                )
+
+            # Stream Turn 2 frame and verify echo
+            turn2_payload = b"PCM_T2_0000_" + b"\x55" * (PCM16LE_FRAME_BYTES - 12)
+            await ws.send(turn2_payload)
+            turn2_echoed = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            if turn2_echoed != turn2_payload:
+                raise ValueError("Turn 2 echoed frame mismatch")
+            stdout.write(" OK (interrupted Turn 1, verified Turn 2)\n")
+            stdout.flush()
+
+            stdout.write(
+                "[7/7] Teardown: call.end -> call.ended and verifying capacity recovery..."
+            )
+            stdout.flush()
+            await ws.send(json.dumps({"event": EVENT_CALL_END, "call_id": call_id}))
+            ended_raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            if not isinstance(ended_raw, str):
+                raise ValueError(f"Expected text JSON call.ended, got {type(ended_raw).__name__}")
+            ended_json = json.loads(ended_raw)
+            if ended_json.get("event") != EVENT_CALL_ENDED:
+                raise ValueError(
+                    f"Expected event {EVENT_CALL_ENDED}, got {ended_json.get('event')}"
+                )
+            await ws.close()
+
+    except Exception as exc:
+        demo_err = str(exc)
+
+    finally:
+        server.should_exit = True
+        try:
+            await asyncio.wait_for(server_task, timeout=5.0)
+        except (TimeoutError, asyncio.CancelledError):
+            pass
+
+    if demo_err is not None:
+        stderr.write(f"\nSynthetic media demo error: {demo_err}\nResult: FAIL\n")
+        stderr.flush()
+        return 1
+
+    await asyncio.sleep(0.05)
+    snap = admission.snapshot()
+    if snap.active_connections != 0 or admission.active_connections_for_tenant(tenant_id) != 0:
+        stderr.write(
+            f"\nSynthetic media demo error: Capacity not fully recovered ({snap})\nResult: FAIL\n"
+        )
+        stderr.flush()
+        return 1
+    if (tenant_id, call_id) in bridge._active_calls:
+        stderr.write(
+            "\nSynthetic media demo error: Call remains registered in auth bridge\nResult: FAIL\n"
+        )
+        stderr.flush()
+        return 1
+
+    stdout.write(" OK (0 active connections, 0 active calls, 0 active admission leases)\n")
+    stdout.write(
+        "Server stopped cleanly. Synthetic media demo completed successfully.\nResult: PASS\n"
+    )
+    stdout.flush()
+    return 0
+
+
 def run_demo(
     *,
+    media: bool = False,
     port: int = 0,
     timeout: float = 10.0,
     log_level: str = "warning",
@@ -636,6 +913,17 @@ def run_demo(
             "Consumer installation: pip install 'kaiwen-gateway[server]'\n"
         )
         return 1
+
+    if media:
+        return asyncio.run(
+            _async_run_media_demo(
+                port=port,
+                timeout=timeout,
+                log_level=log_level,
+                stdout=out,
+                stderr=err,
+            )
+        )
 
     return asyncio.run(
         _async_run_demo(
@@ -758,6 +1046,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Start ephemeral loopback server and execute a synthetic telephony call end-to-end.",
     )
     demo_parser.add_argument(
+        "--media",
+        action="store_true",
+        help="Execute synthetic binary PCM16LE audio media demo with interruption.",
+    )
+    demo_parser.add_argument(
         "--port",
         type=int,
         default=0,
@@ -851,6 +1144,7 @@ def main(
         )
     elif parsed_args.command == "demo":
         return run_demo(
+            media=getattr(parsed_args, "media", False),
             port=parsed_args.port,
             timeout=parsed_args.timeout,
             log_level=parsed_args.log_level,

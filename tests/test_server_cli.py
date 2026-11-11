@@ -1180,4 +1180,27 @@ def test_53_demo_post_shutdown_admission_leak_fails() -> None:
         assert code == 1
         assert "AdmissionController leases remaining after shutdown" in err.getvalue()
         assert "Result: FAIL" in err.getvalue()
-        assert "Result: FAIL" in err.getvalue()
+
+
+def test_54_demo_media_end_to_end_success() -> None:
+    """Verify demo --media executes full binary PCM16LE streaming and interruption cleanly."""
+    out = io.StringIO()
+    err = io.StringIO()
+    code = run_demo(media=True, port=0, timeout=10.0, stdout=out, stderr=err)
+    assert code == 0
+    stdout_val = out.getvalue()
+    assert "Initializing ephemeral synthetic server with binary media enabled" in stdout_val
+    assert "Streaming 25 binary PCM16LE frames and verifying bidirectional echo" in stdout_val
+    assert "Simulating barge-in interruption" in stdout_val
+    assert "Result: PASS" in stdout_val
+
+
+def test_55_demo_media_cli_dispatch() -> None:
+    """Verify main() properly dispatches demo --media flag."""
+    with patch("kaiwen_gateway.server.cli.run_demo", return_value=0) as mock_demo:
+        code = main(["demo", "--media", "--timeout", "5.0"])
+        assert code == 0
+        mock_demo.assert_called_once()
+        _, kwargs = mock_demo.call_args
+        assert kwargs.get("media") is True
+        assert kwargs.get("timeout") == 5.0

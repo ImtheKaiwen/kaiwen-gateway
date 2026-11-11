@@ -763,3 +763,17 @@ jobs:
             *) echo "Demo output missing zero-leak confirmation: ${DEMO_OUT}"; exit 1 ;;
           esac
           echo "Server extra CLI demo smoke test passed (M3.3A)."
+
+          # 6. Verify installed kaiwen-gateway demo --media executable via CLI entrypoint
+          echo "Running installed kaiwen-gateway demo --media via CLI entrypoint..."
+          DEMO_MEDIA_OUT="$(.venv_server/bin/kaiwen-gateway demo --media --timeout 15.0)"
+          echo "${DEMO_MEDIA_OUT}"
+          case "${DEMO_MEDIA_OUT}" in
+            *"Result: PASS"*) echo "CLI media demo smoke test passed!" ;;
+            *) echo "CLI media demo failed unexpected output: ${DEMO_MEDIA_OUT}"; exit 1 ;;
+          esac
+          case "${DEMO_MEDIA_OUT}" in
+            *"0 active connections, 0 active calls, 0 active admission leases"*) echo "Zero leak verified in installed media demo!" ;;
+            *) echo "Media demo output missing zero-leak confirmation: ${DEMO_MEDIA_OUT}"; exit 1 ;;
+          esac
+          echo "Server extra CLI media demo smoke test passed (M6 Alpha RC)."
