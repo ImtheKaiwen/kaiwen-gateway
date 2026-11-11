@@ -531,7 +531,7 @@ def test_cli_main_report_serialization_and_privacy_redaction(
             "--concurrency",
             "1",
             "--duration",
-            "0.1",
+            "0.2",
             "--seed",
             "42",
             "--no-faults",
