@@ -12,13 +12,8 @@ Invariants:
 from __future__ import annotations
 
 import asyncio
-import json
 import math
-import os
-import struct
-import tempfile
 import time
-from pathlib import Path
 from typing import Any, Final
 
 from kaiwen_gateway.core.identity import VerifiedConnectionContext
@@ -104,17 +99,6 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
         self._inbound_queue_high_water_mark: int = 0
         self._last_send_duration_ms: float | None = None
         self._last_send_frame_id: int | None = None
-
-        # Bounded opt-in pipeline diagnostic instrumentation
-        self._diagnose_pipeline: bool = bool(os.environ.get("KW_DIAGNOSE_PIPELINE") == "1")
-        self._diag_dir: Path = Path(
-            os.environ.get(
-                "KW_DIAGNOSTIC_DIR",
-                str(Path(tempfile.gettempdir()) / "kaiwen_pipeline_diag"),
-            )
-        )
-        self._diag_ingress_times: dict[str, float] = {}
-        self._diag_egress_times: dict[str, float] = {}
 
     @property
     def is_closed(self) -> bool:
@@ -209,27 +193,24 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
         if self._is_closed:
             raise MediaPortClosedError("WebSocketTelephonyMediaAdapter is closed")
 
-        if self._diagnose_pipeline and len(frame.payload) >= 16:
-            magic, slot_id, frame_seq, _ = struct.unpack_from("<IIII", frame.payload, 0)
-            if magic == 0x4B574D35:
-                self._diag_ingress_times[f"{slot_id}:{frame_seq}"] = time.perf_counter()
-
         try:
-            if not self._inbound_queue.full():
-                self._inbound_queue.put_nowait(frame)
-            elif self._backpressure_timeout is not None:
-                async with asyncio.timeout(self._backpressure_timeout):
+            self._inbound_queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            try:
+                if self._backpressure_timeout is not None:
+                    async with asyncio.timeout(self._backpressure_timeout):
+                        await self._inbound_queue.put(frame)
+                else:
                     await self._inbound_queue.put(frame)
-            else:
-                await self._inbound_queue.put(frame)
-            depth = self._inbound_queue.qsize()
-            if depth > self._inbound_queue_high_water_mark:
-                self._inbound_queue_high_water_mark = depth
-        except TimeoutError as exc:
-            raise MediaBackpressureOverflowError(
-                f"Inbound media buffer overflowed (capacity={self._queue_capacity}) "
-                f"after {self._backpressure_timeout}s backpressure timeout"
-            ) from exc
+            except TimeoutError as exc:
+                raise MediaBackpressureOverflowError(
+                    f"Inbound media buffer overflowed (capacity={self._queue_capacity}) "
+                    f"after {self._backpressure_timeout}s backpressure timeout"
+                ) from exc
+
+        depth = self._inbound_queue.qsize()
+        if depth > self._inbound_queue_high_water_mark:
+            self._inbound_queue_high_water_mark = depth
 
     async def push_inbound_eof(self, *, timeout: float | None = 2.0) -> None:
         """Signal clean EOF to the inbound pump, waiting if queue is full.
@@ -339,11 +320,6 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
             self._last_send_duration_ms = max(0.0, (time.perf_counter() - t_send_start) * 1000.0)
             self._last_send_frame_id = id(frame)
 
-        if self._diagnose_pipeline and len(frame.payload) >= 16:
-            magic, slot_id, frame_seq, _ = struct.unpack_from("<IIII", frame.payload, 0)
-            if magic == 0x4B574D35:
-                self._diag_egress_times[f"{slot_id}:{frame_seq}"] = time.perf_counter()
-
         self._frames_sent += 1
         self._bytes_sent += len(frame.payload)
 
@@ -391,16 +367,4 @@ class WebSocketTelephonyMediaAdapter(TelephonyMediaPort):
             try:
                 self._inbound_queue.put_nowait(_CLOSE_SENTINEL)
             except asyncio.QueueFull:
-                pass
-
-        if self._diagnose_pipeline and self._diag_ingress_times:
-            try:
-                self._diag_dir.mkdir(parents=True, exist_ok=True)
-                diag_data = {
-                    k: [self._diag_ingress_times.get(k), self._diag_egress_times.get(k)]
-                    for k in self._diag_ingress_times
-                }
-                out_file = self._diag_dir / f"gw_{self._context.connection_id}.json"
-                out_file.write_text(json.dumps(diag_data), encoding="utf-8")
-            except Exception:
                 pass
