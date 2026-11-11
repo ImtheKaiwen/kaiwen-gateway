@@ -8,6 +8,11 @@ on:
         required: true
         type: boolean
         default: true
+      confirm_publish:
+        description: "Confirm publishing to PyPI (must be true when dry_run is false)"
+        required: false
+        type: boolean
+        default: false
   release:
     types: [published]
 
@@ -175,7 +180,12 @@ jobs:
   publish-pypi:
     name: Publish to PyPI (Trusted Publishing OIDC)
     needs: [verify-and-build]
-    if: github.event_name == 'release' && github.event.action == 'published' && !github.event.release.draft && !inputs.dry_run
+    # Fail-closed guard: PyPI publishing is blocked unless the repository maintainer
+    # explicitly authorizes it via repository variable PYPI_PUBLISH_AUTHORIZED=true
+    # or passes confirm_publish=true on a non-dry-run workflow dispatch.
+    if: |
+      (github.event_name == 'release' && vars.PYPI_PUBLISH_AUTHORIZED == 'true' && !github.event.release.draft) ||
+      (github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.confirm_publish == true)
     runs-on: ubuntu-latest
     permissions:
       id-token: write # required for Trusted Publishing OIDC
@@ -184,6 +194,19 @@ jobs:
       name: pypi
       url: https://pypi.org/p/kaiwen-gateway
     steps:
+      - name: Verify maintainer publishing authorization
+        run: |
+          echo "Verifying publishing safety guard..."
+          if [ "${{ github.event_name }}" = "release" ] && [ "${{ vars.PYPI_PUBLISH_AUTHORIZED }}" != "true" ]; then
+            echo "ERROR: Unintentional PyPI publish prevented. Repository variable PYPI_PUBLISH_AUTHORIZED must be 'true'."
+            exit 1
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.confirm_publish }}" != "true" ]; then
+            echo "ERROR: Manual publish requires confirm_publish=true."
+            exit 1
+          fi
+          echo "Publishing authorization confirmed."
+
       - name: Download build artifacts
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:

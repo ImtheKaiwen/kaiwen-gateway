@@ -211,7 +211,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 **Deliverables**
 
-- [x] Gate B checked against every P0 requirement, with documented and approved exceptions for unavailable external verification (57/57 P0 requirements traced from docs/REQUIREMENTS.md; 54 verified, 3 deferred external exceptions pending maintainer approval under Gate B).
+- [x] Gate B checked against every P0 requirement, with documented exceptions for unavailable external verification (57/57 P0 requirements traced from docs/REQUIREMENTS.md; 54 verified, 3 deferred external exceptions pending maintainer approval under Gate B: FR-INT-004, FR-INT-005, SEC-007).
 - [x] Wheel and sdist built, metadata checked, installed in clean isolated environments; base package vs `[server]` extra validated without unexpected runtime dependencies.
 - [x] Working, verified minimal demo and CLI reference (`kaiwen-gateway demo --media` verified end-to-end; runnable quickstart example added in `examples/quickstart_synthetic_media.py`).
 - [x] Server runtime documented (`README.md`); startup, readiness (`GET /ready`), and draining behavior verified.
