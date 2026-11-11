@@ -211,13 +211,13 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 **Deliverables**
 
-- [x] Gate B checked against every P0 requirement, with documented and approved exceptions for unavailable external verification (50/50 P0 requirements traced; unverified live integrations explicitly documented under Gate B).
+- [x] Gate B checked against every P0 requirement, with documented and approved exceptions for unavailable external verification (57/57 P0 requirements traced from docs/REQUIREMENTS.md; 54 verified, 3 deferred external exceptions pending maintainer approval under Gate B).
 - [x] Wheel and sdist built, metadata checked, installed in clean isolated environments; base package vs `[server]` extra validated without unexpected runtime dependencies.
 - [x] Working, verified minimal demo and CLI reference (`kaiwen-gateway demo --media` verified end-to-end; runnable quickstart example added in `examples/quickstart_synthetic_media.py`).
 - [x] Server runtime documented (`README.md`); startup, readiness (`GET /ready`), and draining behavior verified.
 - [x] Public API/wire contract docs distinguish mock behavior from real Verimor/OpenAI support (`README.md` Capability Matrix).
-- [x] Release automation workflow prepared (`.github/workflows/release.yml`) using least-privilege permissions, PyPI Trusted Publishing OIDC, dry-run safety by default, and immutable build artifacts.
-- [x] `CHANGELOG.md` prepared with a detailed `[0.1.0a1]` section and clean `Unreleased` header.
+- [x] Release automation workflow prepared (`.github/workflows/release.yml`) using least-privilege permissions, PyPI Trusted Publishing OIDC, dry-run safety by default, failure on version conflict (`skip-existing: false`), tag-to-version validation, and immutable build artifacts.
+- [x] `CHANGELOG.md` prepared with a detailed `[0.1.0a1] - Unreleased (Release Candidate)` section and clean `Unreleased` header.
 - [ ] Maintainer approves the actual publishing/tagging/container-push action separately. (Pending human authorization).
 
 **Exit evidence:** Gate B acceptance record in release candidate PR; package install/build/CLI output verified in isolated virtualenv smoke tests; artifact digests; release notes and explicit 100-call latency limitation notice. **A release candidate passing checks is not the same as publishing a release.**

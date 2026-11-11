@@ -4,10 +4,10 @@ All notable **user-facing changes** to Kaiwen Gateway are recorded in this file.
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for its Python distribution. The **Python package version**, any **external Gateway wire/API protocol version**, and **provider adapter compatibility** are separate concerns; a package release does not automatically change a wire protocol version.
 
-> **Project status (2026-11-12): Synthetic Alpha Release Candidate (v0.1.0a1).**
+> **Project status (2026-11-12): Synthetic Alpha Release Candidate (v0.1.0a1 - Unreleased).**
 > Kaiwen Gateway `v0.1.0a1` is prepared as a verified, installable, documented synthetic-environment alpha release candidate. It provides a complete, runnable synthetic communication gateway (core identity, admission control, connection lifecycle, graceful draining, ASGI server, synthetic telephony control, synthetic PCM16LE audio streaming, voice media bridge, and barge-in interruption) without requiring external credentials or proprietary telephony hardware.
 >
-> **Production use is not yet supported.** Live Verimor interoperability (`FR-INT-007`) and external AI provider backends (`FR-INT-003`, OpenAI Realtime / Gemini Live) remain deferred pending vendor specifications.
+> **Production use is not yet supported and no package has been published to PyPI.** Live Verimor interoperability (`FR-INT-007`) and external AI provider backends (`FR-INT-003`, OpenAI Realtime / Gemini Live) remain deferred pending vendor specifications.
 
 ## [Unreleased]
 
@@ -16,7 +16,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ---
 
-## [0.1.0a1] - 2026-11-12
+## [0.1.0a1] - Unreleased (Release Candidate)
 
 ### Added
 
@@ -53,7 +53,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - **Synthetic Media Load Evaluation Suite:** Added `tools/synthetic_media_load.py` supporting 1, 5, 25, 50, and 100 simultaneous synthetic calls under 20ms PCM16LE frame pacing.
 - **Multi-Process Client Workers:** Partitioned client load generation across independent worker subprocesses (`--client-workers N`), eliminating client event loop starvation at high concurrency.
 - **Multi-Trial Aggregator:** Added `tools/aggregate_benchmark_trials.py` to aggregate multi-trial benchmark reports, enforce trial comparability, calculate cross-trial tail metrics, and classify configurations (`REPEATABLY_PASSING`, `MIXED_RESULTS`, `REPEATABLY_FAILING`).
-- **Repeatable Qualification Results:** Established verified synthetic concurrency qualification across 18 independent trials: 1 call (3/3 PASS), 5 calls (3/3 PASS), 25 calls (3/3 PASS with 2 workers), 50 calls (3/3 PASS with 2 workers), and 100 calls (3/3 PASS with 4 workers, 0% frame loss, 0.02% missed deadlines).
+- **Repeatable Qualification Results:** Established verified synthetic concurrency qualification across 18 independent trials with PR #36 queue fast-path and bottleneck isolation: 1 call (3/3 PASS), 5 calls (3/3 PASS), 25 calls (3/3 PASS with 2 workers), 50 calls (3/3 PASS with 2 workers; median trial p95 echo RTT 127.3 ms, worst trial p95 255.7 ms), and 100 calls (3/3 PASS with 4 workers; 100% media integrity, 0% frame loss, 0.02% missed deadlines, median trial p95 echo RTT ~2,045 ms due to single-threaded event loop queuing). These synthetic metrics confirm frame integrity and client pacing under test conditions but do not constitute a universal production capacity or interactive voice SLA.
 
 ### Fixed
 - **Fast-Path Queue Non-Blocking Puts:** Optimized media and adapter queue insertion by trying `put_nowait()` on non-full queues before falling back to `asyncio.wait_for(put())`, reducing event loop task switching under high frame volume.
@@ -64,7 +64,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - **Accurate Manifest CLI Generation:** Corrected benchmark aggregator manifest generation to emit actual CLI options (`--concurrency`, `--output`, `--no-faults`) rather than deprecated flags.
 
 ### Security
-- **Zero Raw Audio Persistence:** Enforced architectural rule ensuring no raw audio frames, audio payloads, or transcripts are persisted to disk, databases, or public logs by default.
-- **Cryptographic Token Verification:** Implemented HMAC-SHA256 signature verification with strict 60-second validity windows and scope verification.
-- **Sensitive Data Redaction:** Redacted sensitive identifiers, tokens, and raw exception messages from public logs, error summaries, and lease string representations.
-- **Admission Ceilings:** Strictly enforced global and per-tenant connection ceilings, failing closed before allocating upstream or server resources.
+- **Zero Raw Audio Persistence (`SEC-006`):** Enforced architectural rule ensuring no raw audio frames, audio payloads, or transcripts are persisted to disk, databases, or public logs by default.
+- **Server-Controlled Credentials & Redaction (`SEC-005`, `FR-INT-003`):** Credentials and secrets remain strictly server-side, redacted from logs, traces, and error summaries, and are never exposed to telephony clients.
+- **Cryptographic Token Verification (`SEC-002`):** Implemented HMAC-SHA256 signature verification with strict 60-second validity windows and scope verification (`SEC-003`).
+- **Egress & SSRF Protection (`SEC-008`):** Restricted connections to verified loopback endpoints; rejects arbitrary user-supplied egress URLs.
+- **Admission Ceilings (`SEC-004`, `FR-CONN-005`):** Strictly enforced global and per-tenant connection ceilings, failing closed before allocating upstream or server resources.

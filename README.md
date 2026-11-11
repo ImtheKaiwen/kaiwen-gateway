@@ -3,10 +3,10 @@
 **A modular, provider-agnostic communication gateway for real-time AI applications.**
 
 > [!IMPORTANT]
-> **Project Status: Synthetic Alpha Release Candidate (`v0.1.0a1`).**
+> **Project Status: Synthetic Alpha Release Candidate (`v0.1.0a1` — Unreleased).**
 > This repository provides an installable, verified, synthetic-environment alpha release candidate. It enables developers to test, benchmark, and integrate against the Gateway using fully reproducible in-process and loopback synthetic environments without requiring external credentials or proprietary telephony hardware.
 >
-> **Production use is not yet supported.** Live Verimor PSTN/WSS interoperability and external AI provider adapters (e.g. OpenAI Realtime / Gemini Live) are **not** included in this release candidate and remain subject to official vendor specifications and contract validation.
+> **Production use is not yet supported.** The package is **not yet published to PyPI**. Live Verimor PSTN/WSS interoperability (`FR-INT-007`) and external AI provider adapters (`FR-INT-003`, e.g. OpenAI Realtime / Gemini Live) remain deferred pending official vendor specifications and contract validation.
 
 Kaiwen Gateway is designed to be both a **reusable Python library** and a **deployable ASGI service**. It accepts connections from external systems, authenticates and isolates them, translates provider-specific protocols into well-defined internal contracts, and bridges live communication to application and AI backends.
 
@@ -18,25 +18,46 @@ The first implementation focuses on **bidirectional telephone audio over secure 
 
 ### 1. Installation
 
-Kaiwen Gateway is designed with **zero mandatory runtime dependencies** for its core contracts. The optional `[server]` extra provides the ASGI server and WebSocket runtime.
+#### A. Evaluating Locally from Source or Built Wheel (Available Now)
+
+Kaiwen Gateway is currently in release candidate status. To install from a local checkout or locally built wheel:
 
 ```bash
-# Install the core library and ASGI server runtime
-pip install "kaiwen-gateway[server]"
+# Clone the repository
+git clone https://github.com/ImtheKaiwen/kaiwen-gateway.git
+cd kaiwen-gateway
 
-# Or using uv:
-uv pip install "kaiwen-gateway[server]"
+# Option 1: Install development dependencies and ASGI runtime using uv
+uv sync --extra server
+
+# Option 2: Build and install local wheel into an isolated virtual environment
+uv build
+pip install dist/kaiwen_gateway-0.1.0a1-py3-none-any.whl[server]
 ```
 
-To install the minimal core library only (contracts, admission control, identity, lifecycle supervision):
+To install only the minimal core library (contracts, admission control, identity, lifecycle supervision) without server dependencies:
 
 ```bash
+pip install dist/kaiwen_gateway-0.1.0a1-py3-none-any.whl
+```
+
+#### B. Installing from PyPI (Post-Publication)
+
+*Note: The commands below will be available once the maintainer officially authorizes and completes publication to PyPI.*
+
+```bash
+# Install core package + ASGI runtime once published:
+pip install "kaiwen-gateway[server]"
+
+# Install minimal core library only:
 pip install kaiwen-gateway
 ```
 
+---
+
 ### 2. Verify Installation & Configuration
 
-The CLI runs without external dependencies:
+The CLI runs with zero external runtime dependencies:
 
 ```bash
 # Check version
@@ -46,17 +67,21 @@ kaiwen-gateway --version
 kaiwen-gateway check-config
 ```
 
+---
+
 ### 3. Run Executable Demos
 
-The Gateway includes self-contained, automated loopback demos that allocate an ephemeral port, verify token authentication, execute a complete call lifecycle, and confirm zero capacity leakage.
+The Gateway includes self-contained, automated loopback demos that allocate an ephemeral port, verify token authentication, execute a complete call lifecycle, and confirm zero capacity leakage:
 
 ```bash
 # Control plane synthetic telephony call demo:
 kaiwen-gateway demo
 
-# Full media plane demo (streams 25 binary PCM16LE audio frames, verifies echo, exercises barge-in interruption, and verifies zero leak):
+# Full media plane demo (streams 25 binary PCM16LE audio frames, verifies echo, exercises barge-in interruption, and verifies zero capacity leak):
 kaiwen-gateway demo --media
 ```
+
+---
 
 ### 4. Developer Quickstart Script
 
@@ -76,24 +101,28 @@ uv run python examples/quickstart_synthetic_media.py
 
 The following matrix distinguishes verified capabilities in this synthetic alpha from deferred or unsupported features:
 
-| Capability | Status in v0.1.0a1 | Notes / Limitations |
-| --- | --- | --- |
-| **Gateway Core Architecture** | **Supported (Verified)** | Framework-independent modular core (`compose_gateway_core`), typed module registry, immutable configuration (`CoreConfig`). |
-| **Identity & Scoped Authorization** | **Supported (Verified)** | Strong identity tokens (`ProviderPrincipal`, `TenantCallBinding`), HMAC-SHA256 validation, scope checking (`voice.stream`, `voice.admin`), control-character rejection. |
-| **Admission Control** | **Supported (Verified)** | Process-local atomic capacity reservations against global and per-tenant ceilings, duplicate connection prevention, idempotent lease release. |
-| **Supervised Connection Lifecycle** | **Supported (Verified)** | Strict state machine (`NEW` → `ADMITTED` → `ACTIVE` → `CLOSED`/`FAILED`), cancellation shielding, timeout enforcement, zero orphan tasks. |
-| **Graceful Instance Draining** | **Supported (Verified)** | Multi-phase draining coordinator (`InstanceDrainCoordinator`), admission rejection during drain, bounded grace period, cooperative termination. |
-| **ASGI Server & Health Endpoints** | **Supported (Verified)** | Starlette/Uvicorn ASGI host, `GET /health` (liveness), `GET /ready` (readiness with drain detection). Restricted to loopback (`127.0.0.1`) by default. |
-| **Synthetic Telephony Transport** | **Supported (Verified)** | `/ws/synthetic-telephony/v1` authenticated WSS endpoint, structured JSON control events (`call.start`, `call.started`, `call.end`, `call.ended`, ping/pong). |
-| **Synthetic Media Transport** | **Supported (Verified)** | `/ws/synthetic-media/v1` binary WebSocket transport, 16kHz 16-bit linear PCM mono framing (20ms frames), single-read demux, control event interleaving. |
-| **Voice Media Bridge** | **Supported (Verified)** | Asynchronous bidirectional media bridge (`VoiceBridgeSession`), isolated inbound/outbound audio pumps, turn tracking, backpressure bounds. |
-| **Barge-in Interruption** | **Supported (Verified)** | User speech interruption triggers downstream AI cancellation, outbound buffer flushing, and synchronized turn incrementing. |
-| **Fake AI Echo Adapter** | **Supported (Verified)** | In-process `BoundedFakeAIEchoPort` for deterministic loopback audio testing and benchmarking. |
-| **Privacy & Zero Audio Persistence** | **Supported (Verified)** | **Zero raw audio or transcript persistence by default.** Sensitive identifiers redacted from logs and error summaries. |
-| **Live Verimor Telephony** | **Unsupported (Deferred)** | `FR-INT-007` / `OPEN-001`. Blocked pending official vendor WebSocket specification. Wire format is not guessed. |
-| **External Realtime AI Backends** | **Unsupported (Deferred)** | `FR-INT-003` / `OPEN-003`. External adapters for OpenAI Realtime or Gemini Live are deferred; loopback testing uses fake echo adapter. |
-| **Distributed / Multi-Instance State** | **Unsupported (Deferred)** | Atomic replay store and distributed multi-worker coordination deferred to Gate C/D (M8). Current alpha is single-instance only. |
-| **Low-Latency Voice at $\ge 100$ Calls** | **Documented Limitation** | 100 concurrent calls achieve 100% media integrity (0% loss) and pass pacing criteria, but median p95 echo RTT is ~2,045 ms due to single-threaded event loop queuing. See Performance section. |
+| Capability | Requirement Reference | Status in v0.1.0a1 | Notes / Limitations |
+| --- | --- | --- | --- |
+| **Gateway Core Architecture** | `FR-CORE-001`–`007` | **Supported (Verified)** | Framework-independent modular core (`compose_gateway_core`), typed module registry, immutable configuration (`CoreConfig`). |
+| **Identity & Scoped Authorization** | `FR-CONN-002`, `SEC-002`–`003` | **Supported (Verified)** | Strong identity tokens (`ProviderPrincipal`, `TenantCallBinding`), HMAC-SHA256 validation, scope checking (`voice.stream`, `voice.admin`), control-character rejection. |
+| **Admission Control** | `FR-CONN-005`, `NFR-REL-002` | **Supported (Verified)** | Process-local atomic capacity reservations against global and per-tenant ceilings, duplicate connection prevention, idempotent lease release. |
+| **Supervised Connection Lifecycle** | `FR-CONN-004`, `REL-001`–`003` | **Supported (Verified)** | Strict state machine (`NEW` → `ADMITTED` → `ACTIVE` → `CLOSED`/`FAILED`), cancellation shielding, timeout enforcement, zero orphan tasks. |
+| **Graceful Instance Draining** | `FR-CONN-006`, `REL-004` | **Supported (Verified)** | Multi-phase draining coordinator (`InstanceDrainCoordinator`), admission rejection during drain, bounded grace period, cooperative termination. |
+| **ASGI Server & Health Endpoints** | `FR-CORE-002`, `OBS-001` | **Supported (Verified)** | Starlette/Uvicorn ASGI host, `GET /health` (liveness), `GET /ready` (readiness with drain detection). Restricted to loopback (`127.0.0.1`) by default. |
+| **Synthetic Telephony Transport** | `FR-CONN-001`, `FR-INT-006` | **Supported (Verified)** | `/ws/synthetic-telephony/v1` authenticated WSS endpoint, structured JSON control events (`call.start`, `call.started`, `call.end`, `call.ended`, ping/pong). |
+| **Synthetic Media Transport** | `FR-VOICE-002`–`004` | **Supported (Verified)** | `/ws/synthetic-media/v1` binary WebSocket transport, 16kHz 16-bit linear PCM mono framing (20ms frames), single-read demux, control event interleaving. |
+| **Voice Media Bridge** | `FR-VOICE-001`, `FR-VOICE-005` | **Supported (Verified)** | Asynchronous bidirectional media bridge (`VoiceBridgeSession`), isolated inbound/outbound audio pumps, turn tracking, backpressure bounds. |
+| **Barge-in Interruption** | `FR-VOICE-006` | **Supported (Verified)** | User speech interruption triggers downstream AI cancellation, outbound buffer flushing, and synchronized turn incrementing. |
+| **Fake AI Echo Adapter** | `FR-INT-002` | **Supported (Verified)** | In-process `BoundedFakeAIEchoPort` for deterministic loopback audio testing and benchmarking. |
+| **Server-Owned Credentials** | `FR-INT-003`, `SEC-005` | **Supported (Verified)** | Credentials and secrets stored only in server-controlled configuration/secret providers; redacted from logs and error summaries; never exposed to telephony clients. |
+| **Privacy & Zero Audio Persistence** | `SEC-006` | **Supported (Verified)** | **Zero raw audio or transcript persistence by default.** No recording or transcript storage occurs without application-owned explicit opt-in adapters. |
+| **Outbound Egress & SSRF Protection** | `SEC-008` | **Supported (Verified)** | In-process synthetic adapters; no arbitrary user-supplied egress URLs accepted; connections restricted to loopback endpoints. |
+| **Gateway Processing Overhead** | `NFR-PERF-004` (P1) | **Supported (Verified)** | In-process bridge processing overhead is sub-millisecond (< 0.05 ms p95 at 100 sessions), well within the 20 ms P1 design goal. |
+| **Live Verimor Telephony** | `FR-INT-007` (P1) | **Deferred (Pending Vendor Spec)** | `OPEN-001` / `OPEN-002`. Blocked pending official vendor WebSocket specification. Wire format is strictly not guessed. |
+| **External Realtime AI Backends** | `FR-INT-003` / `005` | **Deferred (Pending External APIs)** | `OPEN-003`. External adapters for OpenAI Realtime or Gemini Live are deferred while upstream APIs stabilize; loopback testing uses fake echo adapter. |
+| **Agent Realtime Context Mapping** | `FR-INT-004` | **Deferred (Pending Upstream API)** | Integration adapter deferred while `kaiwen-agent` public realtime interfaces are under active parallel development. |
+| **Distributed / Multi-Instance State** | `Gate C/D`, `M8` | **Deferred (Out of Alpha Scope)** | Atomic replay store and distributed multi-worker coordination deferred to Gate C/D (M8). Current alpha is single-instance only. |
+| **Interactive Voice at $\ge 100$ Calls** | `NFR-PERF-006` (P1) | **Documented Limitation** | 100 concurrent calls achieve 100% media integrity (0% loss) and pass pacing criteria, but median p95 echo RTT reaches ~2,045 ms due to single-threaded event loop transit backlog. |
 
 ---
 
@@ -112,76 +141,50 @@ The following matrix distinguishes verified capabilities in this synthetic alpha
 
 ---
 
-## Architecture & Design Principles
-
-```text
-┌─────────────────────────────────────────────────────┐
-│ External systems: telephony / clients / webhooks   │
-└────────────────────────┬────────────────────────────┘
-                         │
-              HTTP / WSS (loopback)
-                         │
-┌────────────────────────▼────────────────────────────┐
-│ Kaiwen Gateway                                     │
-│                                                     │
-│  Server / transport adapters                        │
-│    ├─ /ws/synthetic-telephony/v1 (Control)          │
-│    └─ /ws/synthetic-media/v1 (Audio PCM16LE)        │
-│        │                                            │
-│  Core: identity · admission · routing · lifecycle   │
-│    ├─ AdmissionController                           │
-│    ├─ ConnectionSupervisor                          │
-│    └─ InstanceDrainCoordinator                      │
-│        │                                            │
-│  Modules: Voice (v1)                                │
-│    ├─ VoiceBridgeSession (Inbound/Outbound pumps)   │
-│    ├─ Barge-in interruption & turn control          │
-│    └─ BoundedFakeAIEchoPort                         │
-└─────────────────────────────────────────────────────┘
-```
-
-### Design Principles
-
-1. **A small core.** Zero external dependencies in core. No duplicate agent runtimes, schedulers, or speculative distributed buses.
-2. **Explicit adapters.** External provider details belong behind ports with contract tests.
-3. **Minimal audio hot path.** Zero JSON serialization on the raw binary audio path. Non-blocking queue operations (`put_nowait()`) on media pumps.
-4. **Isolation by default.** All authorization decisions require cryptographic verification; caller ID or client-supplied IDs are never trusted blindly.
-5. **Fail safely.** Timeouts, cancellation, bounded queues, and guaranteed resource cleanup across all error and cancellation paths.
-6. **Measured performance.** Performance claims must be supported by multi-trial, repeatable evidence under documented reference conditions.
-
----
-
 ## Security & Privacy Boundaries
 
 Security and privacy are core architectural requirements:
 
-- **Zero Audio & Transcript Persistence:** By default, Kaiwen Gateway **never** writes raw audio frames, audio payloads, or conversation transcripts to disk, database, or logs. Any audio recording requires an explicit, application-owned legal basis and custom adapter.
-- **Cryptographic Authentication:** Inbound WebSocket connections require an HTTP `Authorization: Bearer <token>` header verified via HMAC-SHA256 with a 60-second TTL before the WebSocket upgrade is accepted. Unauthorized connections receive HTTP 403 or close code 1008 without allocating Gateway resources.
-- **Strict Scope Boundaries:** Token permissions are scoped (e.g. `voice.stream`, `voice.admin`). Media endpoints require `voice.stream`; administrative actions require `voice.admin`.
-- **Bounded Resources & Admission:** Global and per-tenant connection ceilings are strictly enforced. Requests exceeding limits are rejected immediately (`GlobalCapacityExceededError`, `TenantCapacityExceededError`).
-- **Loopback-Only Default:** The ASGI server binds strictly to `127.0.0.1` by default. Never expose the development server to public interfaces (`0.0.0.0`) without an upstream TLS termination proxy.
-- **Redaction:** Sensitive identifiers, tokens, and raw exception messages are redacted from public logs, error summaries, and lease string representations.
+- **Zero Audio & Transcript Persistence (`SEC-006`):** By default, Kaiwen Gateway **never** writes raw audio frames, audio payloads, or conversation transcripts to disk, database, or logs. Any audio recording requires an explicit, application-owned legal basis and custom adapter.
+- **Cryptographic Authentication (`SEC-002`):** Inbound WebSocket connections require an HTTP `Authorization: Bearer <token>` header verified via HMAC-SHA256 with a 60-second TTL before the WebSocket upgrade is accepted. Unauthorized connections receive HTTP 403 or close code 1008 without allocating Gateway resources.
+- **Strict Scope Boundaries (`SEC-003`):** Token permissions are scoped (e.g. `voice.stream`, `voice.admin`). Media endpoints require `voice.stream`; administrative actions require `voice.admin`.
+- **Server-Controlled Credentials (`SEC-005`, `FR-INT-003`):** API keys and server credentials remain on the server, redacted from logs, traces, and error summaries, and are never exposed to telephony clients.
+- **Bounded Resources & Admission (`SEC-004`):** Global and per-tenant connection ceilings are strictly enforced. Requests exceeding limits are rejected immediately (`GlobalCapacityExceededError`, `TenantCapacityExceededError`).
+- **Loopback-Only Default (`SEC-001`):** The ASGI server binds strictly to `127.0.0.1` by default. Never expose the development server to public interfaces (`0.0.0.0`) without an upstream TLS termination proxy.
+- **SSRF & Egress Protection (`SEC-008`):** Restricts connections to verified loopback endpoints; rejects arbitrary user-supplied egress URLs.
 
 For vulnerability reporting, see [`SECURITY.md`](SECURITY.md).
 
 ---
 
-## Performance & Concurrency (M5 Evidence Summary)
+## Performance & Concurrency (Empirical Evidence)
 
-Repeatable synthetic performance qualification was conducted across 18 independent trials using the multi-process benchmark harness (`tools/synthetic_media_load.py` and `tools/aggregate_benchmark_trials.py`):
+Repeatable synthetic performance qualification was conducted across 18 independent trials using the multi-process benchmark harness (`tools/synthetic_media_load.py` and `tools/aggregate_benchmark_trials.py`), with targeted fast-path queue optimizations and echo bottleneck isolation evaluated in PR #36:
 
-| Concurrency (Calls) | Client Workers | Frame Integrity | Missed Deadlines | Scheduler Lateness (p95) | Echo RTT (p95) | Gateway Inbound Wait | Verdict |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1** | 1 | 100.0% | 0.00% | 4.3 ms | ~30 ms | < 0.1 ms | `REPEATABLY_PASSING` |
-| **5** | 1 | 100.0% | 0.00% | 10.9 ms | ~35 ms | < 0.2 ms | `REPEATABLY_PASSING` |
-| **25** | 2 | 100.0% | 0.32% | 10.9 ms | ~55 ms | ~0.5 ms | `REPEATABLY_PASSING` |
-| **50** | 2 | 100.0% | 0.00% | 10.0 ms | ~86 ms | ~1.2 ms | `REPEATABLY_PASSING` |
-| **100** | 4 | 100.0% | 0.02% | 8.4 ms | ~2,045 ms | ~26 ms | `REPEATABLY_PASSING`* |
+### Key Metrics Distinction
 
-*\*Important Qualification Note on 100 Concurrency:*
-- **What passed:** All three 100-session qualification trials passed 100% media frame integrity (zero dropped frames), 100% session cleanup, and met client sender pacing criteria (0.02% missed deadlines).
-- **Explicit Latency Limitation:** At 100 concurrent sessions (5,000 frames/sec total throughput), synthetic echo round-trip time (RTT) p95 reached **~2,045 ms** (ranging from 1,732 ms to 2,705 ms). Diagnostic bottleneck isolation identified that this latency is caused by **single-threaded asyncio event loop transit queue residence** on the Gateway server under high aggregate event volumes, rather than network stalls or CPU starvation.
-- **Operational Reality:** Kaiwen Gateway does **NOT** claim sub-150ms interactive voice latency at 100 concurrent sessions on a single asyncio event loop. For interactive low-latency voice, single-instance concurrency should be capped at **50 calls** (p95 RTT ~86 ms), or scaled horizontally across multiple worker processes.
+It is critical to distinguish between the following five performance metrics:
+
+1. **Media Integrity:** Frame completeness and byte correctness (100% frames delivered, 0 missing, 0 duplicates, 0 payload mismatches).
+2. **Client Pacing:** Timeliness of frame transmission by client load-generator workers (missed deadline rate $\le 20\%$, scheduler lateness $\le 100$ ms).
+3. **Synthetic Echo RTT:** Full loopback round-trip time through client send $\rightarrow$ socket $\rightarrow$ Gateway server event loop $\rightarrow$ inbound queue $\rightarrow$ bridge $\rightarrow$ fake AI echo $\rightarrow$ outbound queue $\rightarrow$ socket $\rightarrow$ client receive.
+4. **Gateway-Added Processing Overhead:** Pure CPU compute duration within the Gateway Voice Bridge (`inbound_processing_ms` + `outbound_processing_ms`), which remains sub-millisecond (< 0.05 ms p95 at 100 sessions).
+5. **Interactive Conversational Latency:** Real human conversational latency, which includes external carrier network jitter, real AI generation latency, and client audio devices. **Synthetic echo RTT does not represent conversational latency or guarantee an interactive SLA.**
+
+### Measured Concurrency Results
+
+| Concurrency (Calls) | Client Workers | Frame Integrity | Missed Deadlines | Scheduler Lateness (p95) | Synthetic Echo RTT (p95 Median) | Synthetic Echo RTT (p95 Worst) | Gateway Inbound Wait | Verdict |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1** | 1 | 100.0% | 0.00% | 4.3 ms | ~30 ms | ~33 ms | < 0.1 ms | `REPEATABLY_PASSING` |
+| **5** | 1 | 100.0% | 0.00% | 10.9 ms | ~35 ms | ~38 ms | < 0.2 ms | `REPEATABLY_PASSING` |
+| **25** | 2 | 100.0% | 0.32% | 10.9 ms | ~55 ms | ~62 ms | ~0.5 ms | `REPEATABLY_PASSING` |
+| **50** | 2 | 100.0% | 0.00% | 10.0 ms | **127.3 ms** | **255.7 ms** | ~1.2 ms | `REPEATABLY_PASSING`* |
+| **100** | 4 | 100.0% | 0.02% | 8.4 ms | **~2,045 ms** | **~2,705 ms** | ~26 ms | `REPEATABLY_PASSING`* |
+
+*\*Important Qualification Notes:*
+- **50 Concurrent Sessions:** All trials passed 100% media integrity and client pacing. Median trial p95 echo RTT was **127.3 ms** (with worst trial p95 reaching **255.7 ms** under high event loop density). This establishes successful synthetic qualification under test conditions, but does **not** constitute a universal guarantee of sub-150ms production voice capacity under variable network or host conditions.
+- **100 Concurrent Sessions:** All trials passed 100% media integrity (zero frame loss) and 100% session cleanup. However, synthetic echo RTT p95 reached **~2,045 ms** (worst trial ~2,705 ms) due to **single-threaded asyncio event loop transit backlog** under 5,000 frames/sec aggregate throughput.
+- **Explicit Capacity Limitation:** Kaiwen Gateway does **NOT** claim sub-150ms interactive voice latency at 100 concurrent sessions on a single asyncio event loop. Scaling to 100+ concurrent interactive voice calls requires horizontal multi-worker or multi-process server distribution.
 
 Full benchmark reports and methodology are available in `reports/m5_repeatable_qualification_report.md` and `reports/m5_qualification_manifest.json`.
 

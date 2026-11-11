@@ -19,6 +19,8 @@ jobs:
     name: Verify & Build Release Distributions
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      package_version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -32,6 +34,29 @@ jobs:
           python-version: "3.12"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
+
+      - name: Extract package version from pyproject.toml
+        id: version
+        run: |
+          VERSION="$(uv run --no-project --python 3.12 python -c '
+          import tomllib
+          with open("pyproject.toml", "rb") as f:
+              print(tomllib.load(f)["project"]["version"])
+          ')"
+          echo "Package version: ${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release tag against package version
+        if: github.event_name == 'release'
+        run: |
+          EXPECTED_TAG="v${{ steps.version.outputs.version }}"
+          ACTUAL_TAG="${{ github.ref_name }}"
+          echo "Checking release tag '${ACTUAL_TAG}' against expected '${EXPECTED_TAG}'..."
+          if [ "${ACTUAL_TAG}" != "${EXPECTED_TAG}" ]; then
+            echo "ERROR: Release tag '${ACTUAL_TAG}' does not match package version '${EXPECTED_TAG}'"
+            exit 1
+          fi
+          echo "Release tag matches package version exactly."
 
       - name: Verify lockfile
         run: uv lock --check
@@ -79,14 +104,14 @@ jobs:
 
       - name: Test clean virtualenv (core package only)
         run: |
-          WHEEL_PATH="$(pwd)/dist/kaiwen_gateway-0.1.0a1-py3-none-any.whl"
+          WHEEL_PATH="$(pwd)/dist/kaiwen_gateway-${{ steps.version.outputs.version }}-py3-none-any.whl"
           SMOKE_DIR="$(mktemp -d)"
           cd "${SMOKE_DIR}"
           uv venv --python 3.12 .venv_core
           uv pip install --python .venv_core/bin/python "${WHEEL_PATH}"
           .venv_core/bin/python -c "
           import kaiwen_gateway
-          assert kaiwen_gateway.__version__ == '0.1.0a1'
+          assert kaiwen_gateway.__version__ == '${{ steps.version.outputs.version }}'
           from kaiwen_gateway.core.identity import VerifiedConnectionContext
           for pkg in ['starlette', 'uvicorn', 'websockets']:
               try:
@@ -101,7 +126,7 @@ jobs:
 
       - name: Test clean virtualenv ([server] extra) and execute CLI smoke tests
         run: |
-          WHEEL_PATH="$(pwd)/dist/kaiwen_gateway-0.1.0a1-py3-none-any.whl"
+          WHEEL_PATH="$(pwd)/dist/kaiwen_gateway-${{ steps.version.outputs.version }}-py3-none-any.whl"
           SMOKE_DIR="$(mktemp -d)"
           cd "${SMOKE_DIR}"
           uv venv --python 3.12 .venv_server
@@ -140,7 +165,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: release-dists
           path: dist/
@@ -150,23 +175,24 @@ jobs:
   publish-pypi:
     name: Publish to PyPI (Trusted Publishing OIDC)
     needs: [verify-and-build]
-    if: github.event_name == 'release' && !inputs.dry_run
+    if: github.event_name == 'release' && github.event.action == 'published' && !github.event.release.draft && !inputs.dry_run
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
+      id-token: write # required for Trusted Publishing OIDC
       contents: read
     environment:
       name: pypi
       url: https://pypi.org/p/kaiwen-gateway
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           name: release-dists
           path: dist/
 
       - name: Publish package distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@76f52e660529645856eb5948ea221fb86e5c2848 # v1.12.4
         with:
           packages-dir: dist/
-          skip-existing: true
+          skip-existing: false
+          print-hash: true
