@@ -39,6 +39,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import tracemalloc
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -902,6 +903,7 @@ class SessionEchoTracker:
         self.seed: Final[int] = seed
         self.pattern: Final[str] = pattern
         self._send_times_s: dict[int, float] = {}
+        self._recv_times_s: dict[int, float] = {}
         self._seen_sequences: set[int] = set()
         self._last_unique_seq: int = -1
         self.frames_sent: int = 0
@@ -960,6 +962,7 @@ class SessionEchoTracker:
             self._last_unique_seq = frame_seq
 
         self._seen_sequences.add(frame_seq)
+        self._recv_times_s[frame_seq] = recv_monotonic_s
         sent_at = self._send_times_s.get(frame_seq)
         if sent_at is not None:
             rtt_ms = max(0.0, (recv_monotonic_s - sent_at) * 1000.0)
@@ -2067,6 +2070,27 @@ async def run_single_paced_media_call(
                 if not t.done():
                     t.cancel()
             await asyncio.gather(sender_task, receiver_task, return_exceptions=True)
+
+        if os.environ.get("KW_DIAGNOSE_PIPELINE") == "1" and tracker._send_times_s:
+            try:
+                diag_dir = Path(
+                    os.environ.get(
+                        "KW_DIAGNOSTIC_DIR",
+                        str(Path(tempfile.gettempdir()) / "kaiwen_pipeline_diag"),
+                    )
+                )
+                diag_dir.mkdir(parents=True, exist_ok=True)
+                client_diag = {
+                    f"{session_slot_id}:{seq}": [
+                        tracker._send_times_s.get(seq),
+                        tracker._recv_times_s.get(seq),
+                    ]
+                    for seq in tracker._send_times_s
+                }
+                out_path = diag_dir / f"client_{session_slot_id}.json"
+                out_path.write_text(json.dumps(client_diag), encoding="utf-8")
+            except Exception:
+                pass
 
     total_duration_ms = max(0.0, (time.perf_counter() - t_call_start) * 1000.0)
     return CallMediaRunRecord(

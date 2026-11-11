@@ -144,7 +144,9 @@ class BoundedFakeAIEchoPort(AIRealtimeMediaPort):
 
         # Enqueue with bounded backpressure
         try:
-            if self._backpressure_timeout is not None:
+            if not self._output_queue.full():
+                self._output_queue.put_nowait(echo_frame)
+            elif self._backpressure_timeout is not None:
                 async with asyncio.timeout(self._backpressure_timeout):
                     await self._output_queue.put(echo_frame)
             else:

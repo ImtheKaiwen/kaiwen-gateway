@@ -1132,7 +1132,9 @@ class VoiceBridgeSession:
 
                 t_pre_enqueue = time.perf_counter()
                 try:
-                    if self._backpressure_timeout is not None:
+                    if not self._inbound_queue.full():
+                        self._inbound_queue.put_nowait(frame)
+                    elif self._backpressure_timeout is not None:
                         try:
                             await asyncio.wait_for(
                                 self._inbound_queue.put(frame),
@@ -1302,7 +1304,9 @@ class VoiceBridgeSession:
 
                 t_pre_enqueue = time.perf_counter()
                 try:
-                    if self._backpressure_timeout is not None:
+                    if not self._outbound_queue.full():
+                        self._outbound_queue.put_nowait(frame)
+                    elif self._backpressure_timeout is not None:
                         try:
                             await asyncio.wait_for(
                                 self._outbound_queue.put(frame),
