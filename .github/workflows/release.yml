@@ -190,7 +190,7 @@ jobs:
       - name: Generate SHA256 checksums
         run: |
           cd dist
-          sha256sum * > SHA256SUMS
+          sha256sum *.whl *.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
       - name: Upload build artifacts
@@ -267,7 +267,10 @@ jobs:
             echo "ERROR: Expected release distributions not found in dist/"
             exit 1
           fi
-          echo "Artifact validation passed successfully."
+          # Remove SHA256SUMS from dist/ so pypa/gh-action-pypi-publish does not attempt
+          # to upload it as a Python distribution package (which fails Twine validation).
+          rm SHA256SUMS
+          echo "Artifact validation passed successfully and non-distribution files cleaned."
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
