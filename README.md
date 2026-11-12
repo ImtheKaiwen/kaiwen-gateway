@@ -226,7 +226,7 @@ uv build
 | [`ROADMAP.md`](ROADMAP.md) | Milestone delivery status and deferred work packages. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Record of user-visible changes and version releases. |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Hexagonal architecture, ports, adapters, and data flow. |
-| [`docs/decisions/`](docs/decisions/) | Numbered Architecture Decision Records (`ADR-0001` through `ADR-0004`). |
+| [`docs/decisions/`](docs/decisions/) | Numbered Architecture Decision Records (`ADR-0001` through `ADR-0005`). |
 | [`SECURITY.md`](SECURITY.md) | Security policy and vulnerability disclosure instructions. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Development workflow and PR submission standards. |
 | [`AGENTS.md`](AGENTS.md) | Rules and verification protocols for autonomous coding agents. |
