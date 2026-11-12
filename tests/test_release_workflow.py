@@ -193,6 +193,7 @@ def test_pre_upload_artifact_validation_step_is_present() -> None:
     assert "sha256sum -c SHA256SUMS" in publish_section
     assert "kaiwen_gateway-0.1.0a1-py3-none-any.whl" in publish_section
     assert "kaiwen_gateway-0.1.0a1.tar.gz" in publish_section
+    assert "rm SHA256SUMS" in publish_section
 
 
 def test_pypi_environment_and_least_privilege_permissions() -> None:
