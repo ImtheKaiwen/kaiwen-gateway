@@ -38,7 +38,7 @@ The V1 work includes a synthetic telephony simulator, an explicitly defined test
 
 - Clear documentation fixes, reproducible bug reports, targeted tests, small approved features, and verified performance improvements.
 - Security hardening and negative tests that preserve existing contracts.
-- Provider-independent adapter contract improvements backed by a real use case and tests.
+- Provider-independent adapter contract improvements backed by a real use case and tests. See the [AI Provider Realtime Adapter Integration Guide](docs/guides/AI_ADAPTER_INTEGRATION_GUIDE.md) for interface contracts, lifecycle rules, audio framing, and the reusable conformance test suite.
 - Focused changes to the current authorized milestone rather than unrelated refactoring.
 
 Before undertaking a major interface, security, wire-protocol, or architectural change, open an issue or discussion and agree on the scope with the maintainer. For security vulnerabilities, use the **private process in [SECURITY.md](SECURITY.md)**, **not** a public issue.

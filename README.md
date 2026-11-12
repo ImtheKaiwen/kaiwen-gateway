@@ -20,7 +20,7 @@ The first implementation focuses on **bidirectional telephone audio over secure 
 
 #### A. Evaluating Locally from Source or Built Wheel (Available Now)
 
-Kaiwen Gateway is currently in release candidate status. To install from a local checkout or locally built wheel:
+To install from a local checkout or locally built wheel:
 
 ```bash
 # Clone the repository
@@ -119,9 +119,9 @@ The following matrix distinguishes verified capabilities in this synthetic alpha
 | **Outbound Egress & SSRF Protection** | `SEC-008` | **Supported (Verified)** | In-process synthetic adapters; no arbitrary user-supplied egress URLs accepted; connections restricted to loopback endpoints. |
 | **Gateway Transport Overhead** | `NFR-PERF-004` (P1) | **Design Goal (Observed)** | Design goal is p95 Gateway-added transport processing overhead ≤ 50 ms under reference workload (excluding external network/model delays; not an established guarantee). Observed Gateway queue wait + bridge compute overhead was ~2.5 ms at 50 sessions and ~26 ms at 100 sessions under reference conditions. |
 | **Live Verimor Telephony** | `FR-INT-007` (P1) | **Deferred (Pending Vendor Spec)** | `OPEN-001` / `OPEN-002`. Blocked pending official vendor WebSocket specification. Wire format is strictly not guessed. |
-| **OpenAI Live Contract Verification** | `FR-INT-005` | **Deferred (Exception Pending)** | `OPEN-003`. Official sandbox verification unverified; requires production credentials. Loopback testing uses fake echo adapter. Gate B exception pending maintainer approval. |
-| **Agent Realtime Context Mapping** | `FR-INT-004` | **Deferred (Exception Pending)** | Integration adapter deferred while `kaiwen-agent` public realtime interfaces are under active parallel development. Gate B exception pending maintainer approval. |
-| **Tool Authorization Delegation** | `SEC-007` | **Deferred (Exception Pending)** | External agent tool authorization, approvals, and audit are owned by consuming application/agent, out of scope for synthetic audio gateway alpha. Gate B exception pending maintainer approval. |
+| **OpenAI Live Contract Verification** | `FR-INT-005` | **Deferred (Gate B Exception Accepted for Alpha)** | `OPEN-003`. Official live verification unverified; requires production credentials. Loopback testing uses fake echo adapter. Gate B exception accepted for synthetic alpha release; external AI adapter readiness tracked under M4-R1. |
+| **Agent Realtime Context Mapping** | `FR-INT-004` | **Deferred (Gate B Exception Accepted for Alpha)** | Integration adapter deferred while `kaiwen-agent` public realtime interfaces are under active parallel development. Gate B exception accepted for synthetic alpha release. |
+| **Tool Authorization Delegation** | `SEC-007` | **Deferred (Gate B Exception Accepted for Alpha)** | External agent tool authorization, approvals, and audit are owned by consuming application/agent, out of scope for synthetic audio gateway alpha. Gate B exception accepted for synthetic alpha release. |
 | **Distributed / Multi-Instance State** | `Gate C/D`, `M8` | **Deferred (Out of Alpha Scope)** | Atomic replay store and distributed multi-worker coordination deferred to Gate C/D (M8). Current alpha is single-instance only. |
 | **Interactive Voice at $\ge 100$ Calls** | `NFR-PERF-006` (P1) | **Documented Limitation** | 100 concurrent calls achieve 100% media integrity (0% loss) and pass pacing criteria, but median p95 echo RTT reaches ~2,045 ms due to single-threaded event loop transit backlog. |
 
