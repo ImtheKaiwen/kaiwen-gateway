@@ -183,7 +183,7 @@ def create_gateway_app(
     authorizer: CallAuthorizationPort | None = None,
     synthetic_auth_bridge: SyntheticAuthBridge | None = None,
     enable_synthetic_media: bool = False,
-    ai_media_port_factory: Callable[[], AIRealtimeMediaPort] | None = None,
+    ai_media_port_factory: Callable[..., AIRealtimeMediaPort] | None = None,
 ) -> Starlette:
     """Construct a fresh, instance-scoped ASGI application for Kaiwen Gateway.
 

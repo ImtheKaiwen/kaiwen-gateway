@@ -1,7 +1,7 @@
 # Kaiwen Gateway — Development Roadmap
 
-> **Status:** Active roadmap — M0 Complete (2026-11-01); M1 Complete (2026-11-01; M1.1–M1.4 verified); M2 Complete; M3 Complete; M4 In progress (M4.1 Complete — PR #20 / `577e6b9`; M4.2A Complete — PR #21 / `df28327`; M4.2B.1 Complete — PR #22 / `e457f8f`; M4.2B.2 Complete — PR #23 / `a3528ea`; external AI integration pending); M5 In progress (M5.1A Complete — PR #24 / `aca13cc`; M5.1B Complete — PR #26 / `223e9a1`; M5.1C Complete — PR #28 / `0dcc821` & PR #30 / `e5c5433`; high-concurrency benchmark hardening merged — PR #32 / `ae4dc1e`; multi-process client pacing bottleneck isolation merged — PR #34 / `425a883`; repeatable synthetic concurrency qualification established across 1/5/25/50/100 calls in PR #35 / `155940f`; fast-path queue optimization and targeted echo bottleneck isolation merged in PR #36 / `30802e3`; full M5 depends on M4 external integration completion); M6 In progress (v0.1.0a1 Release Candidate prepared)
-> **Project phase:** Synthetic Alpha Release Candidate (v0.1.0a1)
+> **Status:** Active roadmap — M0 Complete (2026-11-01); M1 Complete (2026-11-01; M1.1–M1.4 verified); M2 Complete; M3 Complete; M4 In progress (M4.1 Complete — PR #20 / `577e6b9`; M4.2A Complete — PR #21 / `df28327`; M4.2B.1 Complete — PR #22 / `e457f8f`; M4.2B.2 Complete — PR #23 / `a3528ea`; M4-R1 realtime adapter readiness in progress; external AI integration pending); M5 In progress (M5.1A Complete — PR #24 / `aca13cc`; M5.1B Complete — PR #26 / `223e9a1`; M5.1C Complete — PR #28 / `0dcc821` & PR #30 / `e5c5433`; high-concurrency benchmark hardening merged — PR #32 / `ae4dc1e`; multi-process client pacing bottleneck isolation merged — PR #34 / `425a883`; repeatable synthetic concurrency qualification established across 1/5/25/50/100 calls in PR #35 / `155940f`; fast-path queue optimization and targeted echo bottleneck isolation merged in PR #36 / `30802e3`; full M5 depends on M4 external integration completion); M6 Complete (v0.1.0a1 published to GitHub Releases & PyPI on 2026-11-12; PR #37–#41, ADR-0005)
+> **Project phase:** Synthetic Alpha Released (v0.1.0a1)
 > **Initial target release:** `0.1.0a1` (synthetic-environment alpha)
 > **Last reviewed:** 2026-11-12
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
@@ -64,7 +64,7 @@ Use only these milestone status values:
 | **M3** | ASGI/WSS ingress and synthetic telephony adapter | `Complete` (M3.1 merged in `#15` / `224284f`; M3.2A merged in `#16` / `558bd95`; M3.2B merged in `#17` / `7a28c40`; M3.3A merged in `#18` / `d347eae`; M3.3B merged in `#19` / `4fa9a18` & verified on `main` run `42289608463`) | M2 |
 | **M4** | Voice audio bridge and Kaiwen Agent integration | `In progress` (synthetic Voice Bridge foundation complete: M4.1 merged in `#20` / `577e6b9`; M4.2A merged in `#21` / `df28327`; M4.2B.1 merged in `#22` / `e457f8f`; M4.2B.2 merged in `#23` / `a3528ea` & verified on `main` run `42398851469`; full M4 external AI integration remains pending — Kaiwen Agent integration deferred while upstream public API is under active development, OpenAI Live unverified) | M3 |
 | **M5** | Resilience, simulation, security and load evidence | `In progress` (M5.1A Complete — PR #24 / `aca13cc` & verified on `main` run `42412851784`; M5.1B Complete — PR #26 / `223e9a1` & verified on `main` run `42495417583`; M5.1C Complete — M5.1C-A PR #28 / `0dcc821` & M5.1C-B PR #30 / `e5c5433` verified on `main` run `42534903921`; high-concurrency benchmark harness hardening merged in PR #32 / `ae4dc1e` & verified on `main` run `42548506391`; multi-process client pacing bottleneck isolation merged in PR #34 / `425a883` & verified on `main` run `42910306731`; repeatable synthetic concurrency qualification established across 1/5/25/50/100 calls in PR #35 / `155940f` & verified on `main` run `43105742337`; fast-path queue optimizations and targeted echo bottleneck isolation merged in PR #36 / `30802e3` & verified on `main` run `43128919179`; full M5 depends on M4 completion) | M4 |
-| **M6** | Alpha packaging and release-readiness review | `In progress (v0.1.0a1 Release Candidate prepared)` | M5 |
+| **M6** | Alpha packaging and release-readiness review | `Complete` (v0.1.0a1 published on PyPI & GitHub Releases 2026-11-12; PR #37–#41, ADR-0005) | M5 |
 | **M7** | Conditional Verimor pilot | `Blocked` (official protocol and authorizations) | M6 + `OPEN-*` dependencies |
 | **M8** | Production-readiness decision (separate track) | `Not started` | M7 evidence and separately approved operations plan |
 
@@ -211,20 +211,20 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 **Deliverables**
 
-- [x] Gate B checked against every P0 requirement, with documented exceptions for unavailable external verification (57/57 P0 requirements traced from docs/REQUIREMENTS.md; 54 verified, 3 deferred external exceptions pending maintainer approval under Gate B: FR-INT-004, FR-INT-005, SEC-007).
+- [x] Gate B checked against every P0 requirement, with documented exceptions for unavailable external verification (57/57 P0 requirements traced from docs/REQUIREMENTS.md; 54 verified, 3 deferred external exceptions accepted for synthetic alpha: FR-INT-004, FR-INT-005, SEC-007).
 - [x] Wheel and sdist built, metadata checked, installed in clean isolated environments; base package vs `[server]` extra validated without unexpected runtime dependencies.
 - [x] Working, verified minimal demo and CLI reference (`kaiwen-gateway demo --media` verified end-to-end; runnable quickstart example added in `examples/quickstart_synthetic_media.py`).
 - [x] Server runtime documented (`README.md`); startup, readiness (`GET /ready`), and draining behavior verified.
 - [x] Public API/wire contract docs distinguish mock behavior from real Verimor/OpenAI support (`README.md` Capability Matrix).
 - [x] Release automation workflow prepared (`.github/workflows/release.yml`) using least-privilege permissions, PyPI Trusted Publishing OIDC, workflow_dispatch restricted strictly to verification and build smoke testing (never publishing), publication strictly restricted to non-draft GitHub Release events with verified matching version tag and maintainer authorization (`vars.PYPI_PUBLISH_AUTHORIZED=true`), failure on version conflict (`skip-existing: false`), and immutable build artifacts.
-- [x] `CHANGELOG.md` prepared with a detailed `[0.1.0a1] - Unreleased (Release Candidate)` section and clean `Unreleased` header.
-- [ ] Maintainer approves the actual publishing/tagging/container-push action separately. (Pending human authorization).
+- [x] `CHANGELOG.md` prepared with release section `[0.1.0a1] - 2026-11-12` and clean `Unreleased` header.
+- [x] Maintainer approved actual publishing/tagging action; GitHub Release `v0.1.0a1` and PyPI release `v0.1.0a1` published 2026-11-12.
 
-**Exit evidence:** Gate B acceptance record in release candidate PR; package install/build/CLI output verified in isolated virtualenv smoke tests; artifact digests; release notes and explicit 100-call latency limitation notice. **A release candidate passing checks is not the same as publishing a release.**
+**Exit evidence:** Gate B acceptance record in release candidate PR #37; package install/build/CLI output verified in isolated virtualenv smoke tests; artifact digests; release notes and explicit 100-call latency limitation notice. Release workflow recovery and Trusted Publishing verified across PR #38, PR #39, PR #40, PR #41, and ADR-0005. Live PyPI publication verified at https://pypi.org/project/kaiwen-gateway/0.1.0a1/.
 
 **Relevant IDs:** `AT-001` through `AT-011` as required by Gate B, `CI-006`, `CI-007` where applicable, `FR-OPS-001`, `FR-OPS-006` (deployment readiness where in scope).
 
-**Definition:** `0.1.0a1` is an **intent**, not a promise that a specific public PyPI artifact exists.
+**Definition:** `0.1.0a1` is released and published on PyPI.
 
 ### M7 — Conditional real Verimor pilot (not a prerequisite for synthetic alpha)
 

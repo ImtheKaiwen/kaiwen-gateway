@@ -12,7 +12,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 ## [Unreleased]
 
 ### Added
-- None yet.
+- **AI Realtime Adapter Conformance Suite:** Added `RealtimeAdapterConformanceSuite` and `SyntheticUpstreamFailingAIAdapter` in `kaiwen_gateway.testing.conformance` (packaged with wheel distributions) allowing third-party AI provider adapter authors to verify 8 critical isolation, audio delivery, backpressure, turn cancellation, and failure dimensions deterministically with zero paid API calls.
+- **Context-Aware AI Port Factory Resolution:** Enhanced `create_gateway_app` and synthetic media endpoints to pass `call_id` and `tenant_id` to `ai_media_port_factory` while maintaining 100% backwards compatibility with zero-argument factories.
+- **AI Realtime Port Protocol Alias:** Exported `AIRealtimePort = AIRealtimeMediaPort` in `kaiwen_gateway.modules.voice.ports` for spec and naming compatibility.
+- **AI Provider Adapter Integration Guide:** Published `docs/guides/AI_ADAPTER_INTEGRATION_GUIDE.md` detailing interface contracts, 16kHz PCM16LE framing rules, barge-in turn cancellation, server-side secret management, and conformance test execution.
 
 ---
 

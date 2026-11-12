@@ -18,6 +18,7 @@ from kaiwen_gateway.modules.voice.domain import AudioFrame, VoiceDomainError
 __all__ = [
     "TelephonyMediaPort",
     "AIRealtimeMediaPort",
+    "AIRealtimePort",
     "InterruptionCapabilities",
     "InterruptionOutcome",
     "InterruptibleAIPort",
@@ -189,3 +190,7 @@ class AIRealtimeMediaPort(Protocol):
     async def close(self) -> None:
         """Idempotently close the AI realtime media port and release resources."""
         ...
+
+
+# Provider-independent alias for AIRealtimeMediaPort
+AIRealtimePort = AIRealtimeMediaPort

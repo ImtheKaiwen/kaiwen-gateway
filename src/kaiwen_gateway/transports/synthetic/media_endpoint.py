@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import math
 import uuid
@@ -77,6 +78,62 @@ def _resolve_positive_float(value: Any, default: float) -> float:
         return val
     except (TypeError, ValueError):
         return default
+
+
+def _instantiate_ai_port(
+    factory: Callable[..., AIRealtimeMediaPort],
+    *,
+    call_id: str,
+    tenant_id: str,
+    context: Any = None,
+) -> AIRealtimeMediaPort:
+    """Instantiate an AI realtime media port from a factory, passing context if supported.
+
+    Maintains 100% backwards compatibility with 0-argument factories while supporting
+    context-aware factories accepting call_id, tenant_id, and/or context kwargs or args.
+    """
+    try:
+        sig = inspect.signature(factory)
+        params = sig.parameters
+        if not params:
+            return factory()
+
+        accepts_var_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        kwargs: dict[str, Any] = {}
+        if "call_id" in params or accepts_var_kwargs:
+            kwargs["call_id"] = call_id
+        if "tenant_id" in params or accepts_var_kwargs:
+            kwargs["tenant_id"] = tenant_id
+        if ("context" in params or accepts_var_kwargs) and context is not None:
+            kwargs["context"] = context
+        if ("verified_context" in params or accepts_var_kwargs) and context is not None:
+            kwargs["verified_context"] = context
+
+        if kwargs:
+            try:
+                sig.bind_partial(**kwargs)
+                return factory(**kwargs)
+            except TypeError:
+                pass
+
+        # Handle single positional parameter
+        positional = [
+            p
+            for p in params.values()
+            if p.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            and p.default is inspect.Parameter.empty
+        ]
+        if len(positional) == 1:
+            p_name = positional[0].name
+            if p_name in ("context", "verified_context") and context is not None:
+                return factory(context)
+            if p_name == "call_id":
+                return factory(call_id)
+
+        return factory()
+    except (TypeError, ValueError):
+        return factory()
 
 
 async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
@@ -276,11 +333,16 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
             backpressure_timeout=backpressure_timeout,
             send_timeout=send_timeout,
         )
-        ai_port_factory: Callable[[], AIRealtimeMediaPort] | None = getattr(
+        ai_port_factory: Callable[..., AIRealtimeMediaPort] | None = getattr(
             app_state, "ai_media_port_factory", None
         )
         ai_port = (
-            ai_port_factory()
+            _instantiate_ai_port(
+                ai_port_factory,
+                call_id=verified_context.call_id,
+                tenant_id=verified_context.tenant_id,
+                context=verified_context,
+            )
             if ai_port_factory is not None
             else BoundedInterruptibleFakeAIEchoPort()
         )
