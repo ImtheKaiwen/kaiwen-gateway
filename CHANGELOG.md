@@ -46,7 +46,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - **Developer Quickstart Example:** Added `examples/quickstart_synthetic_media.py` demonstrating programmatic setup, token generation, streaming, interruption, and shutdown.
 
 #### Release Automation & CI
-- **Release Automation Workflow:** Added `.github/workflows/release.yml` with `workflow_dispatch` (dry-run by default, explicit confirmation required to publish) and `release: [published]` triggers, clean virtualenv smoke tests, SHA256 checksum generation, exact tag-to-version validation, failure on distribution conflict (`skip-existing: false`), fail-closed maintainer authorization guard (`PYPI_PUBLISH_AUTHORIZED=true`), and PyPI Trusted Publishing via OIDC (`pypa/gh-action-pypi-publish@release/v1`).
+- **Release Automation Workflow:** Added `.github/workflows/release.yml` with `workflow_dispatch` (strictly verification and dry-run only; never publishes to PyPI) and `release: [published]` triggers, clean virtualenv smoke tests, SHA256 checksum generation, exact tag-to-version validation, failure on distribution conflict (`skip-existing: false`), fail-closed maintainer authorization guard (`vars.PYPI_PUBLISH_AUTHORIZED=true`), and PyPI Trusted Publishing via OIDC (`pypa/gh-action-pypi-publish`).
 - **Comprehensive Fast CI:** Hardened `.github/workflows/ci.yml` running across Python 3.11, 3.12, and 3.13 with Ruff, strict mypy, pytest with coverage, `uv audit --locked` vulnerability scanning, and clean wheel/sdist smoke testing including `demo --media`.
 
 #### Benchmarking & Performance
