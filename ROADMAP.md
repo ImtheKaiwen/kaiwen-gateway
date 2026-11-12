@@ -216,7 +216,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - [x] Working, verified minimal demo and CLI reference (`kaiwen-gateway demo --media` verified end-to-end; runnable quickstart example added in `examples/quickstart_synthetic_media.py`).
 - [x] Server runtime documented (`README.md`); startup, readiness (`GET /ready`), and draining behavior verified.
 - [x] Public API/wire contract docs distinguish mock behavior from real Verimor/OpenAI support (`README.md` Capability Matrix).
-- [x] Release automation workflow prepared (`.github/workflows/release.yml`) using least-privilege permissions, PyPI Trusted Publishing OIDC, dry-run safety by default, failure on version conflict (`skip-existing: false`), tag-to-version validation, and immutable build artifacts.
+- [x] Release automation workflow prepared (`.github/workflows/release.yml`) using least-privilege permissions, PyPI Trusted Publishing OIDC, workflow_dispatch restricted strictly to verification and build smoke testing (never publishing), publication strictly restricted to non-draft GitHub Release events with verified matching version tag and maintainer authorization (`vars.PYPI_PUBLISH_AUTHORIZED=true`), failure on version conflict (`skip-existing: false`), and immutable build artifacts.
 - [x] `CHANGELOG.md` prepared with a detailed `[0.1.0a1] - Unreleased (Release Candidate)` section and clean `Unreleased` header.
 - [ ] Maintainer approves the actual publishing/tagging/container-push action separately. (Pending human authorization).
 

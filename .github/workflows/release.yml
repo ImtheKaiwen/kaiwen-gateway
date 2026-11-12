@@ -4,15 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (verify and build without publishing to PyPI)"
-        required: true
-        type: boolean
-        default: true
-      confirm_publish:
-        description: "Confirm publishing to PyPI (must be true when dry_run is false)"
+        description: "Dry run (verification and build only; workflow_dispatch never publishes to PyPI)"
         required: false
         type: boolean
-        default: false
+        default: true
   release:
     types: [published]
 
@@ -180,12 +175,11 @@ jobs:
   publish-pypi:
     name: Publish to PyPI (Trusted Publishing OIDC)
     needs: [verify-and-build]
-    # Fail-closed guard: PyPI publishing is blocked unless the repository maintainer
-    # explicitly authorizes it via repository variable PYPI_PUBLISH_AUTHORIZED=true
-    # or passes confirm_publish=true on a non-dry-run workflow dispatch.
-    if: |
-      (github.event_name == 'release' && vars.PYPI_PUBLISH_AUTHORIZED == 'true' && !github.event.release.draft) ||
-      (github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.confirm_publish == true)
+    # Fail-closed guard: PyPI publishing is strictly restricted to published, non-draft
+    # GitHub Release events where the maintainer has explicitly authorized publication
+    # via repository variable PYPI_PUBLISH_AUTHORIZED=true.
+    # workflow_dispatch is NEVER permitted to publish distributions under any condition.
+    if: github.event_name == 'release' && github.event.action == 'published' && !github.event.release.draft && vars.PYPI_PUBLISH_AUTHORIZED == 'true'
     runs-on: ubuntu-latest
     permissions:
       id-token: write # required for Trusted Publishing OIDC
@@ -197,12 +191,8 @@ jobs:
       - name: Verify maintainer publishing authorization
         run: |
           echo "Verifying publishing safety guard..."
-          if [ "${{ github.event_name }}" = "release" ] && [ "${{ vars.PYPI_PUBLISH_AUTHORIZED }}" != "true" ]; then
-            echo "ERROR: Unintentional PyPI publish prevented. Repository variable PYPI_PUBLISH_AUTHORIZED must be 'true'."
-            exit 1
-          fi
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.confirm_publish }}" != "true" ]; then
-            echo "ERROR: Manual publish requires confirm_publish=true."
+          if [ "${{ github.event_name }}" != "release" ] || [ "${{ github.event.action }}" != "published" ] || [ "${{ github.event.release.draft }}" = "true" ] || [ "${{ vars.PYPI_PUBLISH_AUTHORIZED }}" != "true" ]; then
+            echo "ERROR: Unintentional PyPI publish prevented. PyPI publishing is strictly restricted to published non-draft release events with vars.PYPI_PUBLISH_AUTHORIZED == 'true'."
             exit 1
           fi
           echo "Publishing authorization confirmed."

@@ -43,7 +43,7 @@ pip install dist/kaiwen_gateway-0.1.0a1-py3-none-any.whl
 
 #### B. Installing from PyPI (Post-Publication)
 
-*Note: The commands below will be available once the maintainer officially authorizes and completes publication to PyPI.*
+*Note: The package is not yet published to PyPI. Publishing is protected by strict release safeguards (`.github/workflows/release.yml`): `workflow_dispatch` is restricted to verification and dry-run testing only; publication to PyPI requires an authorized, non-draft GitHub Release event with a matching version tag and explicit maintainer approval via `vars.PYPI_PUBLISH_AUTHORIZED=true`. The commands below will be available once the maintainer officially authorizes and completes publication to PyPI.*
 
 ```bash
 # Install core package + ASGI runtime once published:
