@@ -1,4 +1,4 @@
-"""Deterministic validation tests for .github/workflows/release.yml safeguards and recovery."""
+"""Deterministic validation tests for .github/workflows/release.yml safeguards."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ RELEASE_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
 VERIFIED_PYPI_PUBLISH_SHA = "7245906fb61fa33a13554f9d5fb856fe61758086"
 BROKEN_PYPI_PUBLISH_SHA = "76f52e660529645856eb5948ea221fb86e5c2848"
-EXPECTED_V0_1_0A1_COMMIT = "7d7cf9754cae512233229d9da77ec7a61d6ca35a"
 
 
 def test_release_workflow_file_exists() -> None:
@@ -29,45 +28,40 @@ def test_broken_pypi_action_pin_is_not_present() -> None:
     )
 
 
-def test_workflow_dispatch_recovery_inputs_and_defaults() -> None:
-    """workflow_dispatch must default to dry_run=true and only allow emergency recovery for v0.1.0a1."""
+def test_workflow_dispatch_is_restricted_to_dry_run_validation_only() -> None:
+    """workflow_dispatch must never publish distributions under any inputs."""
     content = RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8")
 
-    # confirm_publish must not be present
+    # confirm_publish and recovery inputs must not be present
     assert "confirm_publish" not in content, "Deprecated confirm_publish input must not exist"
+    assert "recovery_release_tag" not in content, "Temporary recovery input must not remain"
 
-    # dry_run default must be true
-    assert "dry_run:" in content
-    assert "default: true" in content
-
-    # recovery_release_tag must exist and be documented for emergency recovery only
-    assert "recovery_release_tag:" in content
-    assert "EMERGENCY RECOVERY ONLY" in content
+    # workflow_dispatch block must exist
+    assert "workflow_dispatch:" in content
+    # Any input under workflow_dispatch must be explicitly documented as dry-run only
+    assert "workflow_dispatch never publishes to PyPI" in content
 
 
 def test_publish_pypi_job_condition_is_strictly_fail_closed() -> None:
-    """publish-pypi must strictly require an authorized release or explicit v0.1.0a1 recovery dispatch."""
+    """publish-pypi must strictly require a published, non-draft release and PYPI_PUBLISH_AUTHORIZED=true."""
     content = RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8")
+
     assert "publish-pypi:" in content
     publish_section = content.split("publish-pypi:")[1]
 
-    # Verify 'if:' condition
-    condition_match = re.search(r"\n\s+if:\s+\|\s*\n([\s\S]+?)(?=\n\s+[a-z]+:)", publish_section)
-    assert condition_match is not None, "publish-pypi job must have a multi-line 'if' condition"
+    # Verify 'if:' condition in publish-pypi
+    condition_match = re.search(r"\n\s+if:\s+([^\n]+)", publish_section)
+    assert condition_match is not None, "publish-pypi job must have an 'if' condition"
     condition = condition_match.group(1).strip()
 
-    # Release clause
+    # The condition must require all 4 safety criteria
     assert "github.event_name == 'release'" in condition
     assert "github.event.action == 'published'" in condition
     assert "!github.event.release.draft" in condition
-
-    # Emergency recovery clause
-    assert "github.event_name == 'workflow_dispatch'" in condition
-    assert "!inputs.dry_run" in condition
-    assert "inputs.recovery_release_tag == 'v0.1.0a1'" in condition
-
-    # Authorization guard required in both branches
     assert "vars.PYPI_PUBLISH_AUTHORIZED == 'true'" in condition
+
+    # The condition must NOT contain any reference to workflow_dispatch
+    assert "workflow_dispatch" not in condition
 
 
 def test_publish_condition_truth_table() -> None:
@@ -76,77 +70,44 @@ def test_publish_condition_truth_table() -> None:
     assert "publish-pypi:" in content
     publish_section = content.split("publish-pypi:")[1]
 
-    condition_match = re.search(r"\n\s+if:\s+\|\s*\n([\s\S]+?)(?=\n\s+[a-z]+:)", publish_section)
+    condition_match = re.search(r"\n\s+if:\s+([^\n]+)", publish_section)
     assert condition_match is not None
     condition_str = condition_match.group(1).strip()
 
-    for required_sub in [
+    for part in [
         "github.event_name == 'release'",
         "github.event.action == 'published'",
         "!github.event.release.draft",
-        "github.event_name == 'workflow_dispatch'",
-        "!inputs.dry_run",
-        "inputs.recovery_release_tag == 'v0.1.0a1'",
         "vars.PYPI_PUBLISH_AUTHORIZED == 'true'",
     ]:
-        assert required_sub in condition_str
+        assert part in condition_str
 
     def eval_condition(
-        event_name: str,
-        action: str,
-        is_draft: bool,
-        dry_run: bool,
-        recovery_tag: str,
-        pypi_authorized: str | None,
+        event_name: str, action: str, is_draft: bool, pypi_authorized: str | None
     ) -> bool:
-        is_release_authorized = (
+        return (
             event_name == "release"
             and action == "published"
             and not is_draft
             and pypi_authorized == "true"
         )
-        is_recovery_authorized = (
-            event_name == "workflow_dispatch"
-            and not dry_run
-            and recovery_tag == "v0.1.0a1"
-            and pypi_authorized == "true"
-        )
-        return is_release_authorized or is_recovery_authorized
 
-    # 1. Ordinary workflow dispatch (must NEVER publish)
-    assert not eval_condition("workflow_dispatch", "", False, True, "", "true")
-    assert not eval_condition("workflow_dispatch", "", False, True, "", "false")
-    assert not eval_condition("workflow_dispatch", "", False, True, "v0.1.0a1", "true")
-    assert not eval_condition("workflow_dispatch", "", False, False, "", "true")
-    assert not eval_condition("workflow_dispatch", "", False, False, "v0.1.0a2", "true")
-    assert not eval_condition("workflow_dispatch", "", False, False, "v0.2.0", "true")
-    assert not eval_condition("workflow_dispatch", "", False, False, "latest", "true")
+    # Scenarios that MUST NEVER publish (result == False)
+    assert not eval_condition("workflow_dispatch", "", False, "true")
+    assert not eval_condition("workflow_dispatch", "", False, "false")
+    assert not eval_condition("workflow_dispatch", "", False, None)
+    assert not eval_condition("push", "", False, "true")
+    assert not eval_condition("pull_request", "", False, "true")
+    assert not eval_condition("release", "published", True, "true")
+    assert not eval_condition("release", "created", False, "true")
+    assert not eval_condition("release", "edited", False, "true")
+    assert not eval_condition("release", "published", False, "false")
+    assert not eval_condition("release", "published", False, None)
+    assert not eval_condition("release", "published", False, "")
+    assert not eval_condition("release", "published", False, "1")
 
-    # 2. Recovery workflow dispatch without authorization (must NEVER publish)
-    assert not eval_condition("workflow_dispatch", "", False, False, "v0.1.0a1", "false")
-    assert not eval_condition("workflow_dispatch", "", False, False, "v0.1.0a1", None)
-    assert not eval_condition("workflow_dispatch", "", False, False, "v0.1.0a1", "")
-
-    # 3. Only authorized recovery dispatch for v0.1.0a1 (MUST publish)
-    assert eval_condition("workflow_dispatch", "", False, False, "v0.1.0a1", "true")
-
-    # 4. Release events without authorization (must NEVER publish)
-    assert not eval_condition("release", "published", False, True, "", "false")
-    assert not eval_condition("release", "published", False, True, "", None)
-
-    # 5. Draft release (must NEVER publish)
-    assert not eval_condition("release", "published", True, True, "", "true")
-
-    # 6. Non-published release action (must NEVER publish)
-    assert not eval_condition("release", "created", False, True, "", "true")
-    assert not eval_condition("release", "edited", False, True, "", "true")
-
-    # 7. Authorized published release (MUST publish)
-    assert eval_condition("release", "published", False, True, "", "true")
-
-    # 8. Unrelated events (must NEVER publish)
-    assert not eval_condition("push", "", False, False, "v0.1.0a1", "true")
-    assert not eval_condition("pull_request", "", False, False, "v0.1.0a1", "true")
+    # Only one exact scenario permits publishing (result == True)
+    assert eval_condition("release", "published", False, "true")
 
 
 def test_in_job_safety_guard_step_is_present() -> None:
@@ -155,10 +116,11 @@ def test_in_job_safety_guard_step_is_present() -> None:
     assert "publish-pypi:" in content
     publish_section = content.split("publish-pypi:")[1]
 
-    assert "Verify maintainer publishing authorization and recovery constraints" in publish_section
+    assert "Verify maintainer publishing authorization" in publish_section
     assert 'vars.PYPI_PUBLISH_AUTHORIZED }}" != "true"' in publish_section
-    assert 'inputs.recovery_release_tag }}" != "v0.1.0a1"' in publish_section
-    assert 'inputs.dry_run }}" = "true"' in publish_section
+    assert 'github.event_name }}" != "release"' in publish_section
+    assert 'github.event.action }}" != "published"' in publish_section
+    assert 'github.event.release.draft }}" = "true"' in publish_section
 
 
 def test_tag_to_version_validation_step_is_present() -> None:
@@ -169,18 +131,8 @@ def test_tag_to_version_validation_step_is_present() -> None:
 
     assert "Validate release tag against package version" in build_section
     assert 'EXPECTED_TAG="v${{ steps.version.outputs.version }}"' in build_section
+    assert 'ACTUAL_TAG="${{ github.ref_name }}"' in build_section
     assert "does not match package version" in build_section
-
-
-def test_emergency_recovery_checkout_step_is_present() -> None:
-    """verify-and-build job must verify the v0.1.0a1 commit before checking it out."""
-    content = RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8")
-    assert "verify-and-build:" in content
-    build_section = content.split("publish-pypi:")[0]
-
-    assert "Verify and checkout release tag for emergency recovery" in build_section
-    assert f'EXPECTED_TAG_COMMIT="{EXPECTED_V0_1_0A1_COMMIT}"' in build_section
-    assert "git checkout v0.1.0a1" in build_section
 
 
 def test_pre_upload_artifact_validation_step_is_present() -> None:
@@ -191,8 +143,6 @@ def test_pre_upload_artifact_validation_step_is_present() -> None:
 
     assert "Validate distribution files and checksums before PyPI upload" in publish_section
     assert "sha256sum -c SHA256SUMS" in publish_section
-    assert "kaiwen_gateway-0.1.0a1-py3-none-any.whl" in publish_section
-    assert "kaiwen_gateway-0.1.0a1.tar.gz" in publish_section
     assert "rm SHA256SUMS" in publish_section
 
 

@@ -4,10 +4,10 @@ All notable **user-facing changes** to Kaiwen Gateway are recorded in this file.
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for its Python distribution. The **Python package version**, any **external Gateway wire/API protocol version**, and **provider adapter compatibility** are separate concerns; a package release does not automatically change a wire protocol version.
 
-> **Project status (2026-11-12): Synthetic Alpha Release Candidate (v0.1.0a1 - Unreleased).**
-> Kaiwen Gateway `v0.1.0a1` is prepared as a verified, installable, documented synthetic-environment alpha release candidate. It provides a complete, runnable synthetic communication gateway (core identity, admission control, connection lifecycle, graceful draining, ASGI server, synthetic telephony control, synthetic PCM16LE audio streaming, voice media bridge, and barge-in interruption) without requiring external credentials or proprietary telephony hardware.
+> **Project status (2026-11-12): Synthetic Alpha Released (v0.1.0a1).**
+> Kaiwen Gateway `v0.1.0a1` is released and published to PyPI as a verified, installable, documented synthetic-environment alpha. It provides a complete, runnable synthetic communication gateway (core identity, admission control, connection lifecycle, graceful draining, ASGI server, synthetic telephony control, synthetic PCM16LE audio streaming, voice media bridge, and barge-in interruption) without requiring external credentials or proprietary telephony hardware.
 >
-> **Production use is not yet supported and no package has been published to PyPI.** Live Verimor interoperability (`FR-INT-007`) and external AI provider backends (`FR-INT-003`, OpenAI Realtime / Gemini Live) remain deferred pending vendor specifications.
+> **Production use is not yet supported.** Live Verimor interoperability (`FR-INT-007`) and external AI provider backends (`FR-INT-003`, OpenAI Realtime / Gemini Live) remain deferred pending vendor specifications.
 
 ## [Unreleased]
 
@@ -16,7 +16,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ---
 
-## [0.1.0a1] - Unreleased (Release Candidate)
+## [0.1.0a1] - 2026-11-12
 
 ### Added
 

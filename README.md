@@ -3,10 +3,10 @@
 **A modular, provider-agnostic communication gateway for real-time AI applications.**
 
 > [!IMPORTANT]
-> **Project Status: Synthetic Alpha Release Candidate (`v0.1.0a1` — Unreleased).**
-> This repository provides an installable, verified, synthetic-environment alpha release candidate. It enables developers to test, benchmark, and integrate against the Gateway using fully reproducible in-process and loopback synthetic environments without requiring external credentials or proprietary telephony hardware.
+> **Project Status: Synthetic Alpha Released (`v0.1.0a1`).**
+> This repository provides an installable, verified, synthetic-environment alpha release published on PyPI. It enables developers to test, benchmark, and integrate against the Gateway using fully reproducible in-process and loopback synthetic environments without requiring external credentials or proprietary telephony hardware.
 >
-> **Production use is not yet supported.** The package is **not yet published to PyPI**. Live Verimor PSTN/WSS interoperability (`FR-INT-007`) and external AI provider adapters (`FR-INT-003`, e.g. OpenAI Realtime / Gemini Live) remain deferred pending official vendor specifications and contract validation.
+> **Production use is not yet supported.** Live Verimor PSTN/WSS interoperability (`FR-INT-007`) and external AI provider adapters (`FR-INT-003`, e.g. OpenAI Realtime / Gemini Live) remain deferred pending official vendor specifications and contract validation.
 
 Kaiwen Gateway is designed to be both a **reusable Python library** and a **deployable ASGI service**. It accepts connections from external systems, authenticates and isolates them, translates provider-specific protocols into well-defined internal contracts, and bridges live communication to application and AI backends.
 
@@ -41,16 +41,16 @@ To install only the minimal core library (contracts, admission control, identity
 pip install dist/kaiwen_gateway-0.1.0a1-py3-none-any.whl
 ```
 
-#### B. Installing from PyPI (Post-Publication)
+#### B. Installing from PyPI
 
-*Note: The package is not yet published to PyPI. Publishing is protected by strict release safeguards (`.github/workflows/release.yml`): `workflow_dispatch` is restricted to verification and dry-run testing only; publication to PyPI requires an authorized, non-draft GitHub Release event with a matching version tag and explicit maintainer approval via `vars.PYPI_PUBLISH_AUTHORIZED=true`. The commands below will be available once the maintainer officially authorizes and completes publication to PyPI.*
+Kaiwen Gateway `v0.1.0a1` is published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0a1/):
 
 ```bash
-# Install core package + ASGI runtime once published:
-pip install "kaiwen-gateway[server]"
+# Install core package + ASGI runtime:
+pip install "kaiwen-gateway[server]==0.1.0a1"
 
 # Install minimal core library only:
-pip install kaiwen-gateway
+pip install "kaiwen-gateway==0.1.0a1"
 ```
 
 ---
