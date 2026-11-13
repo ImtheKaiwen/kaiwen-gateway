@@ -27,6 +27,7 @@ from kaiwen_gateway.modules.voice.adapters.fake_ai import (
 from kaiwen_gateway.modules.voice.bridge import VoiceBridgeSession, VoiceBridgeState
 from kaiwen_gateway.modules.voice.domain import (
     AudioFrame,
+    MediaBackpressureOverflowError,
     MediaPortClosedError,
     VoiceDomainError,
 )
@@ -425,3 +426,51 @@ def test_non_echo_independent_upstream_audio_adapter_passes_conformance() -> Non
     suite.test_bi_directional_audio_routing_and_delivery(suite.create_adapter)
     # Must pass Dimension 2 (Multi-call isolation with independent audio)
     suite.test_two_concurrent_calls_isolation(suite.create_adapter)
+
+
+def test_fake_ai_media_adapter_close_when_full_queue_is_safe() -> None:
+    """Verify closing a FakeAIMediaAdapter with a full queue succeeds without QueueFull."""
+
+    async def _test() -> None:
+        adapter = FakeAIMediaAdapter(queue_capacity=1)
+        adapter.push_frame(create_test_frame())
+        assert adapter.buffered_frame_count == 1
+
+        # Closing must not raise QueueFull
+        await adapter.close()
+        assert adapter.is_closed
+
+    asyncio.run(_test())
+
+
+def test_synthetic_upstream_failing_adapter_pending_backpressure_vs_lifetime_history() -> None:
+    """Verify backpressure applies to pending unconsumed frames, not total call lifetime frames."""
+
+    async def _test() -> None:
+        adapter = SyntheticUpstreamFailingAIAdapter(queue_capacity=4)
+
+        # Stream 20 frames across iterations where pending frames are drained
+        for batch in range(5):
+            for i in range(4):
+                seq = batch * 4 + i
+                await adapter.send_frame(create_test_frame(sequence=seq))
+            assert adapter.buffered_frame_count == 4
+            # Drain pending frames to simulate successful upstream delivery
+            drained = adapter.drain_pending_inbound()
+            assert len(drained) == 4
+            assert adapter.buffered_frame_count == 0
+
+        # Lifetime history contains all 20 frames
+        assert len(adapter.received_inbound_frames) == 20
+
+        # Now fill up to capacity 4 and verify the 5th raises overflow
+        for i in range(4):
+            await adapter.send_frame(create_test_frame(sequence=100 + i))
+
+        with pytest.raises(MediaBackpressureOverflowError):
+            await adapter.send_frame(create_test_frame(sequence=105))
+
+        await adapter.close()
+        assert adapter.is_closed
+
+    asyncio.run(_test())

@@ -106,7 +106,16 @@ class SyntheticUpstreamFailingAIAdapter(AIRealtimeMediaPort, InterruptibleAIPort
         self._upstream_error: Exception | None = None
         self._cancelled_turn_high_water: int = -1
         self._inbound_frames: list[AudioFrame] = []
-        self._queue: asyncio.Queue[object] = asyncio.Queue(maxsize=queue_capacity)
+        self._pending_inbound: asyncio.Queue[AudioFrame] = (
+            asyncio.Queue(maxsize=queue_capacity)
+            if queue_capacity is not None and queue_capacity > 0
+            else asyncio.Queue()
+        )
+        self._queue: asyncio.Queue[object] = (
+            asyncio.Queue(maxsize=queue_capacity)
+            if queue_capacity is not None and queue_capacity > 0
+            else asyncio.Queue()
+        )
         self._close_event: asyncio.Event = asyncio.Event()
 
     @property
@@ -115,13 +124,23 @@ class SyntheticUpstreamFailingAIAdapter(AIRealtimeMediaPort, InterruptibleAIPort
 
     @property
     def buffered_frame_count(self) -> int:
-        """Current number of frames buffered in the queue."""
-        return max(self._queue.qsize(), len(self._inbound_frames))
+        """Current number of pending frames buffered in the queues."""
+        return max(self._queue.qsize(), self._pending_inbound.qsize())
 
     @property
     def received_inbound_frames(self) -> list[AudioFrame]:
         """Frames received inbound from caller via send_frame."""
         return list(self._inbound_frames)
+
+    def drain_pending_inbound(self) -> list[AudioFrame]:
+        """Drain and return currently pending inbound frames, freeing queue capacity."""
+        drained: list[AudioFrame] = []
+        while not self._pending_inbound.empty():
+            try:
+                drained.append(self._pending_inbound.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return drained
 
     @property
     def interruption_capabilities(self) -> InterruptionCapabilities:
@@ -180,10 +199,12 @@ class SyntheticUpstreamFailingAIAdapter(AIRealtimeMediaPort, InterruptibleAIPort
             raise MediaPortClosedError("Cannot send frame to closed adapter")
         if frame.turn_id is not None and frame.turn_id <= self._cancelled_turn_high_water:
             return
-        if self.queue_capacity is not None and len(self._inbound_frames) >= self.queue_capacity:
-            raise MediaBackpressureOverflowError(
-                f"SyntheticUpstreamFailingAIAdapter queue capacity exceeded ({self.queue_capacity})"
-            )
+        if self.queue_capacity is not None and self.queue_capacity > 0:
+            if self._pending_inbound.full():
+                raise MediaBackpressureOverflowError(
+                    f"SyntheticUpstreamFailingAIAdapter queue capacity exceeded ({self.queue_capacity})"
+                )
+            self._pending_inbound.put_nowait(frame)
         self._inbound_frames.append(frame)
 
     async def receive_frame(self) -> AudioFrame | None:
@@ -232,6 +253,16 @@ class SyntheticUpstreamFailingAIAdapter(AIRealtimeMediaPort, InterruptibleAIPort
             return
         self._is_closed = True
         self._close_event.set()
+        while not self._pending_inbound.empty():
+            try:
+                self._pending_inbound.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
         try:
             self._queue.put_nowait(_CLOSE_SENTINEL)
         except asyncio.QueueFull:

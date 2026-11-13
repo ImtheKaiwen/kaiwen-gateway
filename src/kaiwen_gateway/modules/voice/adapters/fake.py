@@ -49,6 +49,11 @@ class _BaseFakeMediaAdapter:
             if queue_capacity is not None and queue_capacity > 0
             else asyncio.Queue()
         )
+        self._pending_sent: asyncio.Queue[AudioFrame] = (
+            asyncio.Queue(maxsize=queue_capacity)
+            if queue_capacity is not None and queue_capacity > 0
+            else asyncio.Queue()
+        )
         self._sent_frames: list[AudioFrame] = []
         self._is_closed: bool = False
         self._close_count: int = 0
@@ -95,12 +100,10 @@ class _BaseFakeMediaAdapter:
 
     @property
     def buffered_frame_count(self) -> int:
-        """Return the count of currently buffered frames."""
-        return (
-            self._inbound_queue.qsize()
-            if self._inbound_queue.maxsize > 0
-            else len(self._sent_frames)
-        )
+        """Return the count of currently buffered pending frames."""
+        if self._queue_capacity is not None and self._queue_capacity > 0:
+            return max(self._inbound_queue.qsize(), self._pending_sent.qsize())
+        return self._inbound_queue.qsize()
 
     def push_frame(self, frame: AudioFrame) -> None:
         """Push an audio frame to be returned by receive_frame."""
@@ -165,10 +168,12 @@ class _BaseFakeMediaAdapter:
             self._send_error = None
             raise err
 
-        if self._queue_capacity is not None and len(self._sent_frames) >= self._queue_capacity:
-            raise MediaBackpressureOverflowError(
-                f"{self.name} queue capacity exceeded ({self._queue_capacity})"
-            )
+        if self._queue_capacity is not None and self._queue_capacity > 0:
+            if self._pending_sent.full():
+                raise MediaBackpressureOverflowError(
+                    f"{self.name} queue capacity exceeded ({self._queue_capacity})"
+                )
+            self._pending_sent.put_nowait(frame)
 
         if self._send_delay > 0.0:
             await asyncio.sleep(self._send_delay)
@@ -176,14 +181,37 @@ class _BaseFakeMediaAdapter:
         self._sent_frames.append(frame)
         self._send_count += 1
 
+    def drain_pending_sent(self) -> list[AudioFrame]:
+        """Drain and return currently pending sent frames, freeing queue capacity."""
+        drained: list[AudioFrame] = []
+        while not self._pending_sent.empty():
+            try:
+                drained.append(self._pending_sent.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return drained
+
     async def close(self) -> None:
         """Close the adapter and unblock any waiting receivers."""
         self._close_count += 1
         if not self._is_closed:
             self._is_closed = True
             self._close_event.set()
-            # Push sentinel to wake up any pending receive_frame calls
-            self._inbound_queue.put_nowait(_CLOSE_SENTINEL)
+            # Drain inbound and pending queues to guarantee room for sentinel
+            while not self._inbound_queue.empty():
+                try:
+                    self._inbound_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            while not self._pending_sent.empty():
+                try:
+                    self._pending_sent.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            try:
+                self._inbound_queue.put_nowait(_CLOSE_SENTINEL)
+            except asyncio.QueueFull:
+                pass
 
 
 class FakeTelephonyMediaAdapter(_BaseFakeMediaAdapter, TelephonyMediaPort):
