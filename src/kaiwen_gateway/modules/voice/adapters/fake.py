@@ -137,6 +137,28 @@ class _BaseFakeMediaAdapter:
         self._receive_error = error
         self._receive_error_after = after_n_frames
 
+    def trigger_upstream_failure(self, error: Exception | None = None) -> None:
+        """Simulate an upstream transport failure, transitioning adapter to closed state."""
+        self._is_closed = True
+        self._close_event.set()
+        err = error or ConnectionResetError(f"{self.name} upstream failure")
+        self._receive_error = err
+        self._send_error = err
+        while not self._inbound_queue.empty():
+            try:
+                self._inbound_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        while not self._pending_sent.empty():
+            try:
+                self._pending_sent.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        try:
+            self._inbound_queue.put_nowait(_CLOSE_SENTINEL)
+        except asyncio.QueueFull:
+            pass
+
     async def receive_frame(self) -> AudioFrame | None:
         """Receive the next frame, or None on EOF."""
         if self._is_closed:

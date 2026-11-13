@@ -413,13 +413,13 @@ class RealtimeAdapterConformanceSuite:
 
         Returns True if failure injection succeeded on the adapter, False if unsupported.
         """
-        inject_err_fn: Any = getattr(adapter, "inject_receive_error", None)
-        if callable(inject_err_fn):
-            inject_err_fn(error)
-            return True
         trigger_fn: Any = getattr(adapter, "trigger_upstream_failure", None)
         if callable(trigger_fn):
             trigger_fn(error)
+            return True
+        inject_err_fn: Any = getattr(adapter, "inject_receive_error", None)
+        if callable(inject_err_fn):
+            inject_err_fn(error)
             return True
         return False
 
@@ -817,25 +817,30 @@ class RealtimeAdapterConformanceSuite:
                     f"failure injection hook/fixture; skipping upstream failure test."
                 )
 
-            # Once upstream failure is injected, verify adapter reflects failure:
-            error_observed = False
-            try:
-                rec = await asyncio.wait_for(adapter.receive_frame(), timeout=0.5)
-                if rec is None:
-                    error_observed = True
-            except (MediaPortError, MediaPortClosedError, ConnectionResetError):
-                error_observed = True
+            # Once upstream failure is injected, verify adapter transitions to closed state:
+            assert adapter.is_closed, (
+                f"Adapter {type(adapter).__name__} must transition to terminal is_closed=True on upstream failure"
+            )
 
-            try:
+            # Subsequent sends must be rejected / raise
+            with pytest.raises((MediaPortError, MediaPortClosedError, ConnectionResetError)):
                 await asyncio.wait_for(
                     adapter.send_frame(create_test_frame(sequence=99)), timeout=0.5
                 )
-            except (MediaPortError, MediaPortClosedError, ConnectionResetError):
-                error_observed = True
 
-            assert error_observed or adapter.is_closed, (
-                f"Adapter {type(adapter).__name__} did not reflect upstream failure in state or I/O operations"
-            )
+            # Receive must return None or raise
+            try:
+                rec = await asyncio.wait_for(adapter.receive_frame(), timeout=0.5)
+                assert rec is None, f"Expected None on closed adapter, got {rec}"
+            except (MediaPortError, MediaPortClosedError, ConnectionResetError):
+                pass
+
+            # Zero pending frames retained in buffer after upstream failure
+            buffered = self.get_buffered_frame_count(adapter)
+            if buffered is not None:
+                assert buffered == 0, (
+                    f"Adapter {type(adapter).__name__} retained {buffered} pending frames after upstream failure"
+                )
 
             # Close must be safe and idempotent
             await adapter.close()

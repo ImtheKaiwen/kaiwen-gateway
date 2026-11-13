@@ -371,7 +371,78 @@ def test_adversarial_adapter_ignoring_failure_fails_error_conformance() -> None:
             return DefectiveImmuneFailureAIAdapter(**kwargs)
 
     suite = DefectiveSuite()
-    with pytest.raises(AssertionError, match="did not reflect upstream failure"):
+    with pytest.raises(
+        AssertionError, match="must transition to terminal is_closed=True on upstream failure"
+    ):
+        suite.test_upstream_error_propagation_and_state_safety(suite.create_adapter)
+
+
+def test_adversarial_adapter_accepting_sends_after_failure_fails_conformance() -> None:
+    """Verify an adapter that marks closed on failure but still accepts send_frame fails Dimension 7."""
+
+    class DefectiveSendAcceptingAIAdapter(AIRealtimeMediaPort):
+        def __init__(self, **kwargs: Any) -> None:
+            self._closed = False
+
+        @property
+        def is_closed(self) -> bool:
+            return self._closed
+
+        def trigger_upstream_failure(self, error: Exception) -> None:
+            self._closed = True
+
+        async def send_frame(self, frame: AudioFrame) -> None:
+            # Defect: accepts frame despite failure/closed state
+            pass
+
+        async def receive_frame(self) -> AudioFrame | None:
+            return None
+
+        async def close(self) -> None:
+            self._closed = True
+
+    class DefectiveSuite(RealtimeAdapterConformanceSuite):
+        def create_adapter(self, **kwargs: Any) -> AIRealtimeMediaPort:
+            return DefectiveSendAcceptingAIAdapter(**kwargs)
+
+    suite = DefectiveSuite()
+    with pytest.raises(pytest.fail.Exception, match="DID NOT RAISE"):
+        suite.test_upstream_error_propagation_and_state_safety(suite.create_adapter)
+
+
+def test_adversarial_adapter_retaining_buffer_after_failure_fails_conformance() -> None:
+    """Verify an adapter that retains frames in buffer after upstream failure fails Dimension 7."""
+
+    class DefectiveBufferRetainingAIAdapter(AIRealtimeMediaPort):
+        def __init__(self, **kwargs: Any) -> None:
+            self._closed = False
+
+        @property
+        def is_closed(self) -> bool:
+            return self._closed
+
+        @property
+        def buffered_frame_count(self) -> int:
+            return 3  # Defect: retains buffered frames
+
+        def trigger_upstream_failure(self, error: Exception) -> None:
+            self._closed = True
+
+        async def send_frame(self, frame: AudioFrame) -> None:
+            raise MediaPortClosedError("closed")
+
+        async def receive_frame(self) -> AudioFrame | None:
+            return None
+
+        async def close(self) -> None:
+            self._closed = True
+
+    class DefectiveSuite(RealtimeAdapterConformanceSuite):
+        def create_adapter(self, **kwargs: Any) -> AIRealtimeMediaPort:
+            return DefectiveBufferRetainingAIAdapter(**kwargs)
+
+    suite = DefectiveSuite()
+    with pytest.raises(AssertionError, match="retained 3 pending frames after upstream failure"):
         suite.test_upstream_error_propagation_and_state_safety(suite.create_adapter)
 
 
