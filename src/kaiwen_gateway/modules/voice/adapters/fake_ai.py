@@ -116,6 +116,11 @@ class BoundedFakeAIEchoPort(AIRealtimeMediaPort):
         """Current number of frames buffered in the bounded echo queue."""
         return self._output_queue.qsize()
 
+    @property
+    def buffered_frame_count(self) -> int:
+        """Current number of frames buffered in the bounded echo queue."""
+        return self._output_queue.qsize()
+
     async def send_frame(self, frame: AudioFrame) -> None:
         """Receive an audio frame from the inbound bridge pump and enqueue an echo response.
 

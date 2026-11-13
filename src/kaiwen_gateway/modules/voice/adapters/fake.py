@@ -14,6 +14,7 @@ from typing import Final
 
 from kaiwen_gateway.modules.voice.domain import (
     AudioFrame,
+    MediaBackpressureOverflowError,
     MediaPortClosedError,
 )
 from kaiwen_gateway.modules.voice.ports import (
@@ -35,9 +36,19 @@ _CLOSE_SENTINEL: Final[object] = object()
 class _BaseFakeMediaAdapter:
     """Base implementation for deterministic fake media adapters."""
 
-    def __init__(self, *, name: str) -> None:
+    def __init__(
+        self,
+        *,
+        name: str,
+        queue_capacity: int | None = None,
+    ) -> None:
         self.name: Final[str] = name
-        self._inbound_queue: asyncio.Queue[object] = asyncio.Queue()
+        self._queue_capacity: Final[int | None] = queue_capacity
+        self._inbound_queue: asyncio.Queue[object] = (
+            asyncio.Queue(maxsize=queue_capacity)
+            if queue_capacity is not None and queue_capacity > 0
+            else asyncio.Queue()
+        )
         self._sent_frames: list[AudioFrame] = []
         self._is_closed: bool = False
         self._close_count: int = 0
@@ -81,6 +92,15 @@ class _BaseFakeMediaAdapter:
     def receive_count(self) -> int:
         """Number of frames received from receive_frame."""
         return self._receive_count
+
+    @property
+    def buffered_frame_count(self) -> int:
+        """Return the count of currently buffered frames."""
+        return (
+            self._inbound_queue.qsize()
+            if self._inbound_queue.maxsize > 0
+            else len(self._sent_frames)
+        )
 
     def push_frame(self, frame: AudioFrame) -> None:
         """Push an audio frame to be returned by receive_frame."""
@@ -145,6 +165,11 @@ class _BaseFakeMediaAdapter:
             self._send_error = None
             raise err
 
+        if self._queue_capacity is not None and len(self._sent_frames) >= self._queue_capacity:
+            raise MediaBackpressureOverflowError(
+                f"{self.name} queue capacity exceeded ({self._queue_capacity})"
+            )
+
         if self._send_delay > 0.0:
             await asyncio.sleep(self._send_delay)
 
@@ -171,8 +196,13 @@ class FakeTelephonyMediaAdapter(_BaseFakeMediaAdapter, TelephonyMediaPort):
 class FakeAIMediaAdapter(_BaseFakeMediaAdapter, AIRealtimeMediaPort):
     """Fake AI realtime media adapter for deterministic testing."""
 
-    def __init__(self, *, name: str = "fake-ai") -> None:
-        super().__init__(name=name)
+    def __init__(
+        self,
+        *,
+        name: str = "fake-ai",
+        queue_capacity: int | None = None,
+    ) -> None:
+        super().__init__(name=name, queue_capacity=queue_capacity)
 
 
 class InterruptibleFakeTelephonyAdapter(FakeTelephonyMediaAdapter, InterruptibleTelephonyPort):

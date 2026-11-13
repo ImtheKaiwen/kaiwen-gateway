@@ -25,6 +25,11 @@ from kaiwen_gateway.modules.voice.adapters.fake_ai import (
     BoundedInterruptibleFakeAIEchoPort,
 )
 from kaiwen_gateway.modules.voice.bridge import VoiceBridgeSession, VoiceBridgeState
+from kaiwen_gateway.modules.voice.domain import (
+    AudioFrame,
+    MediaPortClosedError,
+    VoiceDomainError,
+)
 from kaiwen_gateway.modules.voice.ports import (
     AIRealtimeMediaPort,
     AIRealtimePort,
@@ -91,7 +96,10 @@ class TestFakeAIMediaAdapterConformance(RealtimeAdapterConformanceSuite):
             queue_capacity: int = 8,
             **kwargs: Any,
         ) -> AIRealtimeMediaPort:
-            return FakeAIMediaAdapter(name=f"fake-ai-{call_id}")
+            return FakeAIMediaAdapter(
+                name=f"fake-ai-{call_id}",
+                queue_capacity=queue_capacity,
+            )
 
         return _factory
 
@@ -205,3 +213,215 @@ def test_upstream_failing_adapter_under_voice_bridge() -> None:
         assert session.state in (VoiceBridgeState.CLOSED, VoiceBridgeState.FAILED)
 
     asyncio.run(_test())
+
+
+class TestSyntheticUpstreamFailingAIAdapterConformance(RealtimeAdapterConformanceSuite):
+    """Run full 8-dimension conformance suite against SyntheticUpstreamFailingAIAdapter."""
+
+    @pytest.fixture
+    def adapter_factory(self) -> Any:
+        def _factory(
+            *,
+            call_id: str,
+            tenant_id: str = "tenant-test",
+            queue_capacity: int = 8,
+            **kwargs: Any,
+        ) -> AIRealtimeMediaPort:
+            return SyntheticUpstreamFailingAIAdapter(
+                call_id=call_id,
+                tenant_id=tenant_id,
+                queue_capacity=queue_capacity,
+            )
+
+        return _factory
+
+
+def test_adversarial_factory_raises_type_error_invoked_exactly_once() -> None:
+    """Verify factory raising internal TypeError is invoked exactly once and never retried (Finding A)."""
+    call_count = 0
+    received_identity: dict[str, str] = {}
+
+    def failing_factory(*, call_id: str, tenant_id: str) -> AIRealtimeMediaPort:
+        nonlocal call_count
+        call_count += 1
+        received_identity["call_id"] = call_id
+        received_identity["tenant_id"] = tenant_id
+        raise TypeError("Simulated internal TypeError inside factory initialization")
+
+    with pytest.raises(TypeError, match="Simulated internal TypeError"):
+        _instantiate_ai_port(
+            failing_factory,
+            call_id="call-secure-1",
+            tenant_id="tenant-secure-1",
+        )
+
+    assert call_count == 1, f"Expected exactly 1 invocation, got {call_count}"
+    assert received_identity == {"call_id": "call-secure-1", "tenant_id": "tenant-secure-1"}
+
+
+def test_adversarial_factory_optional_identity_receives_verified_context() -> None:
+    """Verify factory with default identity arguments receives verified context, not defaults (Finding A)."""
+    call_count = 0
+    received_identity: dict[str, str] = {}
+
+    def optional_identity_factory(
+        call_id: str = "default_call",
+        tenant_id: str = "default_tenant",
+    ) -> AIRealtimeMediaPort:
+        nonlocal call_count
+        call_count += 1
+        received_identity["call_id"] = call_id
+        received_identity["tenant_id"] = tenant_id
+        return BoundedFakeAIEchoPort()
+
+    port = _instantiate_ai_port(
+        optional_identity_factory,
+        call_id="call-verified-99",
+        tenant_id="tenant-verified-99",
+    )
+    assert isinstance(port, AIRealtimeMediaPort)
+    assert call_count == 1
+    assert received_identity == {
+        "call_id": "call-verified-99",
+        "tenant_id": "tenant-verified-99",
+    }
+
+
+def test_adversarial_factory_unsupported_required_signature_fails_closed() -> None:
+    """Verify factory with unsupported required signature fails closed with VoiceDomainError (Finding A)."""
+    call_count = 0
+
+    def unsupported_factory(unsupported_req_arg: int) -> AIRealtimeMediaPort:
+        nonlocal call_count
+        call_count += 1
+        return BoundedFakeAIEchoPort()
+
+    with pytest.raises(VoiceDomainError, match="Unsupported required parameter"):
+        _instantiate_ai_port(
+            unsupported_factory,
+            call_id="call-x",
+            tenant_id="tenant-x",
+        )
+
+    assert call_count == 0, "Factory with unsupported signature must not be invoked"
+
+
+def test_adversarial_unbounded_adapter_fails_backpressure_conformance() -> None:
+    """Verify an intentionally defective unbounded adapter fails Dimension 6 (Finding C)."""
+
+    class DefectiveUnboundedAIAdapter(AIRealtimeMediaPort):
+        def __init__(self, **kwargs: Any) -> None:
+            self._frames: list[AudioFrame] = []
+            self._closed = False
+
+        @property
+        def is_closed(self) -> bool:
+            return self._closed
+
+        @property
+        def buffered_frame_count(self) -> int:
+            return len(self._frames)
+
+        async def send_frame(self, frame: AudioFrame) -> None:
+            # Defect: appends infinitely without enforcing queue capacity or timeout
+            self._frames.append(frame)
+
+        async def receive_frame(self) -> AudioFrame | None:
+            return None
+
+        async def close(self) -> None:
+            self._closed = True
+
+    class DefectiveSuite(RealtimeAdapterConformanceSuite):
+        def create_adapter(self, **kwargs: Any) -> AIRealtimeMediaPort:
+            return DefectiveUnboundedAIAdapter(**kwargs)
+
+    suite = DefectiveSuite()
+    with pytest.raises(AssertionError, match="Adapter has unbounded queue"):
+        suite.test_bounded_queue_and_backpressure_enforcement(suite.create_adapter)
+
+
+def test_adversarial_adapter_ignoring_failure_fails_error_conformance() -> None:
+    """Verify an intentionally defective adapter ignoring upstream failure fails Dimension 7 (Finding D)."""
+
+    class DefectiveImmuneFailureAIAdapter(AIRealtimeMediaPort):
+        def __init__(self, **kwargs: Any) -> None:
+            self._closed = False
+
+        @property
+        def is_closed(self) -> bool:
+            return self._closed
+
+        def trigger_upstream_failure(self, error: Exception) -> None:
+            # Defect: accepts hook but ignores failure completely
+            pass
+
+        async def send_frame(self, frame: AudioFrame) -> None:
+            pass
+
+        async def receive_frame(self) -> AudioFrame | None:
+            return create_test_frame()
+
+        async def close(self) -> None:
+            self._closed = True
+
+    class DefectiveSuite(RealtimeAdapterConformanceSuite):
+        def create_adapter(self, **kwargs: Any) -> AIRealtimeMediaPort:
+            return DefectiveImmuneFailureAIAdapter(**kwargs)
+
+    suite = DefectiveSuite()
+    with pytest.raises(AssertionError, match="did not reflect upstream failure"):
+        suite.test_upstream_error_propagation_and_state_safety(suite.create_adapter)
+
+
+def test_non_echo_independent_upstream_audio_adapter_passes_conformance() -> None:
+    """Verify an adapter generating independent upstream response audio passes conformance (Finding B)."""
+
+    class NonEchoRealtimeAIAdapter(AIRealtimeMediaPort):
+        """Adapter that simulates real AI behavior: generates independent speech, never echoes caller."""
+
+        def __init__(self, *, queue_capacity: int = 8, **kwargs: Any) -> None:
+            self.inbound_frames_received: list[AudioFrame] = []
+            self._outbound_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=queue_capacity)
+            self._closed = False
+            self.queue_capacity = queue_capacity
+
+        @property
+        def is_closed(self) -> bool:
+            return self._closed
+
+        @property
+        def buffered_frame_count(self) -> int:
+            return self._outbound_queue.qsize()
+
+        def push_frame(self, frame: AudioFrame) -> None:
+            self._outbound_queue.put_nowait(frame)
+
+        def push_eof(self) -> None:
+            self._outbound_queue.put_nowait(None)
+
+        async def send_frame(self, frame: AudioFrame) -> None:
+            if self._closed:
+                raise MediaPortClosedError("Port is closed")
+            self.inbound_frames_received.append(frame)
+
+        async def receive_frame(self) -> AudioFrame | None:
+            if self._closed:
+                raise MediaPortClosedError("Port is closed")
+            item = await self._outbound_queue.get()
+            if item is None:
+                return None
+            return item  # type: ignore[return-value]
+
+        async def close(self) -> None:
+            self._closed = True
+
+    class NonEchoSuite(RealtimeAdapterConformanceSuite):
+        def create_adapter(self, **kwargs: Any) -> AIRealtimeMediaPort:
+            return NonEchoRealtimeAIAdapter(**kwargs)
+
+    suite = NonEchoSuite()
+    # Must pass Dimension 1 (Routing & delivery with independent audio)
+    suite.test_bi_directional_audio_routing_and_delivery(suite.create_adapter)
+    # Must pass Dimension 2 (Multi-call isolation with independent audio)
+    suite.test_two_concurrent_calls_isolation(suite.create_adapter)
