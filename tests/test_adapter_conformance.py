@@ -443,6 +443,29 @@ def test_fake_ai_media_adapter_close_when_full_queue_is_safe() -> None:
     asyncio.run(_test())
 
 
+def test_synthetic_upstream_failing_adapter_drains_pending_inbound_on_failure_and_close() -> None:
+    """Verify pending inbound frames are drained when upstream failure is triggered."""
+
+    async def _test() -> None:
+        adapter = SyntheticUpstreamFailingAIAdapter(queue_capacity=8)
+
+        await adapter.send_frame(create_test_frame(sequence=0))
+        await adapter.send_frame(create_test_frame(sequence=1))
+        assert adapter.buffered_frame_count == 2
+
+        # Trigger failure: must drain pending queues
+        adapter.trigger_upstream_failure(ConnectionResetError("Drop"))
+        assert adapter.is_closed
+        assert adapter.buffered_frame_count == 0
+
+        # Close must remain idempotent and queues stay empty
+        await adapter.close()
+        assert adapter.is_closed
+        assert adapter.buffered_frame_count == 0
+
+    asyncio.run(_test())
+
+
 def test_synthetic_upstream_failing_adapter_pending_backpressure_vs_lifetime_history() -> None:
     """Verify backpressure applies to pending unconsumed frames, not total call lifetime frames."""
 

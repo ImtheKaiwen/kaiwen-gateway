@@ -101,6 +101,8 @@ class _BaseFakeMediaAdapter:
     @property
     def buffered_frame_count(self) -> int:
         """Return the count of currently buffered pending frames."""
+        if self._is_closed:
+            return 0
         if self._queue_capacity is not None and self._queue_capacity > 0:
             return max(self._inbound_queue.qsize(), self._pending_sent.qsize())
         return self._inbound_queue.qsize()

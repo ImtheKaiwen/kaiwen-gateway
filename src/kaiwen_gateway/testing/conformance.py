@@ -125,6 +125,8 @@ class SyntheticUpstreamFailingAIAdapter(AIRealtimeMediaPort, InterruptibleAIPort
     @property
     def buffered_frame_count(self) -> int:
         """Current number of pending frames buffered in the queues."""
+        if self._is_closed:
+            return 0
         return max(self._queue.qsize(), self._pending_inbound.qsize())
 
     @property
@@ -159,7 +161,12 @@ class SyntheticUpstreamFailingAIAdapter(AIRealtimeMediaPort, InterruptibleAIPort
         self._upstream_error = error or ConnectionResetError("Upstream AI connection reset")
         self._is_closed = True
         self._close_event.set()
-        # Drain and unblock
+        # Drain pending inbound and outbound queues to prevent frame retention
+        while not self._pending_inbound.empty():
+            try:
+                self._pending_inbound.get_nowait()
+            except asyncio.QueueEmpty:
+                break
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
@@ -249,8 +256,6 @@ class SyntheticUpstreamFailingAIAdapter(AIRealtimeMediaPort, InterruptibleAIPort
                 break
 
     async def close(self) -> None:
-        if self._is_closed:
-            return
         self._is_closed = True
         self._close_event.set()
         while not self._pending_inbound.empty():
