@@ -127,14 +127,16 @@ All frames exchanged across `AIRealtimeMediaPort` are instances of `kaiwen_gatew
 Adapters are instantiated per call session via an `ai_media_port_factory` registered on the ASGI application:
 
 ```python
+import os
+from collections.abc import Callable
+from kaiwen_gateway.modules.voice.ports import AIRealtimeMediaPort
 from kaiwen_gateway.server.app import create_gateway_app
 
+# Example: Provider adapter factory (pseudocode implementation for external adapter)
 def my_openai_adapter_factory(*, call_id: str, tenant_id: str, **kwargs) -> AIRealtimeMediaPort:
-    return OpenAILiveMediaAdapter(
-        call_id=call_id,
-        tenant_id=tenant_id,
-        api_key=os.environ["OPENAI_API_KEY"],
-    )
+    # external_adapter = OpenAILiveMediaAdapter(call_id=call_id, tenant_id=tenant_id, api_key=os.environ["OPENAI_API_KEY"])
+    # return external_adapter
+    raise NotImplementedError("Implement provider-specific adapter")
 
 app = create_gateway_app(
     enable_synthetic_media=True,
@@ -142,9 +144,25 @@ app = create_gateway_app(
 )
 ```
 
-### Factory Resolution Semantics
-- **Context-Aware:** If the factory accepts `call_id` and/or `tenant_id` (or `**kwargs`), the Gateway passes the verified call context upon session initialization.
-- **Backwards-Compatible:** 0-argument factories (e.g. `lambda: BoundedFakeAIEchoPort()`) remain fully supported for tests.
+### Factory Invocation Guarantees & Context Propagation Contract
+
+1. **Signature Inspection Before Invocation:**
+   - The Gateway inspects the callable's signature (`inspect.signature`) and pre-binds parameters before calling the factory.
+   - Context parameters (`call_id`, `tenant_id`, and `context`/`verified_context`) are bound according to parameter names and kinds.
+   - If the factory accepts `**kwargs`, `call_id` and `tenant_id` (and `context`) are supplied in keyword arguments.
+   - Factories with optional identity parameters (e.g. `call_id: str = "default"`) are passed the verified session context, never allowed to silently default.
+
+2. **Single-Invocation Guarantee:**
+   - The selected factory is invoked **EXACTLY ONCE**.
+   - If the factory raises an exception during initialization (e.g. `TypeError`, `ValueError`, network error), the Gateway does **NOT** retry with omitted arguments or fall back to an unverified default factory.
+
+3. **Fail-Closed Session Cleanup:**
+   - Any exception during factory instantiation propagates immediately into the Gateway's safe session cleanup path (`_cleanup_media_session`).
+   - The session terminates fail-closed: the active call registration is cleared, any initialized resources are closed, and the client WebSocket is closed with code `1011` (`Initialization failed`).
+
+4. **Backwards Compatibility:**
+   - Valid zero-argument synthetic factories (e.g. `lambda: BoundedFakeAIEchoPort()`) remain fully supported for testing.
+   - If a factory defines required parameters that cannot be satisfied from verified context, the Gateway fails closed with `VoiceDomainError` without calling the factory.
 
 ---
 
@@ -179,32 +197,66 @@ The Gateway provides a pre-packaged conformance test suite in `kaiwen_gateway.te
 ```python
 import pytest
 from kaiwen_gateway.testing.conformance import RealtimeAdapterConformanceSuite
-from my_package.adapters.openai import OpenAILiveMediaAdapter
+from kaiwen_gateway.modules.voice.ports import AIRealtimeMediaPort
 
-class TestOpenAILiveAdapterConformance(RealtimeAdapterConformanceSuite):
-    def create_adapter(self, *, call_id: str, tenant_id: str, queue_capacity: int = 8, **kwargs):
-        # Return adapter configured with synthetic/mock backend for deterministic CI
-        return OpenAILiveMediaAdapter(
-            call_id=call_id,
-            tenant_id=tenant_id,
-            queue_capacity=queue_capacity,
-            endpoint_url="ws://127.0.0.1:8999/mock-openai",
-        )
+class TestMyProviderAdapterConformance(RealtimeAdapterConformanceSuite):
+    def create_adapter(self, *, call_id: str, tenant_id: str, queue_capacity: int = 8, **kwargs) -> AIRealtimeMediaPort:
+        # Return adapter configured with a mock/synthetic upstream backend for deterministic CI:
+        # return MyProviderMediaAdapter(call_id=call_id, tenant_id=tenant_id, queue_capacity=queue_capacity)
+        raise NotImplementedError("Provide mock-backed adapter instance")
 ```
 
+### 7.1 Conformance Test Harness Hooks
+
+The suite defines explicit test harness hooks that external adapter test suites can override:
+
+| Hook Method | Signature | Purpose |
+|---|---|---|
+| `inject_upstream_frame` | `(adapter, frame: AudioFrame) -> bool` | Injects synthetic upstream response audio into the mock adapter/transport. Default checks `push_frame()`. |
+| `inject_upstream_eof` | `async (adapter) -> bool` | Injects clean EOF into the mock adapter/transport. Default checks `push_eof()`. |
+| `get_received_inbound_frames` | `(adapter) -> list[AudioFrame] \| None` | Returns recorded inbound frames sent by the caller via `send_frame()`. |
+| `get_buffered_frame_count` | `(adapter) -> int \| None` | Returns the count of buffered frames without inspecting private attributes (`_output_queue`). Default checks `buffered_frame_count`, `queue_depth`, or `buffer_size`. |
+| `inject_upstream_failure` | `(adapter, error: Exception) -> bool` | Injects transport fault into the actual adapter instance under test. Default checks `inject_receive_error()` or `trigger_upstream_failure()`. |
+
+### 7.2 Independent Bidirectional Audio Semantics
+
+In real AI realtime adapters, `send_frame()` and `receive_frame()` represent independent audio channels:
+- `send_frame()` streams the caller's microphone audio upstream to the model.
+- `receive_frame()` receives synthesized speech generated by the model.
+The test suite validates byte integrity, sequence ordering, and framing independently in each direction and does **not** assume or require echo behavior.
+
+### 7.3 Eight Core Verification Dimensions
+
 The suite deterministically verifies 8 critical dimensions:
-1. `test_bi_directional_audio_routing_and_delivery`
-2. `test_two_concurrent_calls_isolation`
-3. `test_turn_interruption_and_cancellation`
-4. `test_stale_output_suppression_under_voice_bridge`
-5. `test_media_format_validation`
-6. `test_bounded_queue_and_backpressure_enforcement`
-7. `test_upstream_error_propagation_and_state_safety`
-8. `test_idempotent_close_and_resource_teardown`
+1. `test_bi_directional_audio_routing_and_delivery`: Independent routing, delivery, 640-byte PCM16LE framing, sequence monotonic advance, and clean EOF.
+2. `test_two_concurrent_calls_isolation`: Strict tenant and call isolation with zero cross-talk or state bleeding between concurrent calls.
+3. `test_turn_interruption_and_cancellation`: Upstream turn cancellation, local buffer purging, and turn high-water tracking.
+4. `test_stale_output_suppression`: Automatic suppression and dropping of delayed/superseded turn frames.
+5. `test_media_format_validation`: Rejection of malformed, oversized, or unsupported frame parameters.
+6. `test_bounded_queue_and_backpressure_enforcement`: Bounded memory verification, overload policies, and backpressure stall/overflow handling.
+7. `test_upstream_error_propagation_and_state_safety`: Fault injection into the adapter under test, transition to closed state, unblocking of receivers, and zero leaked background tasks.
+8. `test_idempotent_close_and_resource_teardown`: Idempotent closure, post-close error raising, and zero asyncio task leaks.
 
 ---
 
-## 8. Local Live Smoke Testing & Boundaries
+## 8. What the Conformance Suite Proves (and Does NOT Prove)
+
+### What Conformance Proves:
+- **Contract & Protocol Compliance:** The adapter strictly satisfies `AIRealtimeMediaPort` and `InterruptibleAIPort` specifications.
+- **Audio Framing & Domain Invariants:** The adapter exchanges valid 16 kHz PCM16LE mono 20 ms `AudioFrame` value objects.
+- **Multi-Tenant Isolation:** Concurrent sessions never bleed audio or shared mutable state.
+- **Memory Safety & Backpressure:** Queues are finite and bounded; backpressure overflow is handled deterministically.
+- **Lifecycle & Resource Discipline:** Idempotent `close()`, proper cancellation, unblocked receivers, and zero asyncio task leaks.
+
+### What Conformance Does NOT Prove:
+- **Real-World Latency & Jitter:** Synthetic tests do not measure public Internet network jitter, Wi-Fi latency, or packet reordering.
+- **Model Speech Quality & Accuracy:** Conformance does not evaluate transcription accuracy, voice naturalness, or model hallucinations.
+- **Vendor Rate Limits & Quotas:** Conformance runs against mock transports and does not test external API billing, rate limits, or concurrency quotas.
+- **Production Media Gateway Round-Trip Time:** Total round-trip latency depends on telephony transcoding, upstream model inference speed, and network hops.
+
+---
+
+## 9. Local Live Smoke Testing & Boundaries
 
 ### Running Local Live Tests
 - For local manual smoke testing with real OpenAI endpoints, write a standalone runner in `tools/` or examples.

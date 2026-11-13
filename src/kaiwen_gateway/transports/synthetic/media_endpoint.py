@@ -80,6 +80,76 @@ def _resolve_positive_float(value: Any, default: float) -> float:
         return default
 
 
+def _resolve_factory_binding(
+    factory: Callable[..., AIRealtimeMediaPort],
+    *,
+    call_id: str,
+    tenant_id: str,
+    context: Any = None,
+) -> inspect.BoundArguments:
+    """Inspect and bind arguments for an AI realtime media port factory without invoking it.
+
+    Fails closed with VoiceDomainError if the factory signature cannot be bound safely.
+    Ensures that factory execution is never attempted with unverified or corrupted arguments.
+    """
+    try:
+        sig = inspect.signature(factory)
+    except (ValueError, TypeError) as exc:
+        raise VoiceDomainError(f"Cannot inspect AI port factory signature: {exc}") from exc
+
+    params = sig.parameters
+    if not params:
+        return sig.bind()
+
+    pos_args: list[Any] = []
+    kwargs: dict[str, Any] = {}
+    accepts_var_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+    for name, param in params.items():
+        if param.kind == inspect.Parameter.POSITIONAL_ONLY:
+            if name == "call_id":
+                pos_args.append(call_id)
+            elif name == "tenant_id":
+                pos_args.append(tenant_id)
+            elif name in ("context", "verified_context", "ctx"):
+                pos_args.append(context)
+            elif param.default is not inspect.Parameter.empty:
+                pos_args.append(param.default)
+            else:
+                raise VoiceDomainError(
+                    f"Unsupported required positional-only parameter '{name}' in AI port factory"
+                )
+        elif param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            if name == "call_id":
+                kwargs["call_id"] = call_id
+            elif name == "tenant_id":
+                kwargs["tenant_id"] = tenant_id
+            elif name in ("context", "verified_context"):
+                kwargs[name] = context
+            elif name == "ctx":
+                kwargs["ctx"] = context
+            elif param.default is inspect.Parameter.empty:
+                raise VoiceDomainError(
+                    f"Unsupported required parameter '{name}' in AI port factory"
+                )
+
+    if accepts_var_kwargs:
+        kwargs.setdefault("call_id", call_id)
+        kwargs.setdefault("tenant_id", tenant_id)
+        if context is not None:
+            kwargs.setdefault("context", context)
+
+    try:
+        bound = sig.bind(*pos_args, **kwargs)
+        bound.apply_defaults()
+        return bound
+    except TypeError as exc:
+        raise VoiceDomainError(f"Cannot bind arguments for AI port factory: {exc}") from exc
+
+
 def _instantiate_ai_port(
     factory: Callable[..., AIRealtimeMediaPort],
     *,
@@ -87,53 +157,21 @@ def _instantiate_ai_port(
     tenant_id: str,
     context: Any = None,
 ) -> AIRealtimeMediaPort:
-    """Instantiate an AI realtime media port from a factory, passing context if supported.
+    """Instantiate an AI realtime media port from a factory, binding context safely.
 
-    Maintains 100% backwards compatibility with 0-argument factories while supporting
-    context-aware factories accepting call_id, tenant_id, and/or context kwargs or args.
+    Maintains 100% backwards compatibility with valid 0-argument factories while
+    safely binding context-aware factories accepting call_id, tenant_id, and/or
+    context. Inspects signatures and binds arguments BEFORE invoking the factory,
+    and invokes the factory exactly once. If factory initialization fails,
+    the exception is propagated to trigger safe session cleanup.
     """
-    try:
-        sig = inspect.signature(factory)
-        params = sig.parameters
-        if not params:
-            return factory()
-
-        accepts_var_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
-        kwargs: dict[str, Any] = {}
-        if "call_id" in params or accepts_var_kwargs:
-            kwargs["call_id"] = call_id
-        if "tenant_id" in params or accepts_var_kwargs:
-            kwargs["tenant_id"] = tenant_id
-        if ("context" in params or accepts_var_kwargs) and context is not None:
-            kwargs["context"] = context
-        if ("verified_context" in params or accepts_var_kwargs) and context is not None:
-            kwargs["verified_context"] = context
-
-        if kwargs:
-            try:
-                sig.bind_partial(**kwargs)
-                return factory(**kwargs)
-            except TypeError:
-                pass
-
-        # Handle single positional parameter
-        positional = [
-            p
-            for p in params.values()
-            if p.kind
-            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-            and p.default is inspect.Parameter.empty
-        ]
-        if len(positional) == 1:
-            p_name = positional[0].name
-            if p_name in ("context", "verified_context") and context is not None:
-                return factory(context)
-            if p_name == "call_id":
-                return factory(call_id)
-
-        return factory()
-    except (TypeError, ValueError):
-        return factory()
+    bound = _resolve_factory_binding(
+        factory,
+        call_id=call_id,
+        tenant_id=tenant_id,
+        context=context,
+    )
+    return factory(*bound.args, **bound.kwargs)
 
 
 async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
