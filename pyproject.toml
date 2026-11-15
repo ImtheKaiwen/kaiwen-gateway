@@ -41,6 +41,9 @@ dependencies = []
 kaiwen-gateway = "kaiwen_gateway.server.__main__:main"
 
 [project.optional-dependencies]
+openai = [
+    "websockets>=13.0,<16",
+]
 server = [
     "starlette>=0.40,<2",
     "uvicorn>=0.30,<1",
