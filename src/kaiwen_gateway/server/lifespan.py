@@ -148,7 +148,17 @@ async def gateway_lifespan(app: Any) -> AsyncIterator[None]:
         if modules is not None:
             try:
                 await modules.shutdown()
-            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit) as exc:
+            except asyncio.CancelledError as exc:
+                control_flow_exc = control_flow_exc or exc
+                # ModuleLifecycleManager shields its bounded shutdown task; join it so
+                # remaining modules finish closing before the event loop tears down.
+                try:
+                    await modules.shutdown()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as shutdown_exc:
+                    module_failure = module_failure or shutdown_exc
+            except (KeyboardInterrupt, SystemExit) as exc:
                 control_flow_exc = control_flow_exc or exc
             except Exception as exc:
                 module_failure = exc

@@ -319,3 +319,38 @@ def test_asgi_shutdown_cancelled_during_drain_waits_for_active_connection_before
         assert mod.shutdown_calls == 1
 
     asyncio.run(_run())
+
+
+def test_asgi_shutdown_cancelled_during_module_cleanup_awaits_all_modules() -> None:
+    async def _run() -> None:
+        events: list[str] = []
+        alpha = AsgiRecordingModule("alpha", events)
+
+        class SlowStopModule(AsgiRecordingModule):
+            async def shutdown(self) -> None:
+                self.shutdown_calls += 1
+                await asyncio.sleep(0.06)
+                events.append(f"stop:{self.descriptor.module_id}")
+
+        beta = SlowStopModule("beta", events)
+        core = compose_gateway_core(modules=[alpha, beta])
+        app = create_gateway_app(core=core)
+        exiting = asyncio.Event()
+
+        async def _run_lifespan() -> None:
+            async with gateway_lifespan(app):
+                exiting.set()
+                await asyncio.sleep(0.005)
+
+        task = asyncio.create_task(_run_lifespan())
+        await exiting.wait()
+        await asyncio.sleep(0.02)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert events == ["start:alpha", "start:beta", "stop:beta", "stop:alpha"]
+        assert (alpha.shutdown_calls, beta.shutdown_calls) == (1, 1)
+
+    asyncio.run(_run())
