@@ -90,7 +90,7 @@ def test_key_public_symbols_remain_importable_from_documented_namespaces() -> No
 
 def test_version_dimensions_are_distinct_and_consistent() -> None:
     """Package version, Core contract version, and synthetic wire protocol versions are distinct."""
-    assert kaiwen_gateway.__version__ == "0.1.0a1"
+    assert kaiwen_gateway.__version__ == "0.1.0a2"
     assert core_pkg.CORE_CONTRACT_VERSION == "1.0"
     assert SYNTHETIC_PROTOCOL_VERSION == "v1"
     assert SYNTHETIC_MEDIA_PROTOCOL_VERSION == "v1"
