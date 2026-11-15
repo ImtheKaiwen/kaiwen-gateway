@@ -54,7 +54,7 @@ class _WebsocketsRealtimeTransport:
                 sanitize_provider_message(
                     f"Failed sending OpenAI Realtime event: {exc}", self._api_key
                 )
-            ) from exc
+            ) from None
 
     async def receive_json(self) -> dict[str, Any] | None:
         if self._closed:
@@ -70,7 +70,7 @@ class _WebsocketsRealtimeTransport:
                 sanitize_provider_message(
                     f"OpenAI Realtime WebSocket receive failed: {exc}", self._api_key
                 )
-            ) from exc
+            ) from None
 
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8", errors="replace")
@@ -129,6 +129,6 @@ async def connect_openai_realtime_websocket(
             sanitize_provider_message(
                 f"Failed to connect to OpenAI Realtime: {exc}", config.api_key
             )
-        ) from exc
+        ) from None
 
     return _WebsocketsRealtimeTransport(ws, api_key=config.api_key)

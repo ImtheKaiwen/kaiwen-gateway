@@ -8,6 +8,7 @@ import json
 import math
 import struct
 import time
+import traceback
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -1188,3 +1189,33 @@ def test_25_inbound_resampler_preserves_fractional_phase_across_odd_chunks() -> 
     for i in range(0, len(src_16k), 2):
         chunked_out.extend(r_chunked.resample(src_16k[i : i + 2]))
     assert len(chunked_out) == 960
+
+
+def test_26_formatted_traceback_redacts_api_key() -> None:
+    """Verify formatted exception tracebacks do not leak raw API keys via chained causes."""
+
+    async def _run() -> None:
+        secret_key = "sk-super-secret-traceback-leak-test"
+
+        async def _leaking_connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            raise RuntimeError(f"upstream rejected Bearer {secret_key}")
+
+        cfg = OpenAIRealtimeConfig(
+            api_key=secret_key,
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_tb",
+            tenant_id="tenant_a",
+            config=cfg,
+            transport_connector=_leaking_connector,
+        )
+        with pytest.raises(OpenAIRealtimeError) as exc_info:
+            await adapter.receive_frame()
+
+        formatted = "".join(traceback.format_exception(exc_info.value))
+        assert secret_key not in formatted
+        assert "[REDACTED]" in formatted
+        await adapter.close()
+
+    asyncio.run(_run())

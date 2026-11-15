@@ -244,7 +244,9 @@ class OpenAIRealtimeMediaAdapter:
                     )
                 )
                 self._terminal_error = wrapped
-                raise wrapped from exc
+                if wrapped is exc:
+                    raise
+                raise wrapped from None
 
             self._transport = transport
             self._sender_task = asyncio.create_task(
