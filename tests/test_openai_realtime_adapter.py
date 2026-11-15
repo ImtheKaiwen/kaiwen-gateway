@@ -843,3 +843,146 @@ def test_19_close_during_connect_disposes_new_transport() -> None:
         assert transport_closed is True
 
     asyncio.run(_run())
+
+
+def test_20_close_completes_cleanup_when_caller_is_cancelled() -> None:
+    """Verify cancelling a close() caller does not abort or skip underlying transport cleanup."""
+
+    async def _run() -> None:
+        close_entered = asyncio.Event()
+        release_close = asyncio.Event()
+        transport_closed = False
+
+        class _SlowCloseTransport:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                return None
+
+            async def receive_json(self) -> dict[str, Any] | None:
+                await asyncio.sleep(10.0)
+                return None
+
+            async def close(self) -> None:
+                nonlocal transport_closed
+                close_entered.set()
+                await release_close.wait()
+                transport_closed = True
+
+        async def _connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            return _SlowCloseTransport()
+
+        cfg = OpenAIRealtimeConfig(
+            api_key="sk-test-close-cancel",
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+            close_timeout_seconds=1.0,
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_close_cancel",
+            tenant_id="tenant_a",
+            config=cfg,
+            transport_connector=_connector,
+        )
+        await adapter.send_frame(
+            AudioFrame(
+                payload=b"\x01\x00" * 320,
+                format=AudioFormat.PCM16LE,
+                sample_rate=16000,
+                channels=1,
+                sequence=1,
+                timestamp_ms=20,
+                turn_id=1,
+            )
+        )
+
+        first_close = asyncio.create_task(adapter.close())
+        await close_entered.wait()
+        first_close.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_close
+
+        release_close.set()
+        await asyncio.wait_for(adapter.close(), timeout=1.0)
+        assert transport_closed is True
+
+    asyncio.run(_run())
+
+
+def test_21_delayed_response_created_after_cancel_turn_is_fenced() -> None:
+    """Verify a delayed response.created from an interrupted generation cannot acquire the new turn ID."""
+
+    async def _run() -> None:
+        server_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+        class _RaceTransport:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                if payload.get("type") == "response.cancel":
+                    # Simulate response.created + delta from the interrupted generation
+                    # arriving after cancel_turn() was called, followed by response.done(cancelled),
+                    # and finally the new turn's response.created + delta.
+                    await server_events.put(
+                        {"type": "response.created", "response": {"id": "resp_old"}}
+                    )
+                    await server_events.put(
+                        {
+                            "type": "response.output_audio.delta",
+                            "response_id": "resp_old",
+                            "delta": base64.b64encode(b"\x09\x00" * 480).decode("ascii"),
+                        }
+                    )
+                    await server_events.put(
+                        {
+                            "type": "response.done",
+                            "response": {"id": "resp_old", "status": "cancelled"},
+                        }
+                    )
+                    await server_events.put(
+                        {"type": "response.created", "response": {"id": "resp_new"}}
+                    )
+                    await server_events.put(
+                        {
+                            "type": "response.output_audio.delta",
+                            "response_id": "resp_new",
+                            "delta": base64.b64encode(b"\x07\x00" * 480).decode("ascii"),
+                        }
+                    )
+                    await server_events.put(None)
+
+            async def receive_json(self) -> dict[str, Any] | None:
+                return await server_events.get()
+
+            async def close(self) -> None:
+                await server_events.put(None)
+
+        async def _connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            return _RaceTransport()
+
+        cfg = OpenAIRealtimeConfig(
+            api_key="sk-test-race-fence",
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_race_fence",
+            tenant_id="tenant_a",
+            config=cfg,
+            transport_connector=_connector,
+        )
+        await adapter.send_frame(
+            AudioFrame(
+                payload=b"\x01\x00" * 320,
+                format=AudioFormat.PCM16LE,
+                sample_rate=16000,
+                channels=1,
+                sequence=1,
+                timestamp_ms=20,
+                turn_id=1,
+            )
+        )
+        await adapter.cancel_turn(1)
+
+        frame = await asyncio.wait_for(adapter.receive_frame(), timeout=2.0)
+        assert frame is not None
+        assert frame.turn_id == 2
+        assert frame.payload == b"\x07\x00" * 320
+        assert await asyncio.wait_for(adapter.receive_frame(), timeout=2.0) is None
+        await adapter.close()
+
+    asyncio.run(_run())

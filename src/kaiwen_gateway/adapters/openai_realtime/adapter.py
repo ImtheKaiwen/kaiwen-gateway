@@ -119,8 +119,7 @@ class OpenAIRealtimeMediaAdapter:
         self._receiver_task: asyncio.Task[None] | None = None
 
         self._closed = False
-        self._close_started = False
-        self._close_done = asyncio.Event()
+        self._close_task: asyncio.Task[None] | None = None
         self._eof_reached = False
         self._eof_delivered = False
         self._terminal_error: Exception | None = None
@@ -128,6 +127,7 @@ class OpenAIRealtimeMediaAdapter:
         self._fenced_turn_id = 0
         self._current_turn_id = 1
         self._active_response_id: str | None = None
+        self._pending_cancel_boundaries = 0
         self._response_turn_map: dict[str, int] = {}
 
     @property
@@ -349,6 +349,9 @@ class OpenAIRealtimeMediaAdapter:
             err_obj = event.get("error")
             if isinstance(err_obj, dict):
                 code = err_obj.get("code") or err_obj.get("type") or "provider_error"
+                if code == "response_cancel_not_active" and self._pending_cancel_boundaries > 0:
+                    self._pending_cancel_boundaries -= 1
+                    return
                 msg = str(err_obj.get("message") or "OpenAI Realtime error")
                 safe_msg = sanitize_provider_message(msg, self._config.api_key)
                 raise OpenAIRealtimeError(f"OpenAI Realtime error ({code}): {safe_msg}")
@@ -360,7 +363,10 @@ class OpenAIRealtimeMediaAdapter:
                 resp_id = resp.get("id")
                 if isinstance(resp_id, str) and resp_id:
                     self._active_response_id = resp_id
-                    self._response_turn_map[resp_id] = self._current_turn_id
+                    if self._pending_cancel_boundaries > 0:
+                        self._response_turn_map[resp_id] = self._fenced_turn_id
+                    else:
+                        self._response_turn_map[resp_id] = self._current_turn_id
             return
 
         if event_type == "response.output_audio.delta":
@@ -375,10 +381,15 @@ class OpenAIRealtimeMediaAdapter:
                 ) from exc
 
             resp_id = event.get("response_id")
+            default_turn = (
+                self._fenced_turn_id
+                if self._pending_cancel_boundaries > 0
+                else self._current_turn_id
+            )
             if isinstance(resp_id, str) and resp_id:
-                turn_id = self._response_turn_map.setdefault(resp_id, self._current_turn_id)
+                turn_id = self._response_turn_map.setdefault(resp_id, default_turn)
             else:
-                turn_id = self._current_turn_id
+                turn_id = default_turn
 
             if turn_id <= self._fenced_turn_id:
                 return
@@ -392,13 +403,18 @@ class OpenAIRealtimeMediaAdapter:
             return
 
         if event_type in {"response.output_audio.done", "response.done"}:
+            resp_obj = event.get("response") if isinstance(event.get("response"), dict) else None
             resp_id = event.get("response_id")
-            if resp_id is None and isinstance(event.get("response"), dict):
-                resp_id = event["response"].get("id")
+            if resp_id is None and resp_obj is not None:
+                resp_id = resp_obj.get("id")
             if isinstance(resp_id, str) and resp_id in self._response_turn_map:
                 turn_id = self._response_turn_map[resp_id]
             else:
-                turn_id = self._current_turn_id
+                turn_id = (
+                    self._fenced_turn_id
+                    if self._pending_cancel_boundaries > 0
+                    else self._current_turn_id
+                )
 
             if turn_id > self._fenced_turn_id:
                 tail = self._packer.flush_partial(turn_id=turn_id)
@@ -406,6 +422,10 @@ class OpenAIRealtimeMediaAdapter:
                     await self._put_outbound_bounded(tail)
             if isinstance(resp_id, str) and resp_id == self._active_response_id:
                 self._active_response_id = None
+            if event_type == "response.done" and self._pending_cancel_boundaries > 0:
+                status = resp_obj.get("status") if resp_obj is not None else None
+                if status == "cancelled" or turn_id <= self._fenced_turn_id:
+                    self._pending_cancel_boundaries -= 1
             return
 
     async def send_frame(self, frame: AudioFrame) -> None:
@@ -462,6 +482,10 @@ class OpenAIRealtimeMediaAdapter:
         async with self._cancel_lock:
             self._fenced_turn_id = max(self._fenced_turn_id, turn_id)
             self._current_turn_id = max(self._current_turn_id, turn_id + 1)
+            if self._transport is not None and self._active_response_id is None:
+                # A response.created for the interrupted generation may still be in-flight
+                # or buffered on the socket; fence it until its terminal boundary arrives.
+                self._pending_cancel_boundaries += 1
             self._packer.reset()
             self._resampler_out.reset()
 
@@ -496,45 +520,43 @@ class OpenAIRealtimeMediaAdapter:
 
     async def close(self) -> None:
         """Idempotently close the adapter, cancel background tasks, and close transport."""
-        if self._close_started:
-            await self._close_done.wait()
-            return
-        self._close_started = True
         self._closed = True
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._perform_close())
+        await asyncio.shield(self._close_task)
 
-        try:
-            tasks: list[asyncio.Task[None]] = []
-            for task in (self._sender_task, self._receiver_task):
-                if task is not None and not task.done():
-                    task.cancel()
-                    tasks.append(task)
+    async def _perform_close(self) -> None:
+        """Execute full adapter shutdown once in an independently owned task."""
+        tasks: list[asyncio.Task[None]] = []
+        for task in (self._sender_task, self._receiver_task):
+            if task is not None and not task.done():
+                task.cancel()
+                tasks.append(task)
 
-            if tasks:
-                try:
-                    await asyncio.wait_for(
-                        asyncio.gather(*tasks, return_exceptions=True),
-                        timeout=self._config.close_timeout_seconds,
-                    )
-                except TimeoutError:
-                    pass
-
-            if self._transport is not None:
-                try:
-                    await asyncio.wait_for(
-                        self._transport.close(),
-                        timeout=self._config.close_timeout_seconds,
-                    )
-                except Exception:
-                    pass
-
-            _drain_queue_nowait(self._inbound_queue)
-            _drain_queue_nowait(self._outbound_queue)
+        if tasks:
             try:
-                self._outbound_queue.put_nowait(_EOF)
-            except asyncio.QueueFull:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=self._config.close_timeout_seconds,
+                )
+            except TimeoutError:
                 pass
-        finally:
-            self._close_done.set()
+
+        if self._transport is not None:
+            try:
+                await asyncio.wait_for(
+                    self._transport.close(),
+                    timeout=self._config.close_timeout_seconds,
+                )
+            except Exception:
+                pass
+
+        _drain_queue_nowait(self._inbound_queue)
+        _drain_queue_nowait(self._outbound_queue)
+        try:
+            self._outbound_queue.put_nowait(_EOF)
+        except asyncio.QueueFull:
+            pass
 
 
 def create_openai_realtime_adapter_factory(
