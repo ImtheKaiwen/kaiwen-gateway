@@ -1,8 +1,8 @@
 # Kaiwen Gateway — Development Roadmap
 
 > **Status:** `MAINTENANCE — INTEGRATION PENDING` (2026-11-15) — M0–M3 Complete; Core Stabilization S1 (`PR #47`) & Drain Safety S1-R2 (`PR #48`) Complete; M4-R1 Adapter Conformance (`PR #42`, `PR #43`) Complete; M4-R2 OpenAI Realtime Adapter (`PR #49`, `MOCK_VERIFIED` — `LIVE_VERIFIED` pending); M5 Synthetic Qualification Complete (`1/5/25/50/100` calls, `PR #35`/`#36`; full M5 depends on live external integrations); M6 Complete (`v0.1.0a1` published to GitHub Releases & PyPI on 2026-11-12; `PR #37`–`#41`, `ADR-0005`).
-> **Project phase:** `MAINTENANCE — INTEGRATION PENDING` (Synthetic Alpha `v0.1.0a1` released; temporary development pause, not project abandonment or repository archiving)
-> **Latest published release:** `v0.1.0a1` (synthetic-environment alpha; `main` contains unreleased post-alpha S1/S1-R2/M4-R1/M4-R2 improvements)
+> **Project phase:** `MAINTENANCE — INTEGRATION PENDING` (Synthetic Alpha `v0.1.0a2` released; temporary development pause, not project abandonment or repository archiving)
+> **Latest published release:** `v0.1.0a2` (synthetic-environment alpha, superseding `v0.1.0a1`)
 > **Last reviewed:** 2026-11-15
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
 > **Primary scope:** Reusable Python library and optional ASGI service; **Voice is the only V1 functional module**.
@@ -387,7 +387,8 @@ A future idea becomes committed scope **only after** the maintainer approves an 
 | 2026-11-09 | Merged high-concurrency benchmark harness hardening ([PR #32](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/32) / `ae4dc1e`), verified on `main` run `42548506391`: added 50/100 session capacity propagation, decoupled media integrity from real-time pacing verdicts with strict multi-criterion validation, send-only duration tracking, and offline historical artifact reassessment; recorded empirical 50/100 results (integrity PASS, 20 ms pacing FAIL) | `In progress` (PR #32 merged; 50/100 real-time pacing qualification and M5 remain `In progress`) |
 | 2026-11-15 | Completed S1 Core Stabilization & Freeze Candidate (`PR #47`) and S1-R2 Drain Safety Remediation (`PR #48` / `80ce011`..`6744655`): added `ModuleLifecycleManager`, fail-closed `DrainReport` inspection in `gateway_lifespan`, `_resolve_adapter` single-invocation binding, and `docs/PUBLIC_API_AND_COMPATIBILITY.md` | `Complete` (M2 closed) |
 | 2026-11-15 | Completed M4-R1 Adapter Conformance Readiness (`PR #42`, `PR #43`) and M4-R2 OpenAI Realtime Media Adapter (`PR #49` / `cc1ee6b`, verified on `main` run `43739935000`): `MOCK_VERIFIED` against local WebSocket server and `RealtimeAdapterConformanceSuite` (38 tests, 0 skips) | `MOCK_VERIFIED` (`LIVE_VERIFIED` pending) |
-| 2026-11-15 | Final Closeout & Maintenance Freeze: entered `MAINTENANCE — INTEGRATION PENDING`, replaced hardcoded `0.1.0a1` version in `.github/workflows/release.yml`, independently verified `v0.1.0a1` on PyPI, audited `main` branch protection, and recorded deferred Dependabot backlog (`#5, #6, #7, #25, #44, #45, #46`) | `MAINTENANCE — INTEGRATION PENDING` |
+| 2026-11-15 | Final Closeout & Maintenance Freeze: entered `MAINTENANCE — INTEGRATION PENDING`, replaced hardcoded `0.1.0a1` version in `.github/workflows/release.yml` (`PR #50`), independently verified `v0.1.0a1` on PyPI, audited `main` branch protection, and recorded deferred Dependabot backlog (`#5, #6, #7, #25, #44, #45, #46`) | `MAINTENANCE — INTEGRATION PENDING` |
+| 2026-11-15 | Released `v0.1.0a2` Synthetic Alpha (`PR #51` / `26f7034`): published GitHub prerelease `v0.1.0a2` and PyPI `kaiwen-gateway==0.1.0a2` via OIDC Trusted Publishing (`Release` run `43744346608`), including `S1`/`S1-R2` drain safety, `M4-R1` conformance suite, and `MOCK_VERIFIED` OpenAI Realtime adapter | `Complete` (`v0.1.0a2` published; `MAINTENANCE — INTEGRATION PENDING` preserved) |
 
 ---
 
@@ -404,7 +405,7 @@ Development is temporarily paused at a verified, maintainable baseline (not proj
 - **Drain Safety:** `InstanceDrainCoordinator` and fail-closed `DrainReport` lifespan verification (`PR #48`).
 - **Synthetic Load & Conformance Testing:** 1/5/25/50/100 call synthetic qualification and `RealtimeAdapterConformanceSuite` (`main`).
 - **OpenAI Realtime Adapter (`MOCK_VERIFIED`):** `kaiwen_gateway.adapters.openai_realtime` (`PR #49`, `main`).
-- **Alpha Packaging & Release Baseline:** `v0.1.0a1` published on GitHub Releases and PyPI (independently verified via PyPI JSON API); dynamic version inspection in `.github/workflows/release.yml`.
+- **Alpha Packaging & Release Baseline:** `v0.1.0a1` and `v0.1.0a2` published on GitHub Releases and PyPI (independently verified via PyPI JSON API); dynamic version inspection in `.github/workflows/release.yml`.
 
 ### Pending Integrations & Gates
 - **OpenAI Realtime Live Verification (`LIVE_VERIFIED`):** Authorized live run with `OPENAI_API_KEY`.
