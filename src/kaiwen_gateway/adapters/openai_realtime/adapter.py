@@ -455,6 +455,21 @@ class OpenAIRealtimeMediaAdapter:
                         self._pending_cancel_acks -= 1
                     if self._pending_cancel_boundaries > 0:
                         self._pending_cancel_boundaries -= 1
+                elif status == "failed":
+                    status_details = (
+                        resp_obj.get("status_details") if resp_obj is not None else None
+                    )
+                    err_obj = (
+                        status_details.get("error") if isinstance(status_details, dict) else None
+                    )
+                    if isinstance(err_obj, dict):
+                        code = err_obj.get("code") or err_obj.get("type") or "response_failed"
+                        msg = str(err_obj.get("message") or "OpenAI Realtime response failed")
+                        safe_msg = sanitize_provider_message(msg, self._config.api_key)
+                        raise OpenAIRealtimeError(
+                            f"OpenAI Realtime response failed ({code}): {safe_msg}"
+                        )
+                    raise OpenAIRealtimeError("OpenAI Realtime response failed")
             return
 
     async def send_frame(self, frame: AudioFrame) -> None:

@@ -1315,3 +1315,63 @@ def test_28_response_turn_map_is_bounded_and_cleared_on_close() -> None:
         assert len(adapter._response_turn_map) == 0
 
     asyncio.run(_run())
+
+
+def test_29_failed_response_done_surfaces_sanitized_error_and_closes() -> None:
+    """Verify response.done with status='failed' raises sanitized OpenAIRealtimeError and closes."""
+
+    async def _run() -> None:
+        secret_key = "sk-test-failed-response-key"
+        server_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        await server_events.put({"type": "response.created", "response": {"id": "resp_fail"}})
+        await server_events.put(
+            {
+                "type": "response.done",
+                "response": {
+                    "id": "resp_fail",
+                    "status": "failed",
+                    "status_details": {
+                        "type": "failed",
+                        "error": {
+                            "type": "server_error",
+                            "code": "rate_limit_exceeded",
+                            "message": f"quota exhausted for Bearer {secret_key}",
+                        },
+                    },
+                },
+            }
+        )
+
+        class _FailedResponseTransport:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                return None
+
+            async def receive_json(self) -> dict[str, Any] | None:
+                return await server_events.get()
+
+            async def close(self) -> None:
+                await server_events.put(None)
+
+        async def _connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            return _FailedResponseTransport()
+
+        cfg = OpenAIRealtimeConfig(
+            api_key=secret_key,
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_resp_fail",
+            tenant_id="tenant_a",
+            config=cfg,
+            transport_connector=_connector,
+        )
+        with pytest.raises(OpenAIRealtimeError) as exc_info:
+            await asyncio.wait_for(adapter.receive_frame(), timeout=2.0)
+
+        msg = str(exc_info.value)
+        assert "rate_limit_exceeded" in msg
+        assert secret_key not in msg
+        assert "[REDACTED]" in msg
+        assert adapter.is_closed is True
+
+    asyncio.run(_run())
