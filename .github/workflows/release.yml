@@ -68,11 +68,22 @@ jobs:
         run: uv build
 
       - name: Inspect distributions
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
         run: |
           uv run --no-project --python 3.12 python - <<'PY'
+          import os
           import pathlib
           import tarfile
+          import tomllib
           import zipfile
+
+          expected_version = os.environ["EXPECTED_VERSION"]
+          with open("pyproject.toml", "rb") as f:
+              declared_version = tomllib.load(f)["project"]["version"]
+          assert expected_version == declared_version, (
+              f"Step output version {expected_version!r} != pyproject.toml {declared_version!r}"
+          )
 
           dist_dir = pathlib.Path("dist")
           wheels = list(dist_dir.glob("*.whl"))
@@ -91,7 +102,7 @@ jobs:
               assert not any(n.startswith("tests/") for n in names), "tests/ leaked into wheel"
               meta = [n for n in names if n.endswith(".dist-info/METADATA")][0]
               meta_text = zf.read(meta).decode("utf-8")
-              assert "Version: 0.1.0a1" in meta_text
+              assert f"Version: {expected_version}" in meta_text
               assert "Provides-Extra: server" in meta_text
 
           with tarfile.open(sdists[0], "r:gz") as tf:

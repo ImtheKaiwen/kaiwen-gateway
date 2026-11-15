@@ -2,10 +2,10 @@
 
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
 > **Package:** `kaiwen-gateway` / import `kaiwen_gateway`
-> **Product phase:** Design / pre-implementation
-> **Target first alpha:** `0.1.0a1`
-> **Document status:** Active operating rules (M0 baseline accepted 2026-11-01)
-> **Last reviewed:** 2026-11-01
+> **Product phase:** `MAINTENANCE — INTEGRATION PENDING` (Synthetic Alpha `v0.1.0a1` released; `main` includes post-alpha S1/S1-R2/M4-R1/M4-R2 updates)
+> **Published alpha:** `0.1.0a1` (PyPI & GitHub Releases)
+> **Document status:** Active operating rules (M0 baseline accepted 2026-11-01; updated 2026-11-15)
+> **Last reviewed:** 2026-11-15
 
 This file governs autonomous and assisted coding work in the Kaiwen Gateway repository, including work performed by Antigravity, Codex, and other coding agents. It is a **repository-level working contract**, not permission to expand the project, deploy a system, or claim that unimplemented features exist.
 

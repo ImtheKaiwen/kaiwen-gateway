@@ -1,16 +1,16 @@
 # Kaiwen Gateway — V1 Architecture
 
-> **Status:** Approved M0 V1 design baseline (ADR-0001..0003 accepted 2026-11-01) — not an implementation report
+> **Status:** V1 Architecture Baseline (`ADR-0001`..`ADR-0005` accepted; synthetic alpha `v0.1.0a1` released; `main` in `MAINTENANCE — INTEGRATION PENDING`)
 > **Document version:** 1.0
-> **Initial release target:** `0.1.0a1` (synthetic alpha)
-> **Last updated:** 2026-11-01
+> **Latest published alpha:** `0.1.0a1` (synthetic alpha)
+> **Last updated:** 2026-11-15
 > **Scope:** Reusable Python library + deployable ASGI server; **Voice** is the only V1 communication module.
 
 ## 1. Purpose, authority, and implementation status
 
-This document describes **how** the requirements in [REQUIREMENTS.md](REQUIREMENTS.md) should be implemented: component boundaries, dependency direction, trust boundaries, media and control flows, failure handling, deployment topology, and verification strategy. The public product overview lives in [../README.md](../README.md); delivery sequence belongs in [../ROADMAP.md](../ROADMAP.md); enduring decisions belong in [decisions/](decisions/).
+This document describes **how** the requirements in [REQUIREMENTS.md](REQUIREMENTS.md) are structured and implemented: component boundaries, dependency direction, trust boundaries, media and control flows, failure handling, deployment topology, and verification strategy. The public product overview lives in [../README.md](../README.md); delivery sequence and current maintenance status belong in [../ROADMAP.md](../ROADMAP.md); enduring decisions belong in [decisions/](decisions/).
 
-**This is a design, not an implementation report.** Names, layouts, contracts, endpoints, and examples here are *proposals*. They become an implemented public API only after source code, tests, and documentation agree. Do not mark the system production-ready or Verimor-compatible based on this document.
+**Implementation status boundary:** Gateway Core, ASGI server hosting, synthetic telephony/media transports, Voice Media Bridge, and drain safety are implemented and released in `v0.1.0a1` (with `S1` / `S1-R2` module lifecycle and drain safety hardened on `main`), and the OpenAI Realtime adapter on `main` (PR #49) is `MOCK_VERIFIED`. **Live OpenAI API verification (`LIVE_VERIFIED`), Kaiwen Agent integration, Kaiwen Speech integration, and real Verimor interoperability remain pending.** Do not mark the system production-ready or Verimor-compatible based on synthetic verification.
 
 Key constraints:
 
