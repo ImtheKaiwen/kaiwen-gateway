@@ -120,6 +120,7 @@ class OpenAIRealtimeMediaAdapter:
 
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
+        self._transport_close_task: asyncio.Task[None] | None = None
         self._eof_reached = False
         self._eof_delivered = False
         self._terminal_error: Exception | None = None
@@ -257,11 +258,15 @@ class OpenAIRealtimeMediaAdapter:
             return transport
 
     async def _close_transport_bounded(self, transport: OpenAIRealtimeTransport) -> None:
-        try:
-            await asyncio.wait_for(
-                transport.close(),
-                timeout=self._config.close_timeout_seconds,
+        if self._transport_close_task is None:
+            self._transport_close_task = asyncio.create_task(
+                asyncio.wait_for(
+                    transport.close(),
+                    timeout=self._config.close_timeout_seconds,
+                )
             )
+        try:
+            await asyncio.shield(self._transport_close_task)
         except Exception:
             pass
 
@@ -551,13 +556,7 @@ class OpenAIRealtimeMediaAdapter:
                 pass
 
         if self._transport is not None:
-            try:
-                await asyncio.wait_for(
-                    self._transport.close(),
-                    timeout=self._config.close_timeout_seconds,
-                )
-            except Exception:
-                pass
+            await self._close_transport_bounded(self._transport)
 
         _drain_queue_nowait(self._inbound_queue)
         _drain_queue_nowait(self._outbound_queue)

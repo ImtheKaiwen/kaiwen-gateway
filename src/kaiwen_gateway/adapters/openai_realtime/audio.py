@@ -88,13 +88,13 @@ class PCM16Resampler16kTo24k:
     """
 
     def __init__(self) -> None:
-        self._last_sample: int | None = None
         self._carry_byte: bytes = b""
+        self._phase_num: int = 0
 
     def reset(self) -> None:
         """Reset boundary state."""
-        self._last_sample = None
         self._carry_byte = b""
+        self._phase_num = 0
 
     def resample(self, pcm16_16k: bytes) -> bytes:
         """Resample 16 kHz little-endian PCM16 mono bytes to 24 kHz."""
@@ -112,29 +112,20 @@ class PCM16Resampler16kTo24k:
         src = _bytes_to_int16_array(data)
         n = len(src)
         out = array.array("h")
-        prev = src[0] if self._last_sample is None else self._last_sample
+        limit = n * 3
+        phase_num = self._phase_num
 
-        # Output sample spacing is 2/3 of an input sample period.
-        # Pair every 2 input samples (s0, s1) -> 3 output samples at offsets 0, 2/3, 4/3:
-        #   y0 = (2/3)*prev + (1/3)*s0? Wait: using standard t = k * (2/3) over [prev, src...]:
-        # Let index j = 0 .. (3*n // 2) - 1, pos = j * (2/3) relative to src[0]:
-        # To map exact 2 samples -> 3 samples cleanly:
-        # For odd n, handle trailing sample with prev -> src[-1] interpolation.
-        out_len = (n * 3) // 2
-        for j in range(out_len):
-            pos = (j * 2) / 3.0
-            idx = int(pos)
-            frac = pos - idx
-            s_left = (
-                prev if idx == 0 and frac == 0.0 and self._last_sample is not None else src[idx]
-            )
-            if idx == 0 and self._last_sample is not None and j == 0:
-                s_left = src[0]
-            s_right = src[idx + 1] if (idx + 1) < n else src[idx]
-            val = s_left + frac * (s_right - s_left)
+        # Exact rational 2:3 input-to-output step preserves fractional phase across chunks.
+        while phase_num < limit:
+            idx = phase_num // 3
+            rem = phase_num % 3
+            s_left = src[idx]
+            s_right = src[idx + 1] if (idx + 1) < n else s_left
+            val = s_left + (rem * (s_right - s_left)) / 3.0
             out.append(_clamp_pcm16(val))
+            phase_num += 2
 
-        self._last_sample = src[-1]
+        self._phase_num = phase_num - limit
         return _int16_array_to_bytes(out)
 
 

@@ -1123,3 +1123,68 @@ def test_23_cancel_after_output_audio_done_allows_response_cancel_not_active() -
         await adapter.close()
 
     asyncio.run(_run())
+
+
+def test_24_in_progress_failure_transport_close_survives_adapter_close() -> None:
+    """Verify explicit adapter.close() does not cancel an in-progress failure transport.close()."""
+
+    async def _run() -> None:
+        close_entered = asyncio.Event()
+        release_close = asyncio.Event()
+        close_completed = False
+        close_calls = 0
+
+        class _FailureCloseTransport:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                return None
+
+            async def receive_json(self) -> dict[str, Any] | None:
+                raise RuntimeError("boom")
+
+            async def close(self) -> None:
+                nonlocal close_completed, close_calls
+                close_calls += 1
+                if close_calls > 1:
+                    return
+                close_entered.set()
+                await release_close.wait()
+                close_completed = True
+
+        async def _connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            return _FailureCloseTransport()
+
+        cfg = OpenAIRealtimeConfig(
+            api_key="sk-test-close-race",
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+            close_timeout_seconds=1.0,
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_fail_close",
+            tenant_id="tenant_a",
+            config=cfg,
+            transport_connector=_connector,
+        )
+        await adapter._ensure_connected()
+        await asyncio.wait_for(close_entered.wait(), timeout=1.0)
+
+        adapter_close = asyncio.create_task(adapter.close())
+        await asyncio.sleep(0.02)
+        release_close.set()
+        await asyncio.wait_for(adapter_close, timeout=1.0)
+        assert close_completed is True
+
+    asyncio.run(_run())
+
+
+def test_25_inbound_resampler_preserves_fractional_phase_across_odd_chunks() -> None:
+    """Verify 16k->24k resampler preserves exact sample count regardless of chunking."""
+    src_16k = _make_sine_pcm16le(16_000, 440.0, 320)
+    r_bulk = PCM16Resampler16kTo24k()
+    bulk_out = r_bulk.resample(src_16k)
+    assert len(bulk_out) == 960
+
+    r_chunked = PCM16Resampler16kTo24k()
+    chunked_out = bytearray()
+    for i in range(0, len(src_16k), 2):
+        chunked_out.extend(r_chunked.resample(src_16k[i : i + 2]))
+    assert len(chunked_out) == 960
