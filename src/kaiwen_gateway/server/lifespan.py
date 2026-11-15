@@ -111,10 +111,8 @@ async def gateway_lifespan(app: Any) -> AsyncIterator[None]:
         module_failure: BaseException | None = None
 
         # 1. Drain active connections first.
-        drain_started = False
         try:
             if coordinator.state == InstanceDrainState.ACCEPTING:
-                drain_started = True
                 await coordinator.drain()
             elif not coordinator.is_stopped:
                 await coordinator.wait_stopped()
@@ -123,14 +121,10 @@ async def gateway_lifespan(app: Any) -> AsyncIterator[None]:
                 drain_failure = coordinator.drain_error
         except asyncio.CancelledError as exc:
             control_flow_exc = exc
-            # If drain() transitioned the coordinator to DRAINING, its internal task is
-            # shielded and still running boundedly. Wait for it to reach STOPPED before
-            # shutting down dependent module resources.
-            if (
-                drain_started
-                and coordinator.state == InstanceDrainState.DRAINING
-                and not coordinator.is_stopped
-            ):
+            # If a real drain task is in progress (initiated by lifespan or an embedding
+            # host), wait for it to reach STOPPED before stopping dependent modules.
+            drain_task = getattr(coordinator, "_drain_task", None)
+            if drain_task is not None and not drain_task.done() and not coordinator.is_stopped:
                 try:
                     await coordinator.wait_stopped()
                 except asyncio.CancelledError:

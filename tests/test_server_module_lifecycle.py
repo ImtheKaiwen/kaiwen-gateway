@@ -354,3 +354,57 @@ def test_asgi_shutdown_cancelled_during_module_cleanup_awaits_all_modules() -> N
         assert (alpha.shutdown_calls, beta.shutdown_calls) == (1, 1)
 
     asyncio.run(_run())
+
+
+def test_asgi_shutdown_cancelled_during_external_drain_waits_for_active_connection() -> None:
+    async def _run() -> None:
+        events: list[str] = []
+        mod = AsgiRecordingModule("voice_mod", events)
+        core = compose_gateway_core(modules=[mod])
+        app = create_gateway_app(
+            core=core,
+            drain_policy=DrainPolicy(grace_period=0.5, force_close_timeout=0.2),
+        )
+        coord: InstanceDrainCoordinator = app.state.drain_coordinator
+        ctx = bind_verified_connection_context(
+            principal=ProviderPrincipal("synthetic_provider"),
+            binding=TenantCallBinding(
+                authorized_provider_id="synthetic_provider",
+                tenant_id="tenant_a",
+                call_id="call_ext_cancel_drain",
+                allowed_scopes=["voice.stream"],
+            ),
+            connection_id="conn_ext_cancel_drain",
+        )
+        draining_externally = asyncio.Event()
+        external_drain_task: asyncio.Task[object] | None = None
+
+        async def _run_lifespan() -> None:
+            nonlocal external_drain_task
+            async with gateway_lifespan(app):
+                supervisor = await coord.admit_connection(ctx)
+
+                async def worker() -> None:
+                    await asyncio.sleep(0.08)
+                    events.append("connection:finished")
+
+                await supervisor.start(worker)
+                external_drain_task = asyncio.create_task(coord.drain())
+                await asyncio.sleep(0.005)
+                draining_externally.set()
+
+        task = asyncio.create_task(_run_lifespan())
+        await draining_externally.wait()
+        await asyncio.sleep(0.01)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert external_drain_task is not None
+        await external_drain_task
+        assert coord.state == InstanceDrainState.STOPPED
+        assert events == ["start:voice_mod", "connection:finished", "stop:voice_mod"]
+        assert mod.shutdown_calls == 1
+
+    asyncio.run(_run())
