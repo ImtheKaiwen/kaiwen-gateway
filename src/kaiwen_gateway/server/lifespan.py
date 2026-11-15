@@ -138,8 +138,21 @@ async def gateway_lifespan(app: Any) -> AsyncIterator[None]:
         except Exception as exc:
             drain_failure = coordinator.drain_error if coordinator.drain_error is not None else exc
 
-        # 2. Then close dependent module resources (always attempted, bounded).
-        if modules is not None:
+        # 2. Only close dependent module resources when all active connections and
+        # admission leases have been cleanly resolved; otherwise skip module
+        # shutdown to avoid tearing down resources underneath still-active workers.
+        report = coordinator.report
+        drain_resolved = (
+            drain_failure is None
+            and coordinator.drain_error is None
+            and coordinator.state == InstanceDrainState.STOPPED
+            and (
+                report is None
+                or (report.unresolved_connections == 0 and report.active_leases_remaining == 0)
+            )
+        )
+
+        if modules is not None and drain_resolved:
             try:
                 await modules.shutdown()
             except asyncio.CancelledError as exc:
@@ -172,5 +185,15 @@ async def gateway_lifespan(app: Any) -> AsyncIterator[None]:
                     "Gateway shutdown failed due to drain error"
                 ) from drain_failure
             raise ServerLifecycleError("Gateway module shutdown failed") from module_failure
+
+        if not drain_resolved:
+            state.shutdown_failed = True
+            if report is not None:
+                raise ServerLifecycleError(
+                    "Gateway shutdown failed with unresolved drain resources "
+                    f"(unresolved_connections={report.unresolved_connections}, "
+                    f"active_leases_remaining={report.active_leases_remaining})"
+                )
+            raise ServerLifecycleError("Gateway shutdown failed: drain did not complete cleanly")
 
         state.stopped = True

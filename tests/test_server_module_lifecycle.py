@@ -408,3 +408,266 @@ def test_asgi_shutdown_cancelled_during_external_drain_waits_for_active_connecti
         assert mod.shutdown_calls == 1
 
     asyncio.run(_run())
+
+
+def test_asgi_shutdown_fails_closed_when_drain_leaves_unresolved_connections() -> None:
+    async def _run() -> None:
+        events: list[str] = []
+        mod = AsgiRecordingModule("voice_mod", events)
+        core = compose_gateway_core(modules=[mod])
+        app = create_gateway_app(
+            core=core,
+            drain_policy=DrainPolicy(grace_period=0.0, force_close_timeout=0.02),
+        )
+        coord: InstanceDrainCoordinator = app.state.drain_coordinator
+        ctx = bind_verified_connection_context(
+            principal=ProviderPrincipal("synthetic_provider"),
+            binding=TenantCallBinding(
+                authorized_provider_id="synthetic_provider",
+                tenant_id="tenant_a",
+                call_id="call_unresolved_drain",
+                allowed_scopes=["voice.stream"],
+            ),
+            connection_id="conn_unresolved_drain",
+        )
+        worker_started = asyncio.Event()
+        release_worker = asyncio.Event()
+
+        async def non_cooperative_worker() -> None:
+            worker_started.set()
+            try:
+                await release_worker.wait()
+            except asyncio.CancelledError:
+                # Non-cooperative: ignore cancellation until explicitly released
+                await release_worker.wait()
+            finally:
+                events.append("worker:finished")
+
+        try:
+            with pytest.raises(ServerLifecycleError):
+                async with gateway_lifespan(app):
+                    supervisor = await coord.admit_connection(ctx)
+                    await supervisor.start(non_cooperative_worker)
+                    await worker_started.wait()
+        finally:
+            release_worker.set()
+            await asyncio.sleep(0)
+
+        assert coord.report is not None
+        assert coord.report.unresolved_connections == 1
+        assert app.state.shutdown_failed is True
+        assert app.state.stopped is False
+        assert mod.shutdown_calls == 0 or events.index("worker:finished") < events.index(
+            "stop:voice_mod"
+        )
+
+    asyncio.run(_run())
+
+
+def test_asgi_shutdown_fails_closed_when_active_lease_remains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run() -> None:
+        events: list[str] = []
+        mod = AsgiRecordingModule("voice_mod", events)
+        core = compose_gateway_core(modules=[mod])
+        app = create_gateway_app(
+            core=core,
+            drain_policy=DrainPolicy(grace_period=0.0, force_close_timeout=0.5),
+        )
+        coord: InstanceDrainCoordinator = app.state.drain_coordinator
+        ctx = bind_verified_connection_context(
+            principal=ProviderPrincipal("synthetic_provider"),
+            binding=TenantCallBinding(
+                authorized_provider_id="synthetic_provider",
+                tenant_id="tenant_a",
+                call_id="call_active_lease",
+                allowed_scopes=["voice.stream"],
+            ),
+            connection_id="conn_active_lease",
+        )
+        worker_started = asyncio.Event()
+
+        async def cooperative_worker() -> None:
+            worker_started.set()
+            await asyncio.Event().wait()
+
+        async def failing_release(_self: object) -> None:
+            raise RuntimeError("lease release failed")
+
+        with pytest.raises(ServerLifecycleError, match="active_leases_remaining=1"):
+            async with gateway_lifespan(app):
+                supervisor = await coord.admit_connection(ctx)
+                assert supervisor.lease is not None
+                monkeypatch.setattr(type(supervisor.lease), "release", failing_release)
+                await supervisor.start(cooperative_worker)
+                await worker_started.wait()
+
+        assert coord.report is not None
+        assert coord.report.active_leases_remaining == 1
+        assert coord.report.unresolved_connections == 1
+        assert app.state.shutdown_failed is True
+        assert app.state.stopped is False
+        assert mod.shutdown_calls == 0
+
+    asyncio.run(_run())
+
+
+def test_asgi_shutdown_succeeds_when_force_closed_resolves_cleanly() -> None:
+    async def _run() -> None:
+        events: list[str] = []
+        mod = AsgiRecordingModule("voice_mod", events)
+        core = compose_gateway_core(modules=[mod])
+        app = create_gateway_app(
+            core=core,
+            drain_policy=DrainPolicy(grace_period=0.0, force_close_timeout=0.5),
+        )
+        coord: InstanceDrainCoordinator = app.state.drain_coordinator
+        ctx = bind_verified_connection_context(
+            principal=ProviderPrincipal("synthetic_provider"),
+            binding=TenantCallBinding(
+                authorized_provider_id="synthetic_provider",
+                tenant_id="tenant_a",
+                call_id="call_force_closed_ok",
+                allowed_scopes=["voice.stream"],
+            ),
+            connection_id="conn_force_closed_ok",
+        )
+        worker_started = asyncio.Event()
+
+        async def cooperative_worker() -> None:
+            worker_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                events.append("worker:cancelled")
+                raise
+
+        async with gateway_lifespan(app):
+            supervisor = await coord.admit_connection(ctx)
+            await supervisor.start(cooperative_worker)
+            await worker_started.wait()
+
+        assert coord.report is not None
+        assert coord.report.force_closed == 1
+        assert coord.report.unresolved_connections == 0
+        assert coord.report.active_leases_remaining == 0
+        assert app.state.stopped is True
+        assert app.state.shutdown_failed is False
+        assert events == ["start:voice_mod", "worker:cancelled", "stop:voice_mod"]
+        assert mod.shutdown_calls == 1
+
+    asyncio.run(_run())
+
+
+def test_asgi_shutdown_cancelled_during_unresolved_drain_skips_module_shutdown() -> None:
+    async def _run() -> None:
+        events: list[str] = []
+        mod = AsgiRecordingModule("voice_mod", events)
+        core = compose_gateway_core(modules=[mod])
+        app = create_gateway_app(
+            core=core,
+            drain_policy=DrainPolicy(grace_period=0.5, force_close_timeout=0.5),
+        )
+        coord: InstanceDrainCoordinator = app.state.drain_coordinator
+        ctx = bind_verified_connection_context(
+            principal=ProviderPrincipal("synthetic_provider"),
+            binding=TenantCallBinding(
+                authorized_provider_id="synthetic_provider",
+                tenant_id="tenant_a",
+                call_id="call_cancel_unresolved",
+                allowed_scopes=["voice.stream"],
+            ),
+            connection_id="conn_cancel_unresolved",
+        )
+        worker_started = asyncio.Event()
+        release_worker = asyncio.Event()
+        exiting = asyncio.Event()
+
+        async def non_cooperative_worker() -> None:
+            worker_started.set()
+            try:
+                await release_worker.wait()
+            except asyncio.CancelledError:
+                await release_worker.wait()
+            finally:
+                events.append("worker:finished")
+
+        async def _run_lifespan() -> None:
+            async with gateway_lifespan(app):
+                supervisor = await coord.admit_connection(ctx)
+                await supervisor.start(non_cooperative_worker)
+                await worker_started.wait()
+                exiting.set()
+
+        task = asyncio.create_task(_run_lifespan())
+        await exiting.wait()
+        await asyncio.sleep(0.01)
+        # First cancel hits drain(); second cancel hits wait_stopped() while worker is still active.
+        task.cancel()
+        await asyncio.sleep(0.01)
+        task.cancel()
+
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release_worker.set()
+            await asyncio.sleep(0)
+
+        assert app.state.shutdown_failed is True
+        assert app.state.stopped is False
+        assert mod.shutdown_calls == 0
+
+    asyncio.run(_run())
+
+
+def test_asgi_shutdown_fails_closed_when_pre_stopped_with_unresolved_connections() -> None:
+    async def _run() -> None:
+        events: list[str] = []
+        mod = AsgiRecordingModule("voice_mod", events)
+        core = compose_gateway_core(modules=[mod])
+        app = create_gateway_app(
+            core=core,
+            drain_policy=DrainPolicy(grace_period=0.0, force_close_timeout=0.02),
+        )
+        coord: InstanceDrainCoordinator = app.state.drain_coordinator
+        ctx = bind_verified_connection_context(
+            principal=ProviderPrincipal("synthetic_provider"),
+            binding=TenantCallBinding(
+                authorized_provider_id="synthetic_provider",
+                tenant_id="tenant_a",
+                call_id="call_pre_stopped_unresolved",
+                allowed_scopes=["voice.stream"],
+            ),
+            connection_id="conn_pre_stopped_unresolved",
+        )
+        worker_started = asyncio.Event()
+        release_worker = asyncio.Event()
+
+        async def non_cooperative_worker() -> None:
+            worker_started.set()
+            try:
+                await release_worker.wait()
+            except asyncio.CancelledError:
+                await release_worker.wait()
+            finally:
+                events.append("worker:finished")
+
+        try:
+            with pytest.raises(ServerLifecycleError, match="unresolved_connections=1"):
+                async with gateway_lifespan(app):
+                    supervisor = await coord.admit_connection(ctx)
+                    await supervisor.start(non_cooperative_worker)
+                    await worker_started.wait()
+                    report = await coord.drain()
+                    assert report.unresolved_connections == 1
+        finally:
+            release_worker.set()
+            await asyncio.sleep(0)
+
+        assert app.state.shutdown_failed is True
+        assert app.state.stopped is False
+        assert mod.shutdown_calls == 0
+
+    asyncio.run(_run())
