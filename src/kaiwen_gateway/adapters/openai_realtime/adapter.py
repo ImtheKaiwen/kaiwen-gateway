@@ -53,6 +53,9 @@ def _drain_queue_nowait(queue: asyncio.Queue[Any]) -> None:
             break
 
 
+_MAX_RESPONSE_TURN_HISTORY = 64
+
+
 class OpenAIRealtimeMediaAdapter:
     """Per-call OpenAI Realtime WebSocket adapter for Kaiwen Gateway.
 
@@ -180,6 +183,7 @@ class OpenAIRealtimeMediaAdapter:
         self._closed_event.set()
         _drain_queue_nowait(self._inbound_queue)
         _drain_queue_nowait(self._outbound_queue)
+        self._response_turn_map.clear()
         current = asyncio.current_task()
         for task in (self._sender_task, self._receiver_task):
             if task is not None and task is not current and not task.done():
@@ -337,6 +341,14 @@ class OpenAIRealtimeMediaAdapter:
             self._fail_sync(err)
             await self._close_transport_bounded(transport)
 
+    def _record_response_turn(self, resp_id: str, turn_id: int) -> int:
+        """Record ``resp_id -> turn_id`` within a bounded FIFO history."""
+        self._response_turn_map[resp_id] = turn_id
+        while len(self._response_turn_map) > _MAX_RESPONSE_TURN_HISTORY:
+            oldest_key = next(iter(self._response_turn_map))
+            del self._response_turn_map[oldest_key]
+        return turn_id
+
     async def _handle_clean_eof(self) -> None:
         if self._active_response_id is not None:
             turn_id = self._response_turn_map.get(self._active_response_id, self._current_turn_id)
@@ -376,9 +388,9 @@ class OpenAIRealtimeMediaAdapter:
                 if isinstance(resp_id, str) and resp_id:
                     self._active_response_id = resp_id
                     if self._pending_cancel_boundaries > 0:
-                        self._response_turn_map[resp_id] = self._fenced_turn_id
+                        self._record_response_turn(resp_id, self._fenced_turn_id)
                     else:
-                        self._response_turn_map[resp_id] = self._current_turn_id
+                        self._record_response_turn(resp_id, self._current_turn_id)
             return
 
         if event_type == "response.output_audio.delta":
@@ -399,7 +411,9 @@ class OpenAIRealtimeMediaAdapter:
                 else self._current_turn_id
             )
             if isinstance(resp_id, str) and resp_id:
-                turn_id = self._response_turn_map.setdefault(resp_id, default_turn)
+                turn_id = self._response_turn_map.get(resp_id)
+                if turn_id is None:
+                    turn_id = self._record_response_turn(resp_id, default_turn)
             else:
                 turn_id = default_turn
 
@@ -590,6 +604,7 @@ class OpenAIRealtimeMediaAdapter:
 
         _drain_queue_nowait(self._inbound_queue)
         _drain_queue_nowait(self._outbound_queue)
+        self._response_turn_map.clear()
         try:
             self._outbound_queue.put_nowait(_EOF)
         except asyncio.QueueFull:

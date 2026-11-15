@@ -1287,3 +1287,31 @@ def test_27_pending_inbound_enqueue_fails_closed_and_leaves_queue_empty_on_close
         assert adapter._inbound_queue.empty()
 
     asyncio.run(_run())
+
+
+def test_28_response_turn_map_is_bounded_and_cleared_on_close() -> None:
+    """Verify _response_turn_map stays bounded over long calls and is cleared on close()."""
+
+    async def _run() -> None:
+        cfg = OpenAIRealtimeConfig(
+            api_key="sk-test-bounded-history",
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_bounded_hist",
+            tenant_id="tenant_a",
+            config=cfg,
+        )
+        for i in range(500):
+            await adapter._handle_server_event(
+                {"type": "response.created", "response": {"id": f"resp_{i}"}}
+            )
+            await adapter._handle_server_event(
+                {"type": "response.done", "response": {"id": f"resp_{i}", "status": "completed"}}
+            )
+
+        assert len(adapter._response_turn_map) <= 64
+        await adapter.close()
+        assert len(adapter._response_turn_map) == 0
+
+    asyncio.run(_run())
