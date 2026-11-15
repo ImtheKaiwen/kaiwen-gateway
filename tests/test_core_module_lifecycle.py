@@ -430,3 +430,24 @@ def test_shutdown_continues_when_hook_raises_cancelled_error_and_propagates() ->
     asyncio.run(run())
     assert events == ["start:alpha", "start:beta", "start:gamma", "stop:gamma", "stop:alpha"]
     assert (alpha.shutdown_calls, beta.shutdown_calls, gamma.shutdown_calls) == (1, 1, 1)
+
+
+def test_cancellation_during_startup_rollback_waits_for_all_started_modules() -> None:
+    events: list[str] = []
+    alpha = RecordingModule("alpha", events)
+    beta = RecordingModule("beta", events, shutdown_delay=0.06)
+    bad = RecordingModule("bad", events, fail_startup=RuntimeError("boom"))
+    mgr = ModuleLifecycleManager(_core(alpha, beta, bad))
+
+    async def run() -> None:
+        task = asyncio.create_task(mgr.startup())
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert mgr.phase is ModuleLifecyclePhase.FAILED
+        assert mgr.started_module_ids == ()
+
+    asyncio.run(run())
+    assert events == ["start:alpha", "start:beta", "stop:beta", "stop:alpha"]
+    assert (alpha.shutdown_calls, beta.shutdown_calls) == (1, 1)

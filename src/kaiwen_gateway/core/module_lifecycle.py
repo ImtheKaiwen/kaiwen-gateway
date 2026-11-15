@@ -303,10 +303,21 @@ class ModuleLifecycleManager:
         return tuple(failures)
 
     async def _stop_all_shielded(self) -> tuple[ModuleFailure, ...]:
-        """Run (or join) the single bounded cleanup task, immune to caller cancellation."""
+        """Run (or join) the single bounded cleanup task, waiting for completion on cancel."""
         if self._shutdown_task is None:
             self._shutdown_task = asyncio.ensure_future(self._stop_started())
-        failures = await asyncio.shield(self._shutdown_task)
+        cancelled_exc: asyncio.CancelledError | None = None
+        while not self._shutdown_task.done():
+            try:
+                await asyncio.shield(self._shutdown_task)
+            except asyncio.CancelledError as exc:
+                if self._shutdown_task.done():
+                    raise
+                if cancelled_exc is None:
+                    cancelled_exc = exc
+        if cancelled_exc is not None:
+            raise cancelled_exc
+        failures = self._shutdown_task.result()
         self._failures = failures
         return failures
 
