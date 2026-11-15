@@ -164,7 +164,7 @@ jobs:
 
       - name: Install wheel into isolated virtualenv and verify side-effect-free import outside repo
         run: |
-          WHEEL_PATH="$(pwd)/dist/kaiwen_gateway-0.1.0a1-py3-none-any.whl"
+          WHEEL_PATH="$(pwd)/dist/kaiwen_gateway-0.1.0a2-py3-none-any.whl"
           SMOKE_DIR="$(mktemp -d)"
           cd "${SMOKE_DIR}"
           uv venv --python 3.12 .venv
@@ -203,8 +203,8 @@ jobs:
           print("Imported from:", installed_path)
           assert "site-packages" in installed_path.parts
           assert (installed_path.parent / "py.typed").is_file()
-          assert kaiwen_gateway.__version__ == "0.1.0a1"
-          assert importlib.metadata.version("kaiwen-gateway") == "0.1.0a1"
+          assert kaiwen_gateway.__version__ == "0.1.0a2"
+          assert importlib.metadata.version("kaiwen-gateway") == "0.1.0a2"
           reqs = importlib.metadata.requires("kaiwen-gateway")
           mandatory_reqs = [r for r in (reqs or []) if "extra ==" not in r]
           assert mandatory_reqs == [], f"Unexpected mandatory dependencies: {mandatory_reqs}"
@@ -552,7 +552,7 @@ jobs:
           VERSION_OUT="$(.venv/bin/kaiwen-gateway --version)"
           echo "Version output: ${VERSION_OUT}"
           case "${VERSION_OUT}" in
-            *"kaiwen-gateway 0.1.0a1"*) echo "Version verified" ;;
+            *"kaiwen-gateway 0.1.0a2"*) echo "Version verified" ;;
             *) echo "Unexpected version output: ${VERSION_OUT}"; exit 1 ;;
           esac
           CONFIG_OUT="$(.venv/bin/kaiwen-gateway check-config)"
@@ -575,7 +575,7 @@ jobs:
 
       - name: Install wheel with [server] extra into isolated virtualenv and verify ASGI runtime smoke outside repo
         run: |
-          WHEEL_PATH="$(pwd)/dist/kaiwen_gateway-0.1.0a1-py3-none-any.whl"
+          WHEEL_PATH="$(pwd)/dist/kaiwen_gateway-0.1.0a2-py3-none-any.whl"
           SMOKE_DIR="$(mktemp -d)"
           cd "${SMOKE_DIR}"
           uv venv --python 3.12 .venv_server

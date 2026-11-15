@@ -11,6 +11,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+---
+
+## [0.1.0a2] - 2026-11-15
+
 ### Added
 - **OpenAI Realtime Media Adapter (M4-R2, PR #49, `MOCK_VERIFIED`):** Added isolated `kaiwen_gateway.adapters.openai_realtime` package (`OpenAIRealtimeConfig`, `OpenAIRealtimeMediaAdapter`, `OpenAIRealtimeTransport`, `create_openai_realtime_adapter_factory`) and optional `openai` extra in `pyproject.toml`. Implements `AIRealtimeMediaPort` and `InterruptibleAIPort` with GA `session.update` (`audio/pcm`, `rate: 24000`), stateful 16 kHz <-> 24 kHz PCM16LE resampling, bounded queues, turn-transition fencing, loopback-only `ws://` / `wss://` transport validation, sanitized incomplete-response error propagation, and conformance testing. Verified against all 8 dimensions of `RealtimeAdapterConformanceSuite` (zero skips) and 30 mocked WebSocket integration tests (38 total); live OpenAI API verification (`LIVE_VERIFIED`) remains pending maintainer authorization.
 - **Maintenance Freeze & Closeout Documentation:** Documented `MAINTENANCE — INTEGRATION PENDING` status, `v0.1.0a1` vs. `main` capability boundaries, PyPI publication verification, GitHub protection audit, and deferred Dependabot backlog across repository documentation.
