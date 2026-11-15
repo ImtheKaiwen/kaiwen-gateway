@@ -279,12 +279,27 @@ class ModuleLifecycleManager:
 
     async def _stop_started(self) -> tuple[ModuleFailure, ...]:
         failures: list[ModuleFailure] = []
+        cancelled_exc: asyncio.CancelledError | None = None
         while self._started:
             # Pop before awaiting so a module can never be closed twice.
             module = self._started.pop()
-            failure = await _run_hook(module, "shutdown", self._policy.shutdown_timeout)
+            try:
+                failure = await _run_hook(module, "shutdown", self._policy.shutdown_timeout)
+            except asyncio.CancelledError as exc:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    raise
+                if cancelled_exc is None:
+                    cancelled_exc = exc
+                failures.append(
+                    ModuleFailure(module.descriptor.module_id, "shutdown", "CancelledError")
+                )
+                continue
             if failure is not None:
                 failures.append(failure)
+        if cancelled_exc is not None:
+            self._failures = tuple(failures)
+            raise cancelled_exc
         return tuple(failures)
 
     async def _stop_all_shielded(self) -> tuple[ModuleFailure, ...]:

@@ -111,15 +111,35 @@ async def gateway_lifespan(app: Any) -> AsyncIterator[None]:
         module_failure: BaseException | None = None
 
         # 1. Drain active connections first.
+        drain_started = False
         try:
             if coordinator.state == InstanceDrainState.ACCEPTING:
+                drain_started = True
                 await coordinator.drain()
             elif not coordinator.is_stopped:
                 await coordinator.wait_stopped()
 
             if coordinator.drain_error is not None:
                 drain_failure = coordinator.drain_error
-        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit) as exc:
+        except asyncio.CancelledError as exc:
+            control_flow_exc = exc
+            # If drain() transitioned the coordinator to DRAINING, its internal task is
+            # shielded and still running boundedly. Wait for it to reach STOPPED before
+            # shutting down dependent module resources.
+            if (
+                drain_started
+                and coordinator.state == InstanceDrainState.DRAINING
+                and not coordinator.is_stopped
+            ):
+                try:
+                    await coordinator.wait_stopped()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as wait_exc:
+                    drain_failure = (
+                        coordinator.drain_error if coordinator.drain_error is not None else wait_exc
+                    )
+        except (KeyboardInterrupt, SystemExit) as exc:
             control_flow_exc = exc
         except Exception as exc:
             drain_failure = coordinator.drain_error if coordinator.drain_error is not None else exc

@@ -33,7 +33,7 @@ class RecordingModule:
         events: list[str],
         *,
         fail_startup: Exception | None = None,
-        fail_shutdown: Exception | None = None,
+        fail_shutdown: BaseException | None = None,
         hang_startup: bool = False,
         hang_shutdown: bool = False,
         shutdown_delay: float = 0.0,
@@ -411,3 +411,22 @@ def test_policy_rejects_unbounded_or_invalid_timeouts(bad: object) -> None:
         ModuleLifecyclePolicy(startup_timeout=bad)  # type: ignore[arg-type]
     with pytest.raises(CoreConfigurationError):
         ModuleLifecyclePolicy(shutdown_timeout=bad)  # type: ignore[arg-type]
+
+
+def test_shutdown_continues_when_hook_raises_cancelled_error_and_propagates() -> None:
+    events: list[str] = []
+    alpha = RecordingModule("alpha", events)
+    beta = RecordingModule("beta", events, fail_shutdown=asyncio.CancelledError("inner task"))
+    gamma = RecordingModule("gamma", events)
+    mgr = ModuleLifecycleManager(_core(alpha, beta, gamma))
+
+    async def run() -> None:
+        await mgr.startup()
+        with pytest.raises(asyncio.CancelledError):
+            await mgr.shutdown()
+        assert mgr.started_module_ids == ()
+        assert mgr.shutdown_failures == (ModuleFailure("beta", "shutdown", "CancelledError"),)
+
+    asyncio.run(run())
+    assert events == ["start:alpha", "start:beta", "start:gamma", "stop:gamma", "stop:alpha"]
+    assert (alpha.shutdown_calls, beta.shutdown_calls, gamma.shutdown_calls) == (1, 1, 1)

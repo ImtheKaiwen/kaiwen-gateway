@@ -264,3 +264,58 @@ def test_asgi_multiple_instances_remain_independent() -> None:
 
     assert events_a == ["start:mod_a", "stop:mod_a"]
     assert events_b == []
+
+
+def test_asgi_shutdown_cancelled_during_drain_waits_for_active_connection_before_module_stop() -> (
+    None
+):
+    async def _run() -> None:
+        events: list[str] = []
+        mod = AsgiRecordingModule("voice_mod", events)
+        core = compose_gateway_core(modules=[mod])
+        app = create_gateway_app(
+            core=core,
+            drain_policy=DrainPolicy(grace_period=0.5, force_close_timeout=0.2),
+        )
+        coord: InstanceDrainCoordinator = app.state.drain_coordinator
+        ctx = bind_verified_connection_context(
+            principal=ProviderPrincipal("synthetic_provider"),
+            binding=TenantCallBinding(
+                authorized_provider_id="synthetic_provider",
+                tenant_id="tenant_a",
+                call_id="call_cancel_drain",
+                allowed_scopes=["voice.stream"],
+            ),
+            connection_id="conn_cancel_drain",
+        )
+        ready_to_exit = asyncio.Event()
+        draining_started = asyncio.Event()
+
+        async def _run_lifespan() -> None:
+            async with gateway_lifespan(app):
+                supervisor = await coord.admit_connection(ctx)
+
+                async def worker() -> None:
+                    await asyncio.sleep(0.08)
+                    events.append("connection:finished")
+
+                await supervisor.start(worker)
+                ready_to_exit.set()
+                await asyncio.sleep(0.01)
+            # Triggered on exit: drain() will run
+
+        task = asyncio.create_task(_run_lifespan())
+        await ready_to_exit.wait()
+        while coord.state == InstanceDrainState.ACCEPTING:
+            await asyncio.sleep(0.005)
+        draining_started.set()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert coord.state == InstanceDrainState.STOPPED
+        assert events == ["start:voice_mod", "connection:finished", "stop:voice_mod"]
+        assert mod.shutdown_calls == 1
+
+    asyncio.run(_run())
