@@ -107,7 +107,7 @@ async def connect_openai_realtime_websocket(
         )
 
     try:
-        import websockets
+        from websockets.asyncio.client import connect as ws_connect
     except ImportError as exc:
         raise OpenAIRealtimeDependencyError(
             "The 'websockets' package is required for OpenAI Realtime WebSocket connections. "
@@ -117,7 +117,7 @@ async def connect_openai_realtime_websocket(
     url = config.build_websocket_url()
     headers = {"Authorization": f"Bearer {config.api_key}"}
     try:
-        ws = await websockets.connect(
+        ws = await ws_connect(
             url,
             additional_headers=headers,
             open_timeout=config.connect_timeout_seconds,
