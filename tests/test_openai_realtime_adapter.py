@@ -1219,3 +1219,71 @@ def test_26_formatted_traceback_redacts_api_key() -> None:
         await adapter.close()
 
     asyncio.run(_run())
+
+
+def test_27_pending_inbound_enqueue_fails_closed_and_leaves_queue_empty_on_close() -> None:
+    """Verify a blocked send_frame() fails closed on close() and cannot repopulate the queue."""
+
+    async def _run() -> None:
+        send_blocked = asyncio.Event()
+        release_send = asyncio.Event()
+
+        class _BlockedSendTransport:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                if payload.get("type") == "input_audio_buffer.append":
+                    send_blocked.set()
+                    await release_send.wait()
+
+            async def receive_json(self) -> dict[str, Any] | None:
+                await asyncio.sleep(10.0)
+                return None
+
+            async def close(self) -> None:
+                release_send.set()
+
+        async def _connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            return _BlockedSendTransport()
+
+        cfg = OpenAIRealtimeConfig(
+            api_key="sk-test-send-close",
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+            inbound_queue_capacity=1,
+            backpressure_timeout_seconds=1.0,
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_send_close",
+            tenant_id="tenant_a",
+            config=cfg,
+            queue_capacity=1,
+            backpressure_timeout=1.0,
+            transport_connector=_connector,
+        )
+
+        def _mk(seq: int) -> AudioFrame:
+            return AudioFrame(
+                payload=b"\x01\x00" * 320,
+                format=AudioFormat.PCM16LE,
+                sample_rate=16000,
+                channels=1,
+                sequence=seq,
+                timestamp_ms=seq * 20.0,
+                turn_id=1,
+            )
+
+        # Frame 0 enters sender_loop and blocks on send_json.
+        await adapter.send_frame(_mk(0))
+        await asyncio.wait_for(send_blocked.wait(), timeout=1.0)
+        # Frame 1 fills capacity-1 inbound queue.
+        await adapter.send_frame(_mk(1))
+
+        # Frame 2 blocks in send_frame() awaiting queue space.
+        pending_send = asyncio.create_task(adapter.send_frame(_mk(2)))
+        await asyncio.sleep(0.02)
+
+        await adapter.close()
+        with pytest.raises(MediaPortClosedError):
+            await asyncio.wait_for(pending_send, timeout=1.0)
+
+        assert adapter._inbound_queue.empty()
+
+    asyncio.run(_run())

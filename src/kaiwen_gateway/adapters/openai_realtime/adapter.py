@@ -119,6 +119,7 @@ class OpenAIRealtimeMediaAdapter:
         self._receiver_task: asyncio.Task[None] | None = None
 
         self._closed = False
+        self._closed_event = asyncio.Event()
         self._close_task: asyncio.Task[None] | None = None
         self._transport_close_task: asyncio.Task[None] | None = None
         self._eof_reached = False
@@ -176,6 +177,7 @@ class OpenAIRealtimeMediaAdapter:
         if self._terminal_error is None:
             self._terminal_error = error
         self._closed = True
+        self._closed_event.set()
         _drain_queue_nowait(self._inbound_queue)
         _drain_queue_nowait(self._outbound_queue)
         current = asyncio.current_task()
@@ -450,14 +452,39 @@ class OpenAIRealtimeMediaAdapter:
         self._raise_if_closed()
 
         try:
-            await asyncio.wait_for(
-                self._inbound_queue.put(frame),
+            self._inbound_queue.put_nowait(frame)
+            return
+        except asyncio.QueueFull:
+            pass
+
+        put_task = asyncio.create_task(self._inbound_queue.put(frame))
+        close_task = asyncio.create_task(self._closed_event.wait())
+        try:
+            done, pending = await asyncio.wait(
+                {put_task, close_task},
                 timeout=self._backpressure_timeout,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-        except TimeoutError as exc:
-            raise MediaBackpressureOverflowError(
-                "OpenAI Realtime inbound audio queue saturated"
-            ) from exc
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            if self._closed or close_task in done:
+                if put_task in done:
+                    _drain_queue_nowait(self._inbound_queue)
+                self._raise_if_closed()
+            if put_task not in done:
+                raise MediaBackpressureOverflowError(
+                    "OpenAI Realtime inbound audio queue saturated"
+                )
+        finally:
+            for task in (put_task, close_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(put_task, close_task, return_exceptions=True)
+            if self._closed:
+                _drain_queue_nowait(self._inbound_queue)
 
     async def receive_frame(self) -> AudioFrame | None:
         """Receive the next resampled 16 kHz PCM16LE AudioFrame, or None on clean EOF."""
@@ -536,6 +563,7 @@ class OpenAIRealtimeMediaAdapter:
     async def close(self) -> None:
         """Idempotently close the adapter, cancel background tasks, and close transport."""
         self._closed = True
+        self._closed_event.set()
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._perform_close())
         await asyncio.shield(self._close_task)
