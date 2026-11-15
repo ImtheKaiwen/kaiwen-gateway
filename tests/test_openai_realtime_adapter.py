@@ -986,3 +986,140 @@ def test_21_delayed_response_created_after_cancel_turn_is_fenced() -> None:
         await adapter.close()
 
     asyncio.run(_run())
+
+
+def test_22_eof_not_published_before_tail_frame_enqueued() -> None:
+    """Verify clean EOF is not visible to receive_frame() while a partial tail frame is still pending."""
+
+    async def _run() -> None:
+        server_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        # First delta produces 1 full 640-byte frame + 320-byte partial tail in packer.
+        await server_events.put({"type": "response.created", "response": {"id": "resp_tail"}})
+        await server_events.put(
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "resp_tail",
+                "delta": base64.b64encode(b"\x03\x00" * 720).decode("ascii"),
+            }
+        )
+        await server_events.put(None)
+
+        class _TailTransport:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                return None
+
+            async def receive_json(self) -> dict[str, Any] | None:
+                return await server_events.get()
+
+            async def close(self) -> None:
+                return None
+
+        async def _connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            return _TailTransport()
+
+        cfg = OpenAIRealtimeConfig(
+            api_key="sk-test-tail-eof",
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+            outbound_queue_capacity=1,
+            backpressure_timeout_seconds=1.0,
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_tail_eof",
+            tenant_id="tenant_a",
+            config=cfg,
+            queue_capacity=1,
+            backpressure_timeout=1.0,
+            transport_connector=_connector,
+        )
+
+        f1 = await asyncio.wait_for(adapter.receive_frame(), timeout=2.0)
+        assert f1 is not None
+        f2 = await asyncio.wait_for(adapter.receive_frame(), timeout=2.0)
+        assert f2 is not None
+        assert len(f2.payload) == 640
+        assert await asyncio.wait_for(adapter.receive_frame(), timeout=2.0) is None
+        await adapter.close()
+
+    asyncio.run(_run())
+
+
+def test_23_cancel_after_output_audio_done_allows_response_cancel_not_active() -> None:
+    """Verify normal response.done(completed) does not consume the response_cancel_not_active allowance."""
+
+    async def _run() -> None:
+        server_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+        class _AckTransport:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                if payload.get("type") == "response.cancel":
+                    await server_events.put(
+                        {
+                            "type": "response.done",
+                            "response": {"id": "resp_done", "status": "completed"},
+                        }
+                    )
+                    await server_events.put(
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "response_cancel_not_active",
+                                "message": "no active response",
+                            },
+                        }
+                    )
+                    await server_events.put(
+                        {"type": "response.created", "response": {"id": "resp_next"}}
+                    )
+                    await server_events.put(
+                        {
+                            "type": "response.output_audio.delta",
+                            "response_id": "resp_next",
+                            "delta": base64.b64encode(b"\x05\x00" * 480).decode("ascii"),
+                        }
+                    )
+                    await server_events.put(None)
+
+            async def receive_json(self) -> dict[str, Any] | None:
+                return await server_events.get()
+
+            async def close(self) -> None:
+                await server_events.put(None)
+
+        async def _connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            return _AckTransport()
+
+        await server_events.put({"type": "response.created", "response": {"id": "resp_done"}})
+        await server_events.put(
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "resp_done",
+                "delta": base64.b64encode(b"\x01\x00" * 480).decode("ascii"),
+            }
+        )
+        await server_events.put({"type": "response.output_audio.done", "response_id": "resp_done"})
+
+        cfg = OpenAIRealtimeConfig(
+            api_key="sk-test-cancel-ack",
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_cancel_ack",
+            tenant_id="tenant_a",
+            config=cfg,
+            transport_connector=_connector,
+        )
+        first = await asyncio.wait_for(adapter.receive_frame(), timeout=2.0)
+        assert first is not None and first.turn_id == 1
+
+        # Simulate cancel_turn() after response.output_audio.done but before response.done(completed).
+        await asyncio.sleep(0.02)
+        await adapter.cancel_turn(1)
+
+        nxt = await asyncio.wait_for(adapter.receive_frame(), timeout=2.0)
+        assert nxt is not None
+        assert nxt.turn_id == 2
+        assert nxt.payload == b"\x05\x00" * 320
+        assert await asyncio.wait_for(adapter.receive_frame(), timeout=2.0) is None
+        await adapter.close()
+
+    asyncio.run(_run())

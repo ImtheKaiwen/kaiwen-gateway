@@ -127,6 +127,7 @@ class OpenAIRealtimeMediaAdapter:
         self._fenced_turn_id = 0
         self._current_turn_id = 1
         self._active_response_id: str | None = None
+        self._pending_cancel_acks = 0
         self._pending_cancel_boundaries = 0
         self._response_turn_map: dict[str, int] = {}
 
@@ -328,13 +329,13 @@ class OpenAIRealtimeMediaAdapter:
             await self._close_transport_bounded(transport)
 
     async def _handle_clean_eof(self) -> None:
-        self._eof_reached = True
         if self._active_response_id is not None:
             turn_id = self._response_turn_map.get(self._active_response_id, self._current_turn_id)
             if turn_id > self._fenced_turn_id:
                 tail = self._packer.flush_partial(turn_id=turn_id)
                 if tail is not None:
                     await self._put_outbound_bounded(tail)
+        self._eof_reached = True
         try:
             self._outbound_queue.put_nowait(_EOF)
         except asyncio.QueueFull:
@@ -349,8 +350,10 @@ class OpenAIRealtimeMediaAdapter:
             err_obj = event.get("error")
             if isinstance(err_obj, dict):
                 code = err_obj.get("code") or err_obj.get("type") or "provider_error"
-                if code == "response_cancel_not_active" and self._pending_cancel_boundaries > 0:
-                    self._pending_cancel_boundaries -= 1
+                if code == "response_cancel_not_active" and self._pending_cancel_acks > 0:
+                    self._pending_cancel_acks -= 1
+                    if self._pending_cancel_boundaries > 0:
+                        self._pending_cancel_boundaries -= 1
                     return
                 msg = str(err_obj.get("message") or "OpenAI Realtime error")
                 safe_msg = sanitize_provider_message(msg, self._config.api_key)
@@ -420,12 +423,15 @@ class OpenAIRealtimeMediaAdapter:
                 tail = self._packer.flush_partial(turn_id=turn_id)
                 if tail is not None:
                     await self._put_outbound_bounded(tail)
-            if isinstance(resp_id, str) and resp_id == self._active_response_id:
-                self._active_response_id = None
-            if event_type == "response.done" and self._pending_cancel_boundaries > 0:
+            if event_type == "response.done":
+                if isinstance(resp_id, str) and resp_id == self._active_response_id:
+                    self._active_response_id = None
                 status = resp_obj.get("status") if resp_obj is not None else None
-                if status == "cancelled" or turn_id <= self._fenced_turn_id:
-                    self._pending_cancel_boundaries -= 1
+                if status == "cancelled":
+                    if self._pending_cancel_acks > 0:
+                        self._pending_cancel_acks -= 1
+                    if self._pending_cancel_boundaries > 0:
+                        self._pending_cancel_boundaries -= 1
             return
 
     async def send_frame(self, frame: AudioFrame) -> None:
@@ -510,12 +516,14 @@ class OpenAIRealtimeMediaAdapter:
 
             if self._transport is not None and not self._closed:
                 payload: dict[str, Any] = {"type": "response.cancel"}
+                self._pending_cancel_acks += 1
                 try:
                     await asyncio.wait_for(
                         self._transport.send_json(payload),
                         timeout=self._config.cancel_timeout_seconds,
                     )
                 except TimeoutError as exc:
+                    self._pending_cancel_acks = max(0, self._pending_cancel_acks - 1)
                     raise OpenAIRealtimeError("Timed out sending response.cancel") from exc
 
     async def close(self) -> None:
