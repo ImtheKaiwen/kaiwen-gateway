@@ -15,6 +15,7 @@ from kaiwen_gateway.core.draining import (
 )
 from kaiwen_gateway.core.exceptions import CoreConfigurationError
 from kaiwen_gateway.core.identity import CallAuthorizationPort, ProviderAuthenticatorPort
+from kaiwen_gateway.core.module_lifecycle import ModuleLifecycleManager, ModuleLifecyclePolicy
 from kaiwen_gateway.modules.voice.ports import AIRealtimeMediaPort
 from kaiwen_gateway.server.exceptions import ServerDependencyError
 from kaiwen_gateway.server.lifespan import gateway_lifespan
@@ -99,6 +100,11 @@ async def health_endpoint(request: Request) -> JSONResponse:
 async def readiness_endpoint(request: Request) -> JSONResponse:
     """HTTP readiness endpoint indicating whether the instance accepts connections."""
     app_state = request.app.state
+    if getattr(app_state, "startup_failed", False):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "startup_failed"},
+            status_code=503,
+        )
     if not getattr(app_state, "started", False):
         return JSONResponse(
             {"status": "unavailable", "reason": "not_started"},
@@ -184,6 +190,7 @@ def create_gateway_app(
     synthetic_auth_bridge: SyntheticAuthBridge | None = None,
     enable_synthetic_media: bool = False,
     ai_media_port_factory: Callable[..., AIRealtimeMediaPort] | None = None,
+    module_lifecycle_policy: ModuleLifecyclePolicy | None = None,
 ) -> Starlette:
     """Construct a fresh, instance-scoped ASGI application for Kaiwen Gateway.
 
@@ -199,7 +206,11 @@ def create_gateway_app(
         - If an external controller or coordinator has capacity ceilings differing from
           the resolved `CoreConfig`, the factory fails closed with `CoreConfigurationError`.
         - The ASGI lifespan context manager (`gateway_lifespan`) manages bounded shutdown
-          for `drain_coordinator`.
+          for `drain_coordinator` and owns the startup/shutdown orchestration of the
+          modules registered on `core` (registration order on startup, reverse order after
+          connections drained on shutdown). Readiness stays unavailable until every module
+          started; a module startup failure rolls back and leaves the instance stopped.
+          Applications without registered modules are unaffected.
 
     Args:
         config: Core configuration. Validated upfront if provided.
@@ -207,6 +218,8 @@ def create_gateway_app(
         admission_controller: Optional admission controller.
         drain_coordinator: Optional instance drain coordinator.
         drain_policy: Optional drain policy used if drain_coordinator is not supplied.
+        module_lifecycle_policy: Optional per-hook startup/shutdown time bounds for
+            registered modules (defaults to 30 seconds per hook).
 
     Returns:
         A configured Starlette ASGI application instance.
@@ -405,10 +418,12 @@ def create_gateway_app(
     app.state.synthetic_auth_bridge = effective_auth_bridge
     app.state.enable_synthetic_media = enable_synthetic_media
     app.state.ai_media_port_factory = ai_media_port_factory
+    app.state.module_lifecycle = ModuleLifecycleManager(core, policy=module_lifecycle_policy)
     app.state.started = False
     app.state.shutting_down = False
     app.state.stopped = False
     app.state.shutdown_failed = False
+    app.state.startup_failed = False
 
     return app
 

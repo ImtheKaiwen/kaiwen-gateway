@@ -568,3 +568,83 @@ def test_synthetic_upstream_failing_adapter_pending_backpressure_vs_lifetime_his
         assert adapter.is_closed
 
     asyncio.run(_test())
+
+
+def test_conformance_resolve_adapter_invokes_factory_once_and_preserves_internal_typeerror() -> (
+    None
+):
+    """Verify _resolve_adapter invokes factory once and preserves internal TypeError (S1-B)."""
+    suite = RealtimeAdapterConformanceSuite()
+    calls: list[dict[str, Any]] = []
+
+    def broken_factory(*, call_id: str, tenant_id: str, queue_capacity: int = 8) -> Any:
+        calls.append({"call_id": call_id, "tenant_id": tenant_id, "queue_capacity": queue_capacity})
+        raise TypeError("internal adapter bug: NoneType not callable")
+
+    with pytest.raises(TypeError, match="internal adapter bug: NoneType not callable"):
+        suite._resolve_adapter(
+            broken_factory, call_id="c-123", tenant_id="t-abc", queue_capacity=16
+        )
+
+    assert len(calls) == 1
+    assert calls[0] == {"call_id": "c-123", "tenant_id": "t-abc", "queue_capacity": 16}
+
+
+def test_conformance_resolve_adapter_kwargs_factory_invoked_once_on_typeerror() -> None:
+    """Verify _resolve_adapter does not retry **kwargs factories on internal TypeError (S1-B)."""
+    suite = RealtimeAdapterConformanceSuite()
+    invocation_count = 0
+
+    def side_effect_factory(**kwargs: Any) -> Any:
+        nonlocal invocation_count
+        invocation_count += 1
+        raise TypeError("side-effect init failed")
+
+    with pytest.raises(TypeError, match="side-effect init failed"):
+        suite._resolve_adapter(side_effect_factory, call_id="c-99", tenant_id="t-99")
+
+    assert invocation_count == 1
+
+
+def test_conformance_resolve_adapter_invalid_signature_fails_closed_without_invocation() -> None:
+    """Verify unsupported required parameters fail closed with VoiceDomainError without invoking factory."""
+    suite = RealtimeAdapterConformanceSuite()
+    invoked = False
+
+    def bad_signature_factory(call_id: str, unknown_required: str) -> Any:
+        nonlocal invoked
+        invoked = True
+        return None
+
+    with pytest.raises(VoiceDomainError, match="Unsupported required parameter 'unknown_required'"):
+        suite._resolve_adapter(bad_signature_factory, call_id="c-1", tenant_id="t-1")
+
+    assert invoked is False
+
+
+def test_conformance_resolve_adapter_zero_arg_and_context_propagation() -> None:
+    """Verify 0-arg compatibility and exact context propagation in _resolve_adapter (S1-B)."""
+    suite = RealtimeAdapterConformanceSuite()
+
+    zero_arg_adapter = suite._resolve_adapter(lambda: FakeAIMediaAdapter(name="zero-arg"))
+    assert isinstance(zero_arg_adapter, FakeAIMediaAdapter)
+
+    captured: dict[str, Any] = {}
+
+    def ctx_factory(
+        *, call_id: str, tenant_id: str = "default", queue_capacity: int = 4
+    ) -> FakeAIMediaAdapter:
+        captured["call_id"] = call_id
+        captured["tenant_id"] = tenant_id
+        captured["queue_capacity"] = queue_capacity
+        return FakeAIMediaAdapter(name="ctx-arg", queue_capacity=queue_capacity)
+
+    ctx_adapter = suite._resolve_adapter(
+        ctx_factory, call_id="call-verified", tenant_id="tenant-verified", queue_capacity=12
+    )
+    assert isinstance(ctx_adapter, FakeAIMediaAdapter)
+    assert captured == {
+        "call_id": "call-verified",
+        "tenant_id": "tenant-verified",
+        "queue_capacity": 12,
+    }

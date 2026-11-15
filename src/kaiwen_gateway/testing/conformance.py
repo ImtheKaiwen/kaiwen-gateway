@@ -20,6 +20,7 @@ and execute with zero paid external API calls.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Callable
 from typing import Any, Final, cast
 
@@ -305,6 +306,80 @@ class RealtimeAdapterConformanceSuite:
             "Subclass must provide an 'adapter_factory' fixture or override 'create_adapter()'"
         )
 
+    def _resolve_adapter_binding(
+        self,
+        factory: Callable[..., AIRealtimeMediaPort],
+        *,
+        call_id: str = "test-call",
+        tenant_id: str = "test-tenant",
+        queue_capacity: int = 8,
+        **extra_kwargs: Any,
+    ) -> inspect.BoundArguments:
+        """Inspect and bind arguments for an adapter factory without invoking it.
+
+        Fails closed with VoiceDomainError if the factory signature cannot be bound
+        safely, without ever retrying or silently dropping context arguments.
+        """
+        try:
+            sig = inspect.signature(factory)
+        except (ValueError, TypeError) as exc:
+            raise VoiceDomainError(f"Cannot inspect AI port factory signature: {exc}") from exc
+
+        params = sig.parameters
+        if not params:
+            return sig.bind()
+
+        pos_args: list[Any] = []
+        bound_kwargs: dict[str, Any] = {}
+        accepts_var_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+        for name, param in params.items():
+            if param.kind == inspect.Parameter.POSITIONAL_ONLY:
+                if name == "call_id":
+                    pos_args.append(call_id)
+                elif name == "tenant_id":
+                    pos_args.append(tenant_id)
+                elif name == "queue_capacity":
+                    pos_args.append(queue_capacity)
+                elif name in extra_kwargs:
+                    pos_args.append(extra_kwargs[name])
+                elif param.default is not inspect.Parameter.empty:
+                    pos_args.append(param.default)
+                else:
+                    raise VoiceDomainError(
+                        f"Unsupported required positional-only parameter '{name}' in AI port factory"
+                    )
+            elif param.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ):
+                if name == "call_id":
+                    bound_kwargs["call_id"] = call_id
+                elif name == "tenant_id":
+                    bound_kwargs["tenant_id"] = tenant_id
+                elif name == "queue_capacity":
+                    bound_kwargs["queue_capacity"] = queue_capacity
+                elif name in extra_kwargs:
+                    bound_kwargs[name] = extra_kwargs[name]
+                elif param.default is inspect.Parameter.empty:
+                    raise VoiceDomainError(
+                        f"Unsupported required parameter '{name}' in AI port factory"
+                    )
+
+        if accepts_var_kwargs:
+            bound_kwargs.setdefault("call_id", call_id)
+            bound_kwargs.setdefault("tenant_id", tenant_id)
+            bound_kwargs.setdefault("queue_capacity", queue_capacity)
+            for k, v in extra_kwargs.items():
+                bound_kwargs.setdefault(k, v)
+
+        try:
+            bound = sig.bind(*pos_args, **bound_kwargs)
+            bound.apply_defaults()
+            return bound
+        except TypeError as exc:
+            raise VoiceDomainError(f"Cannot bind arguments for AI port factory: {exc}") from exc
+
     def _resolve_adapter(
         self,
         factory: Callable[..., AIRealtimeMediaPort],
@@ -314,21 +389,19 @@ class RealtimeAdapterConformanceSuite:
         queue_capacity: int = 8,
         **kwargs: Any,
     ) -> AIRealtimeMediaPort:
-        try:
-            return factory(
-                call_id=call_id,
-                tenant_id=tenant_id,
-                queue_capacity=queue_capacity,
-                **kwargs,
-            )
-        except TypeError:
-            try:
-                return factory(call_id=call_id, tenant_id=tenant_id, **kwargs)
-            except TypeError:
-                try:
-                    return factory(call_id=call_id, tenant_id=tenant_id)
-                except TypeError:
-                    return factory()
+        """Bind arguments and invoke the adapter factory exactly once.
+
+        Preserves original initialization exceptions (including internal TypeError)
+        without retrying or falling back to reduced arguments.
+        """
+        bound = self._resolve_adapter_binding(
+            factory,
+            call_id=call_id,
+            tenant_id=tenant_id,
+            queue_capacity=queue_capacity,
+            **kwargs,
+        )
+        return factory(*bound.args, **bound.kwargs)
 
     # -------------------------------------------------------------------------
     # Conformance Test Harness Hooks (Override in subclasses if needed)

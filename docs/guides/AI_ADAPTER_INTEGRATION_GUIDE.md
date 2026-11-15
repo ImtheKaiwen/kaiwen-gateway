@@ -164,6 +164,11 @@ app = create_gateway_app(
    - Valid zero-argument synthetic factories (e.g. `lambda: BoundedFakeAIEchoPort()`) remain fully supported for testing.
    - If a factory defines required parameters that cannot be satisfied from verified context, the Gateway fails closed with `VoiceDomainError` without calling the factory.
 
+5. **Synchronous Execution & Asynchronous Provider Setup:**
+   - `ai_media_port_factory` executes **synchronously** during session initialization and must not block the event loop with network I/O.
+   - External providers requiring asynchronous connection handshakes (such as WebSocket connection establishment or session-update exchanges) must manage that setup through an explicit, safe **adapter-owned lifecycle**—for example, lazy connection initialization on first `send_frame()` / `receive_frame()` (protected by an `asyncio.Lock` and bounded timeout), with deterministic cleanup in `await close()`.
+   - Do not assume an external async `open()`/`connect()` hook on `AIRealtimeMediaPort`; `VoiceBridgeSession` starts streaming immediately after factory instantiation.
+
 ---
 
 ## 5. Barge-in & Interruption Handling
@@ -253,6 +258,7 @@ The suite deterministically verifies 8 critical dimensions:
 - **Model Speech Quality & Accuracy:** Conformance does not evaluate transcription accuracy, voice naturalness, or model hallucinations.
 - **Vendor Rate Limits & Quotas:** Conformance runs against mock transports and does not test external API billing, rate limits, or concurrency quotas.
 - **Production Media Gateway Round-Trip Time:** Total round-trip latency depends on telephony transcoding, upstream model inference speed, and network hops.
+- **Skipped Optional Capability / Fault-Injection Tests:** When an adapter or minimal synthetic echo fixture (such as `BoundedFakeAIEchoPort` or `BoundedInterruptibleFakeAIEchoPort`) does not implement `trigger_upstream_failure()` or `inject_upstream_failure()`, Dimension 7 is explicitly `SKIPPED` rather than substituted with another class. A skipped test is never treated as verified failure-path coverage; external adapters must provide a fault-injection hook to verify Dimension 7.
 
 ---
 

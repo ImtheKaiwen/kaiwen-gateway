@@ -109,6 +109,18 @@ from kaiwen_gateway.core.lifecycle import (
     LifecyclePolicy,
     TerminalReason,
 )
+from kaiwen_gateway.core.module_lifecycle import (
+    DEFAULT_MODULE_SHUTDOWN_TIMEOUT,
+    DEFAULT_MODULE_STARTUP_TIMEOUT,
+    InvalidModuleLifecycleStateError,
+    ModuleFailure,
+    ModuleLifecycleError,
+    ModuleLifecycleManager,
+    ModuleLifecyclePhase,
+    ModuleLifecyclePolicy,
+    ModuleShutdownError,
+    ModuleStartupError,
+)
 from kaiwen_gateway.core.registry import ModuleRegistry
 
 __all__ = [
@@ -131,6 +143,8 @@ __all__ = [
     "DEFAULT_INSTANCE_NAME",
     "DEFAULT_MAX_CONCURRENT_CONNECTIONS",
     "DEFAULT_MAX_CONNECTIONS_PER_TENANT",
+    "DEFAULT_MODULE_SHUTDOWN_TIMEOUT",
+    "DEFAULT_MODULE_STARTUP_TIMEOUT",
     "DrainError",
     "DrainPolicy",
     "DrainReport",
@@ -154,6 +168,7 @@ __all__ = [
     "InvalidLeaseError",
     "InvalidModuleDescriptorError",
     "InvalidModuleIdError",
+    "InvalidModuleLifecycleStateError",
     "InvalidScopeError",
     "LifecyclePolicy",
     "LifecycleTimeoutError",
@@ -166,10 +181,17 @@ __all__ = [
     "MAX_SCOPE_LENGTH",
     "MODULE_ID_PATTERN",
     "ModuleDescriptor",
+    "ModuleFailure",
     "ModuleLifecycle",
+    "ModuleLifecycleError",
+    "ModuleLifecycleManager",
+    "ModuleLifecyclePhase",
+    "ModuleLifecyclePolicy",
     "ModuleNotRegisteredError",
     "ModuleRegistrationError",
     "ModuleRegistry",
+    "ModuleShutdownError",
+    "ModuleStartupError",
     "PROVIDER_CALL_REF_PATTERN",
     "PermissionScope",
     "ProviderAuthenticatorPort",
