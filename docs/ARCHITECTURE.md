@@ -1,8 +1,8 @@
 # Kaiwen Gateway — V1 Architecture
 
-> **Status:** V1 Architecture Baseline (`ADR-0001`..`ADR-0005` accepted; synthetic alpha `v0.1.0a1` released; `main` in `MAINTENANCE — INTEGRATION PENDING`)
+> **Status:** V1 Architecture Baseline (`ADR-0001`..`ADR-0005` accepted; synthetic alpha `v0.1.0a2` released; `main` in `MAINTENANCE — INTEGRATION PENDING`)
 > **Document version:** 1.0
-> **Latest published alpha:** `0.1.0a1` (synthetic alpha)
+> **Latest published alpha:** `0.1.0a2` (synthetic alpha)
 > **Last updated:** 2026-11-15
 > **Scope:** Reusable Python library + deployable ASGI server; **Voice** is the only V1 communication module.
 
@@ -10,7 +10,7 @@
 
 This document describes **how** the requirements in [REQUIREMENTS.md](REQUIREMENTS.md) are structured and implemented: component boundaries, dependency direction, trust boundaries, media and control flows, failure handling, deployment topology, and verification strategy. The public product overview lives in [../README.md](../README.md); delivery sequence and current maintenance status belong in [../ROADMAP.md](../ROADMAP.md); enduring decisions belong in [decisions/](decisions/).
 
-**Implementation status boundary:** Gateway Core, ASGI server hosting, synthetic telephony/media transports, Voice Media Bridge, and drain safety are implemented and released in `v0.1.0a1` (with `S1` / `S1-R2` module lifecycle and drain safety hardened on `main`), and the OpenAI Realtime adapter on `main` (PR #49) is `MOCK_VERIFIED`. **Live OpenAI API verification (`LIVE_VERIFIED`), Kaiwen Agent integration, Kaiwen Speech integration, and real Verimor interoperability remain pending.** Do not mark the system production-ready or Verimor-compatible based on synthetic verification.
+**Implementation status boundary:** Gateway Core, ASGI server hosting, synthetic telephony/media transports, Voice Media Bridge, `S1`/`S1-R2` module lifecycle and drain safety, and the `MOCK_VERIFIED` OpenAI Realtime adapter (`PR #49`) are implemented and published in `v0.1.0a2`. **Live OpenAI API verification (`LIVE_VERIFIED`), Kaiwen Agent integration, Kaiwen Speech integration, and real Verimor interoperability remain pending.** Do not mark the system production-ready or Verimor-compatible based on synthetic verification.
 
 Key constraints:
 

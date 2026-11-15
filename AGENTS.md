@@ -2,8 +2,8 @@
 
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
 > **Package:** `kaiwen-gateway` / import `kaiwen_gateway`
-> **Product phase:** `MAINTENANCE — INTEGRATION PENDING` (Synthetic Alpha `v0.1.0a1` released; `main` includes post-alpha S1/S1-R2/M4-R1/M4-R2 updates)
-> **Published alpha:** `0.1.0a1` (PyPI & GitHub Releases)
+> **Product phase:** `MAINTENANCE — INTEGRATION PENDING` (Synthetic Alpha `v0.1.0a2` released, superseding `v0.1.0a1`)
+> **Published alpha:** `0.1.0a2` (PyPI & GitHub Releases)
 > **Document status:** Active operating rules (M0 baseline accepted 2026-11-01; updated 2026-11-15)
 > **Last reviewed:** 2026-11-15
 

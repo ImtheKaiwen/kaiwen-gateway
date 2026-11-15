@@ -6,8 +6,7 @@
 > **Maintenance Status: `MAINTENANCE — INTEGRATION PENDING` (2026-11-15).**
 > Development is temporarily paused at a verified maintenance baseline (this is a planned pause, not project abandonment or repository archiving).
 >
-> - **Latest Published Release (`v0.1.0a1`):** Installable, verified synthetic-environment alpha published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0a1/) and [GitHub Releases](https://github.com/ImtheKaiwen/kaiwen-gateway/releases/tag/v0.1.0a1). Enables testing and benchmarking against reproducible in-process and loopback synthetic environments without external credentials or telephony hardware.
-> - **Unreleased Additions on `main` (post-`v0.1.0a1`):** Includes Core module lifecycle orchestration and public API policy (`S1`, PR #47), fail-closed lifespan drain safety (`S1-R2`, PR #48), provider-independent adapter conformance testing (`M4-R1`, PR #42/#43), and the `MOCK_VERIFIED` OpenAI Realtime media adapter (`M4-R2`, PR #49).
+> - **Latest Published Release (`v0.1.0a2`):** Installable, verified synthetic-environment alpha published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0a2/) and [GitHub Releases](https://github.com/ImtheKaiwen/kaiwen-gateway/releases/tag/v0.1.0a2) (superseding `v0.1.0a1`). Includes Core module lifecycle orchestration and public API policy (`S1`, PR #47), fail-closed lifespan drain safety (`S1-R2`, PR #48), provider-independent adapter conformance testing (`M4-R1`, PR #42/#43), and the `MOCK_VERIFIED` OpenAI Realtime media adapter (`M4-R2`, PR #49).
 > - **Pending / Not Yet Supported:** **Production use is not supported.** Live OpenAI Realtime API verification (`LIVE_VERIFIED`), Kaiwen Agent integration, Kaiwen Speech integration, live Verimor PSTN/WSS interoperability (`FR-INT-007`), and production-readiness assessment remain pending.
 
 Kaiwen Gateway is designed to be both a **reusable Python library** and a **deployable ASGI service**. It accepts connections from external systems, authenticates and isolates them, translates provider-specific protocols into well-defined internal contracts, and bridges live communication to application and AI backends.
@@ -34,25 +33,28 @@ uv sync --extra server
 
 # Option 2: Build and install local wheel into an isolated virtual environment
 uv build
-pip install dist/kaiwen_gateway-0.1.0a1-py3-none-any.whl[server]
+pip install dist/kaiwen_gateway-0.1.0a2-py3-none-any.whl[server]
 ```
 
 To install only the minimal core library (contracts, admission control, identity, lifecycle supervision) without server dependencies:
 
 ```bash
-pip install dist/kaiwen_gateway-0.1.0a1-py3-none-any.whl
+pip install dist/kaiwen_gateway-0.1.0a2-py3-none-any.whl
 ```
 
 #### B. Installing from PyPI
 
-Kaiwen Gateway `v0.1.0a1` is published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0a1/):
+Kaiwen Gateway `v0.1.0a2` is published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0a2/):
 
 ```bash
 # Install core package + ASGI runtime:
-pip install "kaiwen-gateway[server]==0.1.0a1"
+pip install "kaiwen-gateway[server]==0.1.0a2"
+
+# Install core package + ASGI runtime + OpenAI Realtime adapter (MOCK_VERIFIED):
+pip install "kaiwen-gateway[server,openai]==0.1.0a2"
 
 # Install minimal core library only:
-pip install "kaiwen-gateway==0.1.0a1"
+pip install "kaiwen-gateway==0.1.0a2"
 ```
 
 ---
@@ -99,28 +101,28 @@ uv run python examples/quickstart_synthetic_media.py
 
 ---
 
-## Capability Matrix (`v0.1.0a1` vs. `main`)
+## Capability Matrix (`v0.1.0a2`)
 
-The following matrix distinguishes verified capabilities in the published synthetic alpha (`v0.1.0a1`), unreleased additions on `main`, and deferred or unsupported features:
+The following matrix distinguishes verified capabilities in the latest published synthetic alpha (`v0.1.0a2`) from deferred or unsupported features:
 
 | Capability | Requirement Reference | Status | Notes / Limitations |
 | --- | --- | --- | --- |
-| **Gateway Core Architecture** | `FR-CORE-001`–`007` | **Supported (`v0.1.0a1`, Verified)** | Framework-independent modular core (`compose_gateway_core`), typed module registry, immutable configuration (`CoreConfig`). |
-| **Module Lifecycle Orchestration** | `FR-CORE-004` | **Supported (`main` Unreleased, Verified)** | Added post-alpha (`S1`, PR #47): `ModuleLifecycleManager` and host-owned `gateway_lifespan` startup/shutdown orchestration. |
-| **Identity & Scoped Authorization** | `FR-CONN-002`, `SEC-002`–`003` | **Supported (`v0.1.0a1`, Verified)** | Strong identity tokens (`ProviderPrincipal`, `TenantCallBinding`), HMAC-SHA256 validation, scope checking (`voice.stream`, `voice.admin`), control-character rejection. |
-| **Admission Control** | `FR-CONN-005`, `NFR-REL-002` | **Supported (`v0.1.0a1`, Verified)** | Process-local atomic capacity reservations against global and per-tenant ceilings, duplicate connection prevention, idempotent lease release. |
-| **Supervised Connection Lifecycle** | `FR-CONN-004`, `REL-001`–`003` | **Supported (`v0.1.0a1`, Verified)** | Strict state machine (`NEW` → `ADMITTED` → `ACTIVE` → `CLOSED`/`FAILED`), cancellation shielding, timeout enforcement, zero orphan tasks. |
-| **Graceful Instance Draining & Drain Safety** | `FR-CONN-006`, `REL-004` | **Supported (`v0.1.0a1`; hardened on `main`)** | Multi-phase draining coordinator (`InstanceDrainCoordinator`), admission rejection during drain, bounded grace period, cooperative termination. Post-alpha (`S1-R2`, PR #48) added fail-closed `DrainReport` inspection in `gateway_lifespan` before module shutdown. |
-| **ASGI Server & Health Endpoints** | `FR-CORE-002`, `OBS-001` | **Supported (`v0.1.0a1`, Verified)** | Starlette/Uvicorn ASGI host, `GET /health` (liveness), `GET /ready` (readiness with drain detection). Restricted to loopback (`127.0.0.1`) by default. |
-| **Synthetic Telephony Transport** | `FR-CONN-001`, `FR-INT-006` | **Supported (`v0.1.0a1`, Verified)** | `/ws/synthetic-telephony/v1` authenticated WSS endpoint, structured JSON control events (`call.start`, `call.started`, `call.end`, `call.ended`, ping/pong). |
-| **Synthetic Media Transport** | `FR-VOICE-002`–`004` | **Supported (`v0.1.0a1`, Verified)** | `/ws/synthetic-media/v1` binary WebSocket transport, 16kHz 16-bit linear PCM mono framing (20ms frames), single-read demux, control event interleaving. |
-| **Voice Media Bridge** | `FR-VOICE-001`, `FR-VOICE-005` | **Supported (`v0.1.0a1`, Verified)** | Asynchronous bidirectional media bridge (`VoiceBridgeSession`), isolated inbound/outbound audio pumps, turn tracking, backpressure bounds. |
-| **Barge-in Interruption** | `FR-VOICE-006` | **Supported (`v0.1.0a1`, Verified)** | User speech interruption triggers downstream AI cancellation, outbound buffer flushing, and synchronized turn incrementing. |
-| **Fake AI Echo Adapter & Conformance Suite** | `FR-INT-002` | **Supported (`v0.1.0a1`; suite on `main`)** | In-process `BoundedFakeAIEchoPort` in `v0.1.0a1`; `RealtimeAdapterConformanceSuite` (`kaiwen_gateway.testing`) added on `main` (`M4-R1`). |
-| **OpenAI Realtime Media Adapter** | `FR-INT-003`, `FR-INT-005` | **`MOCK_VERIFIED` (`main` Unreleased; Live Pending)** | Added post-alpha (`M4-R2`, PR #49): `kaiwen_gateway.adapters.openai_realtime` (`[openai]` extra) verified against local mocked WebSocket server and `RealtimeAdapterConformanceSuite` (38 tests). **Live OpenAI API verification (`LIVE_VERIFIED`) remains pending.** |
-| **Server-Owned Credentials** | `FR-INT-003`, `SEC-005` | **Supported (`v0.1.0a1`, Verified)** | Credentials and secrets stored only in server-controlled configuration/secret providers; redacted from logs and error summaries; never exposed to telephony clients. |
-| **Privacy & Zero Audio Persistence** | `SEC-006` | **Supported (`v0.1.0a1`, Verified)** | **Zero raw audio or transcript persistence by default.** No recording or transcript storage occurs without application-owned explicit opt-in adapters. |
-| **Outbound Egress & SSRF Protection** | `SEC-008` | **Supported (`v0.1.0a1`; `wss://`/loopback on `main`)** | In-process synthetic adapters in `v0.1.0a1`; OpenAI Realtime transport on `main` enforces `wss://` (with loopback-only `ws://` for local testing). |
+| **Gateway Core Architecture** | `FR-CORE-001`–`007` | **Supported (`v0.1.0a2`, Verified)** | Framework-independent modular core (`compose_gateway_core`), typed module registry, immutable configuration (`CoreConfig`). |
+| **Module Lifecycle Orchestration** | `FR-CORE-004` | **Supported (`v0.1.0a2`, Verified)** | Added in `S1` (PR #47), published in `v0.1.0a2`: `ModuleLifecycleManager` and host-owned `gateway_lifespan` startup/shutdown orchestration. |
+| **Identity & Scoped Authorization** | `FR-CONN-002`, `SEC-002`–`003` | **Supported (`v0.1.0a2`, Verified)** | Strong identity tokens (`ProviderPrincipal`, `TenantCallBinding`), HMAC-SHA256 validation, scope checking (`voice.stream`, `voice.admin`), control-character rejection. |
+| **Admission Control** | `FR-CONN-005`, `NFR-REL-002` | **Supported (`v0.1.0a2`, Verified)** | Process-local atomic capacity reservations against global and per-tenant ceilings, duplicate connection prevention, idempotent lease release. |
+| **Supervised Connection Lifecycle** | `FR-CONN-004`, `REL-001`–`003` | **Supported (`v0.1.0a2`, Verified)** | Strict state machine (`NEW` → `ADMITTED` → `ACTIVE` → `CLOSED`/`FAILED`), cancellation shielding, timeout enforcement, zero orphan tasks. |
+| **Graceful Instance Draining & Drain Safety** | `FR-CONN-006`, `REL-004` | **Supported (`v0.1.0a2`, Verified)** | Multi-phase draining coordinator (`InstanceDrainCoordinator`), admission rejection during drain, bounded grace period, cooperative termination, and fail-closed `DrainReport` inspection in `gateway_lifespan` (`S1-R2`, PR #48). |
+| **ASGI Server & Health Endpoints** | `FR-CORE-002`, `OBS-001` | **Supported (`v0.1.0a2`, Verified)** | Starlette/Uvicorn ASGI host, `GET /health` (liveness), `GET /ready` (readiness with drain detection). Restricted to loopback (`127.0.0.1`) by default. |
+| **Synthetic Telephony Transport** | `FR-CONN-001`, `FR-INT-006` | **Supported (`v0.1.0a2`, Verified)** | `/ws/synthetic-telephony/v1` authenticated WSS endpoint, structured JSON control events (`call.start`, `call.started`, `call.end`, `call.ended`, ping/pong). |
+| **Synthetic Media Transport** | `FR-VOICE-002`–`004` | **Supported (`v0.1.0a2`, Verified)** | `/ws/synthetic-media/v1` binary WebSocket transport, 16kHz 16-bit linear PCM mono framing (20ms frames), single-read demux, control event interleaving. |
+| **Voice Media Bridge** | `FR-VOICE-001`, `FR-VOICE-005` | **Supported (`v0.1.0a2`, Verified)** | Asynchronous bidirectional media bridge (`VoiceBridgeSession`), isolated inbound/outbound audio pumps, turn tracking, backpressure bounds. |
+| **Barge-in Interruption** | `FR-VOICE-006` | **Supported (`v0.1.0a2`, Verified)** | User speech interruption triggers downstream AI cancellation, outbound buffer flushing, and synchronized turn incrementing. |
+| **Fake AI Echo Adapter & Conformance Suite** | `FR-INT-002` | **Supported (`v0.1.0a2`, Verified)** | In-process `BoundedFakeAIEchoPort` plus `RealtimeAdapterConformanceSuite` (`kaiwen_gateway.testing`, `M4-R1`). |
+| **OpenAI Realtime Media Adapter** | `FR-INT-003`, `FR-INT-005` | **`MOCK_VERIFIED` (`v0.1.0a2`; Live Pending)** | Published in `v0.1.0a2` (`M4-R2`, PR #49): `kaiwen_gateway.adapters.openai_realtime` (`[openai]` extra) verified against local mocked WebSocket server and `RealtimeAdapterConformanceSuite` (38 tests). **Live OpenAI API verification (`LIVE_VERIFIED`) remains pending.** |
+| **Server-Owned Credentials** | `FR-INT-003`, `SEC-005` | **Supported (`v0.1.0a2`, Verified)** | Credentials and secrets stored only in server-controlled configuration/secret providers; redacted from logs and error summaries; never exposed to telephony clients. |
+| **Privacy & Zero Audio Persistence** | `SEC-006` | **Supported (`v0.1.0a2`, Verified)** | **Zero raw audio or transcript persistence by default.** No recording or transcript storage occurs without application-owned explicit opt-in adapters. |
+| **Outbound Egress & SSRF Protection** | `SEC-008` | **Supported (`v0.1.0a2`, Verified)** | In-process synthetic adapters; OpenAI Realtime transport enforces `wss://` (with loopback-only `ws://` for local testing). |
 | **Gateway Transport Overhead** | `NFR-PERF-004` (P1) | **Design Goal (Observed)** | Design goal is p95 Gateway-added transport processing overhead ≤ 50 ms under reference workload (excluding external network/model delays; not an established guarantee). Observed Gateway queue wait + bridge compute overhead was ~2.5 ms at 50 sessions and ~26 ms at 100 sessions under reference conditions. |
 | **Live Verimor Telephony** | `FR-INT-007` (P1) | **Deferred (Pending Vendor Spec)** | `OPEN-001` / `OPEN-002`. Blocked pending official vendor WebSocket specification and authorized interoperability testing. Wire format is strictly not guessed. |
 | **OpenAI Live Contract Verification** | `FR-INT-005` | **Deferred (`LIVE_VERIFIED` Pending)** | `OPEN-003`. Mock-verified on `main`; live verification requires maintainer authorization and `OPENAI_API_KEY`. |

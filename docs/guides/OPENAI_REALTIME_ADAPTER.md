@@ -1,6 +1,6 @@
 # OpenAI Realtime Adapter Guide (M4-R2)
 
-> **Status:** `MOCK_VERIFIED` (`main` unreleased post-`v0.1.0a1`, PR #49; `MAINTENANCE — INTEGRATION PENDING`) — Verified against a local mocked OpenAI Realtime WebSocket server and all 8 dimensions of `RealtimeAdapterConformanceSuite` (38 tests, 0 skips). **Not `LIVE_VERIFIED`**; live OpenAI API interoperability requires maintainer authorization and an `OPENAI_API_KEY`.
+> **Status:** `MOCK_VERIFIED` (published in `v0.1.0a2`, PR #49; `MAINTENANCE — INTEGRATION PENDING`) — Verified against a local mocked OpenAI Realtime WebSocket server and all 8 dimensions of `RealtimeAdapterConformanceSuite` (38 tests, 0 skips). **Not `LIVE_VERIFIED`**; live OpenAI API interoperability requires maintainer authorization and an `OPENAI_API_KEY`.
 
 ---
 

@@ -4,8 +4,8 @@ All notable **user-facing changes** to Kaiwen Gateway are recorded in this file.
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for its Python distribution. The **Python package version**, any **external Gateway wire/API protocol version**, and **provider adapter compatibility** are separate concerns; a package release does not automatically change a wire protocol version.
 
-> **Project status (2026-11-15): `MAINTENANCE — INTEGRATION PENDING` (Synthetic Alpha `v0.1.0a1` Released).**
-> Kaiwen Gateway `v0.1.0a1` is released and published to PyPI as a verified, installable synthetic-environment alpha. Unreleased improvements on `main` (including S1/S1-R2 drain safety and the `MOCK_VERIFIED` OpenAI Realtime adapter in PR #48 and PR #49) are recorded under `Unreleased` below. Development is temporarily paused pending live provider verification and external integrations.
+> **Project status (2026-11-15): `MAINTENANCE — INTEGRATION PENDING` (Synthetic Alpha `v0.1.0a2` Released).**
+> Kaiwen Gateway `v0.1.0a2` is released and published to PyPI as a verified, installable synthetic-environment alpha (superseding `v0.1.0a1`), including S1/S1-R2 drain safety, the adapter conformance suite, and the `MOCK_VERIFIED` OpenAI Realtime adapter (`PR #47`–`#51`). Development remains paused pending live provider verification and external integrations.
 >
 > **Production use is not yet supported.** Live OpenAI Realtime verification (`LIVE_VERIFIED`), Kaiwen Agent, Kaiwen Speech, and live Verimor interoperability (`FR-INT-007`) remain pending.
 

@@ -1,8 +1,8 @@
 # Kaiwen Gateway — V1 Requirements
 
-> **Status:** V1 Requirements Baseline (synthetic alpha `v0.1.0a1` released; `main` in `MAINTENANCE — INTEGRATION PENDING`)
+> **Status:** V1 Requirements Baseline (synthetic alpha `v0.1.0a2` released; `main` in `MAINTENANCE — INTEGRATION PENDING`)
 > **Document version:** 1.0
-> **Latest published alpha:** `0.1.0a1` (synthetic alpha)
+> **Latest published alpha:** `0.1.0a2` (synthetic alpha)
 > **Last updated:** 2026-11-15
 > **Scope:** Reusable Python library + deployable ASGI service; Voice is the only implemented communication module in V1.
 
@@ -10,7 +10,7 @@
 
 This document defines **what Kaiwen Gateway V1 must do**, **how acceptance is verified**, and **what will not be built**. It is the scope and acceptance baseline for developers and coding agents. The implementation architecture belongs in [`ARCHITECTURE.md`](ARCHITECTURE.md); architectural trade-offs belong in [`decisions/`](decisions/); task sequencing and current maintenance status belong in [`../ROADMAP.md`](../ROADMAP.md).
 
-**Verification status boundary:** Synthetic-environment P0 requirements were verified for the `v0.1.0a1` alpha release (with documented Gate B exceptions for external integrations), and `main` includes post-alpha Core drain-safety hardening (`PR #48`) and the `MOCK_VERIFIED` OpenAI Realtime adapter (`PR #49`). Requirements marked *Required* for live providers (`LIVE_VERIFIED` OpenAI Realtime, Kaiwen Agent, Kaiwen Speech, Verimor) and production readiness remain unverified and must not be claimed as fulfilled without supporting evidence.
+**Verification status boundary:** Synthetic-environment P0 requirements were verified for the `v0.1.0a1` alpha release (with documented Gate B exceptions for external integrations), and `v0.1.0a2` adds Core drain-safety hardening (`PR #48`), adapter conformance testing, and the `MOCK_VERIFIED` OpenAI Realtime adapter (`PR #49`). Requirements marked *Required* for live providers (`LIVE_VERIFIED` OpenAI Realtime, Kaiwen Agent, Kaiwen Speech, Verimor) and production readiness remain unverified and must not be claimed as fulfilled without supporting evidence.
 
 ### 1.1 Requirement vocabulary
 
