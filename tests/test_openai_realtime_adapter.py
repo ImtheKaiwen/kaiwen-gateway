@@ -1375,3 +1375,199 @@ def test_29_failed_response_done_surfaces_sanitized_error_and_closes() -> None:
         assert adapter.is_closed is True
 
     asyncio.run(_run())
+
+
+def test_30_interruption_blocks_future_turn_audio_until_cancel_turn_commits() -> None:
+    """Verify no future-turn audio reaches VoiceBridgeSession while response.cancel is in flight."""
+
+    async def _run() -> None:
+        server_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        cancel_entered = asyncio.Event()
+        release_cancel = asyncio.Event()
+
+        class _BlockingCancelTransport:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                if payload.get("type") == "response.cancel":
+                    cancel_entered.set()
+                    await release_cancel.wait()
+
+            async def receive_json(self) -> dict[str, Any] | None:
+                return await server_events.get()
+
+            async def close(self) -> None:
+                release_cancel.set()
+                await server_events.put(None)
+
+        async def _connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            return _BlockingCancelTransport()
+
+        cfg = OpenAIRealtimeConfig(
+            api_key="sk-test-int-race",
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+            cancel_timeout_seconds=2.0,
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_int_race",
+            tenant_id="tenant_a",
+            config=cfg,
+            transport_connector=_connector,
+        )
+        tel_port = FakeTelephonyMediaAdapter(name="tel-int-race")
+        session = VoiceBridgeSession(
+            call_id="call_int_race",
+            tenant_id="tenant_a",
+            telephony_port=tel_port,
+            ai_port=adapter,
+            queue_capacity=8,
+        )
+        await session.start()
+
+        async def _wait_sent_count(count: int) -> AudioFrame:
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while len(tel_port.sent_frames) < count:
+                if asyncio.get_running_loop().time() > deadline:
+                    raise TimeoutError(f"Timed out waiting for {count} sent frames")
+                await asyncio.sleep(0.01)
+            return tel_port.sent_frames[count - 1]
+
+        # Start Turn 1 so adapter is connected and delivering Turn 1 audio.
+        await server_events.put({"type": "response.created", "response": {"id": "resp_t1"}})
+        await server_events.put(
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "resp_t1",
+                "delta": base64.b64encode(b"\x01\x00" * 480).decode("ascii"),
+            }
+        )
+        t1_frame = await _wait_sent_count(1)
+        assert t1_frame.turn_id == 1
+
+        # Begin interruption; response.cancel blocks inside transport.send_json.
+        interrupt_task = asyncio.create_task(session.interrupt(turn_id=1))
+        await asyncio.wait_for(cancel_entered.wait(), timeout=2.0)
+
+        # Inject subsequent response.created + delta while response.cancel is still blocked.
+        await server_events.put({"type": "response.created", "response": {"id": "resp_t2"}})
+        await server_events.put(
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "resp_t2",
+                "delta": base64.b64encode(b"\x07\x00" * 480).decode("ascii"),
+            }
+        )
+        await asyncio.sleep(0.05)
+
+        # Future-turn audio must NOT have been forwarded to telephony before interrupt() commits.
+        assert len(tel_port.sent_frames) == 1
+
+        # Unblock response.cancel and verify VoiceBridgeSession commits cleanly and forwards Turn 2.
+        release_cancel.set()
+        outcome = await asyncio.wait_for(interrupt_task, timeout=2.0)
+        assert outcome.new_turn_id == 2
+
+        t2_frame = await _wait_sent_count(2)
+        assert t2_frame.turn_id == 2
+        assert t2_frame.payload == b"\x07\x00" * 320
+        assert session.error is None
+        await session.close()
+
+    asyncio.run(_run())
+
+
+def test_31_plaintext_remote_ws_rejected_while_loopback_ws_and_wss_allowed() -> None:
+    """Verify plaintext remote ws:// URLs are rejected while loopback ws:// and wss:// work."""
+    from kaiwen_gateway.adapters.openai_realtime.transport import (
+        connect_openai_realtime_websocket,
+    )
+
+    with pytest.raises(ValueError, match="wss://"):
+        OpenAIRealtimeConfig(api_key="sk-test", endpoint_url="ws://api.openai.com/v1/realtime")
+
+    with pytest.raises(ValueError, match="wss://"):
+        OpenAIRealtimeConfig(api_key="sk-test", endpoint_url="ws://10.0.0.5:8080/v1/realtime")
+
+    # Loopback ws:// and remote wss:// remain permitted.
+    cfg_local = OpenAIRealtimeConfig(
+        api_key="sk-test", endpoint_url="ws://127.0.0.1:8000/v1/realtime"
+    )
+    assert cfg_local.build_websocket_url().startswith("ws://127.0.0.1:8000")
+    cfg_localhost = OpenAIRealtimeConfig(
+        api_key="sk-test", endpoint_url="ws://localhost:8000/v1/realtime"
+    )
+    assert cfg_localhost.build_websocket_url().startswith("ws://localhost:8000")
+    cfg_tls = OpenAIRealtimeConfig(
+        api_key="sk-test", endpoint_url="wss://api.openai.com/v1/realtime"
+    )
+    assert cfg_tls.build_websocket_url().startswith("wss://api.openai.com")
+
+    # Defense-in-depth at transport connect time even if config validation were bypassed.
+    bypassed = object.__new__(OpenAIRealtimeConfig)
+    object.__setattr__(bypassed, "api_key", "sk-test-secret")
+    object.__setattr__(bypassed, "model", "gpt-realtime")
+    object.__setattr__(bypassed, "voice", "alloy")
+    object.__setattr__(bypassed, "instructions", None)
+    object.__setattr__(bypassed, "endpoint_url", "ws://remote.example.com/v1/realtime")
+    object.__setattr__(bypassed, "connect_timeout_seconds", 1.0)
+    object.__setattr__(bypassed, "close_timeout_seconds", 1.0)
+
+    async def _check_transport() -> None:
+        with pytest.raises(OpenAIRealtimeError, match="wss://"):
+            await connect_openai_realtime_websocket(bypassed)
+
+    asyncio.run(_check_transport())
+
+
+def test_32_incomplete_response_done_content_filter_surfaces_sanitized_error() -> None:
+    """Verify response.done with status='incomplete' raises sanitized OpenAIRealtimeError."""
+
+    async def _run() -> None:
+        secret_key = "sk-test-incomplete-key"
+        server_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        await server_events.put({"type": "response.created", "response": {"id": "resp_inc"}})
+        await server_events.put(
+            {
+                "type": "response.done",
+                "response": {
+                    "id": "resp_inc",
+                    "status": "incomplete",
+                    "status_details": {
+                        "type": "incomplete",
+                        "reason": "content_filter",
+                    },
+                },
+            }
+        )
+
+        class _IncompleteTransport:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                return None
+
+            async def receive_json(self) -> dict[str, Any] | None:
+                return await server_events.get()
+
+            async def close(self) -> None:
+                await server_events.put(None)
+
+        async def _connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            return _IncompleteTransport()
+
+        cfg = OpenAIRealtimeConfig(
+            api_key=secret_key,
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_resp_inc",
+            tenant_id="tenant_a",
+            config=cfg,
+            transport_connector=_connector,
+        )
+        with pytest.raises(OpenAIRealtimeError) as exc_info:
+            await asyncio.wait_for(adapter.receive_frame(), timeout=2.0)
+
+        msg = str(exc_info.value)
+        assert "incomplete" in msg
+        assert "content_filter" in msg
+        assert secret_key not in msg
+        assert adapter.is_closed is True
+
+    asyncio.run(_run())

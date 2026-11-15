@@ -11,6 +11,7 @@ from kaiwen_gateway.adapters.openai_realtime.config import (
     OpenAIRealtimeDependencyError,
     OpenAIRealtimeError,
     sanitize_provider_message,
+    validate_endpoint_url,
 )
 
 
@@ -106,6 +107,12 @@ async def connect_openai_realtime_websocket(
             "OpenAI Realtime API key is required for upstream WebSocket connections"
         )
 
+    url = config.build_websocket_url()
+    try:
+        validate_endpoint_url(url)
+    except ValueError as exc:
+        raise OpenAIRealtimeError(str(exc)) from None
+
     try:
         from websockets.asyncio.client import connect as ws_connect
     except ImportError as exc:
@@ -114,7 +121,6 @@ async def connect_openai_realtime_websocket(
             "Install with: pip install kaiwen-gateway[openai]"
         ) from exc
 
-    url = config.build_websocket_url()
     headers = {"Authorization": f"Bearer {config.api_key}"}
     try:
         ws = await ws_connect(

@@ -131,6 +131,9 @@ class OpenAIRealtimeMediaAdapter:
 
         self._fenced_turn_id = 0
         self._current_turn_id = 1
+        self._committed_turn_id = 1
+        self._turn_transition_event = asyncio.Event()
+        self._turn_transition_event.set()
         self._active_response_id: str | None = None
         self._pending_cancel_acks = 0
         self._pending_cancel_boundaries = 0
@@ -181,6 +184,7 @@ class OpenAIRealtimeMediaAdapter:
             self._terminal_error = error
         self._closed = True
         self._closed_event.set()
+        self._turn_transition_event.set()
         _drain_queue_nowait(self._inbound_queue)
         _drain_queue_nowait(self._outbound_queue)
         self._response_turn_map.clear()
@@ -470,6 +474,18 @@ class OpenAIRealtimeMediaAdapter:
                             f"OpenAI Realtime response failed ({code}): {safe_msg}"
                         )
                     raise OpenAIRealtimeError("OpenAI Realtime response failed")
+                elif status == "incomplete":
+                    status_details = (
+                        resp_obj.get("status_details") if resp_obj is not None else None
+                    )
+                    reason = "incomplete"
+                    if isinstance(status_details, dict):
+                        raw_reason = status_details.get("reason") or status_details.get("type")
+                        if raw_reason:
+                            reason = sanitize_provider_message(
+                                str(raw_reason), self._config.api_key
+                            )
+                    raise OpenAIRealtimeError(f"OpenAI Realtime response incomplete ({reason})")
             return
 
     async def send_frame(self, frame: AudioFrame) -> None:
@@ -539,6 +555,14 @@ class OpenAIRealtimeMediaAdapter:
             if isinstance(item, _EOFSentinel):
                 self._eof_delivered = True
                 return None
+            if item.turn_id is not None and item.turn_id > self._committed_turn_id:
+                await self._turn_transition_event.wait()
+                if self._terminal_error is not None:
+                    raise self._terminal_error
+                if self._closed and self._outbound_queue.empty():
+                    if self._eof_delivered:
+                        return None
+                    raise MediaPortClosedError("OpenAIRealtimeMediaAdapter is closed")
             if item.turn_id is not None and item.turn_id <= self._fenced_turn_id:
                 continue
             return item
@@ -549,50 +573,56 @@ class OpenAIRealtimeMediaAdapter:
             raise MediaPortClosedError("OpenAIRealtimeMediaAdapter is closed")
 
         async with self._cancel_lock:
-            self._fenced_turn_id = max(self._fenced_turn_id, turn_id)
-            self._current_turn_id = max(self._current_turn_id, turn_id + 1)
-            if self._transport is not None and self._active_response_id is None:
-                # A response.created for the interrupted generation may still be in-flight
-                # or buffered on the socket; fence it until its terminal boundary arrives.
-                self._pending_cancel_boundaries += 1
-            self._packer.reset()
-            self._resampler_out.reset()
+            self._turn_transition_event.clear()
+            try:
+                self._fenced_turn_id = max(self._fenced_turn_id, turn_id)
+                self._current_turn_id = max(self._current_turn_id, turn_id + 1)
+                if self._transport is not None and self._active_response_id is None:
+                    # A response.created for the interrupted generation may still be in-flight
+                    # or buffered on the socket; fence it until its terminal boundary arrives.
+                    self._pending_cancel_boundaries += 1
+                self._packer.reset()
+                self._resampler_out.reset()
 
-            # Purge locally queued frames belonging to superseded turns
-            retained: list[AudioFrame | _EOFSentinel | _ErrorSentinel] = []
-            while not self._outbound_queue.empty():
-                try:
-                    item = self._outbound_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                if isinstance(item, AudioFrame):
-                    if item.turn_id is not None and item.turn_id > self._fenced_turn_id:
+                # Purge locally queued frames belonging to superseded turns
+                retained: list[AudioFrame | _EOFSentinel | _ErrorSentinel] = []
+                while not self._outbound_queue.empty():
+                    try:
+                        item = self._outbound_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if isinstance(item, AudioFrame):
+                        if item.turn_id is not None and item.turn_id > self._fenced_turn_id:
+                            retained.append(item)
+                    else:
                         retained.append(item)
-                else:
-                    retained.append(item)
 
-            for item in retained:
-                try:
-                    self._outbound_queue.put_nowait(item)
-                except asyncio.QueueFull:
-                    break
+                for item in retained:
+                    try:
+                        self._outbound_queue.put_nowait(item)
+                    except asyncio.QueueFull:
+                        break
 
-            if self._transport is not None and not self._closed:
-                payload: dict[str, Any] = {"type": "response.cancel"}
-                self._pending_cancel_acks += 1
-                try:
-                    await asyncio.wait_for(
-                        self._transport.send_json(payload),
-                        timeout=self._config.cancel_timeout_seconds,
-                    )
-                except TimeoutError as exc:
-                    self._pending_cancel_acks = max(0, self._pending_cancel_acks - 1)
-                    raise OpenAIRealtimeError("Timed out sending response.cancel") from exc
+                if self._transport is not None and not self._closed:
+                    payload: dict[str, Any] = {"type": "response.cancel"}
+                    self._pending_cancel_acks += 1
+                    try:
+                        await asyncio.wait_for(
+                            self._transport.send_json(payload),
+                            timeout=self._config.cancel_timeout_seconds,
+                        )
+                    except TimeoutError as exc:
+                        self._pending_cancel_acks = max(0, self._pending_cancel_acks - 1)
+                        raise OpenAIRealtimeError("Timed out sending response.cancel") from exc
+            finally:
+                self._committed_turn_id = max(self._committed_turn_id, self._current_turn_id)
+                self._turn_transition_event.set()
 
     async def close(self) -> None:
         """Idempotently close the adapter, cancel background tasks, and close transport."""
         self._closed = True
         self._closed_event.set()
+        self._turn_transition_event.set()
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._perform_close())
         await asyncio.shield(self._close_task)

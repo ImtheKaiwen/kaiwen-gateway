@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -29,6 +30,30 @@ def sanitize_provider_message(message: str, api_key: str | None = None) -> str:
     if api_key:
         cleaned = cleaned.replace(api_key, "[REDACTED]")
     return cleaned
+
+
+def _is_loopback_host(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    normalized = hostname.strip().lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_endpoint_url(endpoint_url: str) -> None:
+    """Validate that ``endpoint_url`` uses ``wss://`` or loopback-only ``ws://``."""
+    parsed = urlparse(endpoint_url)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.netloc or not parsed.hostname:
+        raise ValueError("endpoint_url must be a valid ws:// or wss:// URL")
+    if parsed.scheme == "ws" and not _is_loopback_host(parsed.hostname):
+        raise ValueError(
+            "Plaintext ws:// endpoint_url is only allowed for loopback hosts; "
+            "use wss:// for remote endpoints"
+        )
 
 
 def _default_turn_detection() -> dict[str, Any]:
@@ -67,9 +92,7 @@ class OpenAIRealtimeConfig:
             raise ValueError("model must be a non-empty string")
         if not self.voice or not self.voice.strip():
             raise ValueError("voice must be a non-empty string")
-        parsed = urlparse(self.endpoint_url)
-        if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
-            raise ValueError("endpoint_url must be a valid ws:// or wss:// URL")
+        validate_endpoint_url(self.endpoint_url)
         if self.connect_timeout_seconds <= 0:
             raise ValueError("connect_timeout_seconds must be > 0")
         if self.close_timeout_seconds <= 0:
