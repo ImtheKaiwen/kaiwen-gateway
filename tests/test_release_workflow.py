@@ -186,3 +186,14 @@ def test_all_actions_use_pinned_commit_shas() -> None:
         assert match is not None, (
             f"Action step is not pinned to a 40-character hex commit SHA: {line}"
         )
+
+
+def test_distribution_inspection_uses_dynamic_package_version() -> None:
+    """Distribution metadata inspection must not hardcode a specific release version."""
+    content = RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "Version: 0.1.0a1" not in content, (
+        "Hardcoded alpha version must not appear in distribution inspection"
+    )
+    assert "EXPECTED_VERSION: ${{ steps.version.outputs.version }}" in content
+    assert 'assert f"Version: {expected_version}" in meta_text' in content
+    assert 'tomllib.load(f)["project"]["version"]' in content

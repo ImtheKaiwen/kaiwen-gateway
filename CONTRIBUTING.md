@@ -2,14 +2,14 @@
 
 > **Project:** [Kaiwen Gateway](https://github.com/ImtheKaiwen/kaiwen-gateway)
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
-> **Phase:** Pre-implementation; M0 documentation baseline and M1 engineering foundation verified
-> **Planned first alpha:** `0.1.0a1` — **not released**
-> **Document status:** Active contributor guide (accepted 2026-11-01)
-> **Last reviewed:** 2026-11-01
+> **Phase:** `MAINTENANCE — INTEGRATION PENDING` (Synthetic Alpha `v0.1.0a1` released; `main` includes S1/S1-R2 drain safety and `MOCK_VERIFIED` OpenAI Realtime adapter)
+> **Latest published alpha:** `0.1.0a1` (PyPI & GitHub Releases)
+> **Document status:** Active contributor guide (accepted 2026-11-01; updated 2026-11-15)
+> **Last reviewed:** 2026-11-15
 
 Thank you for your interest in Kaiwen Gateway. This guide describes how to propose, develop, test, review, and document changes to the project. It applies to human contributors and complements the [coding-agent instructions](AGENTS.md). It does **not** grant permission to use production systems, customer data, paid AI services, or release credentials.
 
-**Current state:** The M0 documentation baseline and M1 engineering foundation (minimal `kaiwen_gateway` package skeleton, `uv.lock`, Ruff, strict mypy, pytest, fast GitHub Actions CI, `uv audit`, Dependabot version updates, and `main` branch protection) are in place. Gateway Core runtime, Voice bridge, ASGI/WSS server, CLI, and provider adapters are **planned for milestone M2 and later**; do not report unimplemented runtime features or commands as working until they have been implemented and executed successfully.
+**Current state:** Kaiwen Gateway `v0.1.0a1` is published on PyPI as a synthetic-environment alpha, and `main` includes post-alpha Core stabilization (`S1`, `S1-R2` in PR #48) and the `MOCK_VERIFIED` OpenAI Realtime media adapter (`M4-R2` in PR #49). Active feature development is temporarily paused (`MAINTENANCE — INTEGRATION PENDING`) while live OpenAI API verification (`LIVE_VERIFIED`), Kaiwen Agent, Kaiwen Speech, and Verimor interoperability remain deferred. Do not claim live provider interoperability or production readiness without verified evidence.
 
 ## 1. Before you contribute
 
@@ -266,7 +266,7 @@ The eventual GitHub Actions setup should use least-privilege permissions, review
 - Running paid live tests, capturing customer media, or contacting real customers.
 - Changing repository protections, secret stores, or privileged GitHub settings.
 
-Releases require approved quality gates, known artifacts, and a separate maintainer decision. `0.1.0a1` is **a planned alpha**, not an existing release. Follow [ROADMAP.md](ROADMAP.md) for the difference between documentation approval, synthetic alpha, real-provider pilot, and production readiness.
+Releases require approved quality gates, known artifacts, and a separate maintainer decision. `0.1.0a1` is the published synthetic-environment alpha; future releases require explicit maintainer authorization and tag-matched release automation. Follow [ROADMAP.md](ROADMAP.md) for the difference between synthetic alpha, unreleased `main` (`MOCK_VERIFIED`), real-provider pilot, and production readiness.
 
 ## 9. Completion and handoff format
 

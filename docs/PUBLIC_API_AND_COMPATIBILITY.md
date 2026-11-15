@@ -1,7 +1,7 @@
 # Kaiwen Gateway — Public API Surface and Compatibility Policy
 
-> **Status:** Active Alpha Reference (S1 Core Stabilization)
-> **Applies to:** `kaiwen-gateway` (`0.1.0a1` synthetic-alpha baseline)
+> **Status:** Active Alpha Reference (`MAINTENANCE — INTEGRATION PENDING`)
+> **Applies to:** `kaiwen-gateway` (`v0.1.0a1` published alpha + unreleased `main` post-alpha additions through PR #49)
 
 This document defines the supported public API surface, versioning model, compatibility expectations, internal boundaries, and provider adapter ownership rules for Kaiwen Gateway.
 

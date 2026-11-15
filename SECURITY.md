@@ -1,9 +1,9 @@
 # Security Policy
 
 > **Project:** [Kaiwen Gateway](https://github.com/ImtheKaiwen/kaiwen-gateway)
-> **Status:** Design / pre-implementation; active M0 security policy baseline (accepted 2026-11-01).
-> **Target first alpha:** `0.1.0a1` (**not published**).
-> **Last reviewed:** 2026-11-01
+> **Status:** `MAINTENANCE — INTEGRATION PENDING` (Synthetic Alpha `v0.1.0a1` published; `main` includes S1/S1-R2 drain safety and `MOCK_VERIFIED` OpenAI Realtime adapter).
+> **Latest published alpha:** `0.1.0a1` (PyPI & GitHub Releases).
+> **Last reviewed:** 2026-11-15
 
 Kaiwen Gateway is intended to handle authenticated, real-time communication between external providers and AI systems. Its initial use case is a bidirectional telephone-audio bridge over WebSockets. A failure at this boundary could expose sensitive conversations, mix different tenants' sessions, authorize unintended actions, or incur upstream service costs.
 
@@ -57,11 +57,11 @@ A model producing a poor answer **without a security boundary being crossed** is
 
 | Version / branch | Status | Security support |
 | --- | --- | --- |
-| `main` | Public design / pre-implementation baseline | Best-effort review; **no production support or service-level commitment**. |
-| `0.1.0a1` | Planned first alpha; **not released** | No published artifact or supported release yet. |
+| `main` | Maintenance baseline (`v0.1.0a1` + unreleased S1/S1-R2/M4-R2 `MOCK_VERIFIED` updates) | Best-effort review; **no production support or service-level commitment**. |
+| `0.1.0a1` | Published synthetic-environment alpha (PyPI & GitHub Releases) | Best-effort review only; **no production support or SLA**. |
 | Future releases | Not yet defined | Policy will be updated when versions are actually published and maintained. |
 
-There are currently **no published, security-supported Gateway releases**. Do not infer support from a version string in planning documents. Once a release is published, maintainers should explicitly document supported version ranges, upgrade/patch expectations, and end-of-support policy in this table.
+There are currently **no production-supported Gateway releases**. `v0.1.0a1` is a synthetic-environment alpha release; future releases will document supported version ranges, upgrade/patch expectations, and end-of-support policy in this table.
 
 **Neither an alpha release nor this policy constitutes a security certification, penetration-test result, availability guarantee, or permission to process real customer calls.**
 

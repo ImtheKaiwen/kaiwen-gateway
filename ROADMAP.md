@@ -1,15 +1,15 @@
 # Kaiwen Gateway — Development Roadmap
 
-> **Status:** Active roadmap — M0 Complete (2026-11-01); M1 Complete (2026-11-01; M1.1–M1.4 verified); M2 Complete; M3 Complete; M4 In progress (M4.1 Complete — PR #20 / `577e6b9`; M4.2A Complete — PR #21 / `df28327`; M4.2B.1 Complete — PR #22 / `e457f8f`; M4.2B.2 Complete — PR #23 / `a3528ea`; M4-R1 realtime adapter readiness in progress; external AI integration pending); M5 In progress (M5.1A Complete — PR #24 / `aca13cc`; M5.1B Complete — PR #26 / `223e9a1`; M5.1C Complete — PR #28 / `0dcc821` & PR #30 / `e5c5433`; high-concurrency benchmark hardening merged — PR #32 / `ae4dc1e`; multi-process client pacing bottleneck isolation merged — PR #34 / `425a883`; repeatable synthetic concurrency qualification established across 1/5/25/50/100 calls in PR #35 / `155940f`; fast-path queue optimization and targeted echo bottleneck isolation merged in PR #36 / `30802e3`; full M5 depends on M4 external integration completion); M6 Complete (v0.1.0a1 published to GitHub Releases & PyPI on 2026-11-12; PR #37–#41, ADR-0005)
-> **Project phase:** Synthetic Alpha Released (v0.1.0a1)
-> **Initial target release:** `0.1.0a1` (synthetic-environment alpha)
-> **Last reviewed:** 2026-11-12
+> **Status:** `MAINTENANCE — INTEGRATION PENDING` (2026-11-15) — M0–M3 Complete; Core Stabilization S1 (`PR #47`) & Drain Safety S1-R2 (`PR #48`) Complete; M4-R1 Adapter Conformance (`PR #42`, `PR #43`) Complete; M4-R2 OpenAI Realtime Adapter (`PR #49`, `MOCK_VERIFIED` — `LIVE_VERIFIED` pending); M5 Synthetic Qualification Complete (`1/5/25/50/100` calls, `PR #35`/`#36`; full M5 depends on live external integrations); M6 Complete (`v0.1.0a1` published to GitHub Releases & PyPI on 2026-11-12; `PR #37`–`#41`, `ADR-0005`).
+> **Project phase:** `MAINTENANCE — INTEGRATION PENDING` (Synthetic Alpha `v0.1.0a1` released; temporary development pause, not project abandonment or repository archiving)
+> **Latest published release:** `v0.1.0a1` (synthetic-environment alpha; `main` contains unreleased post-alpha S1/S1-R2/M4-R1/M4-R2 improvements)
+> **Last reviewed:** 2026-11-15
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
 > **Primary scope:** Reusable Python library and optional ASGI service; **Voice is the only V1 functional module**.
 
-This document describes **the order in which Kaiwen Gateway will be built**, the evidence required to close each milestone, and the dependencies that can block the next stage. It is not an implementation report or a substitute for GitHub Issues and Pull Requests.
+This document describes **the order in which Kaiwen Gateway is built**, the evidence required to close each milestone, and the dependencies that gate the next stage. It is not a substitute for GitHub Issues and Pull Requests.
 
-**Important status distinction:** The initial documentation baseline was published in commit `d4223509f50b67f556420138c669ca1f33ba0abd` and ADR-0001..0003 were accepted on 2026-11-01; **this approval covers the V1 architectural design only and must not be represented as an implemented package, tested integration, release, or deployment**. Update status only from verified repository and test evidence.
+**Historical baseline note:** The initial M0 documentation baseline was published in commit `d4223509f50b67f556420138c669ca1f33ba0abd` and `ADR-0001`..`0003` were accepted on 2026-11-01 as the V1 architectural design baseline. Subsequent milestones M1–M3, M4 synthetic Voice Bridge + `MOCK_VERIFIED` OpenAI Realtime adapter (`PR #49`), S1/S1-R2 Core stabilization (`PR #47`, `PR #48`), M5 synthetic concurrency qualification, and M6 alpha release (`v0.1.0a1`) have been implemented and verified. Update status only from verified repository and test evidence.
 
 ## 1. Sources of truth and decision authority
 
@@ -62,7 +62,7 @@ Use only these milestone status values:
 | **M1** | Python package and CI foundation | `Complete` (M1.1 merged in `#1` / `b0a666e`; M1.2 merged in `#2` / `9c0293c`; M1.3 merged in `#3` / `1355b0c` & verified on `main` run `41263309448`; M1.4A merged in `#4` / `32111a4` & verified on `main` run `41264905664` + Dependabot runs `41264912866`, `41264912883`; M1.4B.1 `main` branch protection enabled & verified via GitHub API) | M0 |
 | **M2** | Core contracts, identity and security/admission | `Complete` (M2.1 merged in `#9` / `68030a0`; M2.2A merged in `#10` / `f65ad6d`; M2.2B merged in `#11` / `705091e`; M2.3 merged in `#12` / `192ec9b`; M2.4A merged in `#13` / `cd835bf`; M2.4B merged in `#14` / `ade73ec`; S1 closed the final M2 exit criterion with `ModuleLifecycleManager` and ASGI `gateway_lifespan` module orchestration) | M1 |
 | **M3** | ASGI/WSS ingress and synthetic telephony adapter | `Complete` (M3.1 merged in `#15` / `224284f`; M3.2A merged in `#16` / `558bd95`; M3.2B merged in `#17` / `7a28c40`; M3.3A merged in `#18` / `d347eae`; M3.3B merged in `#19` / `4fa9a18` & verified on `main` run `42289608463`) | M2 |
-| **M4** | Voice audio bridge and Kaiwen Agent integration | `In progress` (synthetic Voice Bridge foundation complete: M4.1 merged in `#20` / `577e6b9`; M4.2A merged in `#21` / `df28327`; M4.2B.1 merged in `#22` / `e457f8f`; M4.2B.2 merged in `#23` / `a3528ea` & verified on `main` run `42398851469`; full M4 external AI integration remains pending — Kaiwen Agent integration deferred while upstream public API is under active development, OpenAI Live unverified) | M3 |
+| **M4** | Voice audio bridge and realtime AI integration | `In progress` (synthetic Voice Bridge foundation complete: M4.1 `#20`, M4.2A `#21`, M4.2B.1 `#22`, M4.2B.2 `#23`; M4-R1 conformance suite `#42`/`#43`; M4-R2 OpenAI Realtime adapter `#49` / `cc1ee6b` **`MOCK_VERIFIED`**; **`LIVE_VERIFIED` OpenAI API, Kaiwen Agent, and Kaiwen Speech remain pending**) | M3 |
 | **M5** | Resilience, simulation, security and load evidence | `In progress` (M5.1A Complete — PR #24 / `aca13cc` & verified on `main` run `42412851784`; M5.1B Complete — PR #26 / `223e9a1` & verified on `main` run `42495417583`; M5.1C Complete — M5.1C-A PR #28 / `0dcc821` & M5.1C-B PR #30 / `e5c5433` verified on `main` run `42534903921`; high-concurrency benchmark harness hardening merged in PR #32 / `ae4dc1e` & verified on `main` run `42548506391`; multi-process client pacing bottleneck isolation merged in PR #34 / `425a883` & verified on `main` run `42910306731`; repeatable synthetic concurrency qualification established across 1/5/25/50/100 calls in PR #35 / `155940f` & verified on `main` run `43105742337`; fast-path queue optimizations and targeted echo bottleneck isolation merged in PR #36 / `30802e3` & verified on `main` run `43128919179`; full M5 depends on M4 completion) | M4 |
 | **M6** | Alpha packaging and release-readiness review | `Complete` (v0.1.0a1 published on PyPI & GitHub Releases 2026-11-12; PR #37–#41, ADR-0005) | M5 |
 | **M7** | Conditional Verimor pilot | `Blocked` (official protocol and authorizations) | M6 + `OPEN-*` dependencies |
@@ -385,7 +385,36 @@ A future idea becomes committed scope **only after** the maintainer approves an 
 | 2026-11-08 | Completed M5.1C-A Voice Bridge concurrent failure and task lifecycle hardening with deterministic error selection, pre-execution cancellation safety, and 7 regression tests ([PR #28](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/28) / `0dcc821`), verified on `main` run `42523939041` | `Complete` (M5.1C-A closed; M5.1C-B and M5 remain `In progress`) |
 | 2026-11-09 | Completed M5.1C-B Voice Bridge outbound backpressure and WebSocket send lifecycle hardening with bounded queue and EOF sentinel insertion, dedicated downstream WebSocket send deadline, synthetic endpoint timeout composition, error classification, and 15 regression tests ([PR #30](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/30) / `e5c5433`), verified on `main` run `42534903921` | `Complete` (M5.1C-B closed; M5.1C complete; M5 remains `In progress`) |
 | 2026-11-09 | Merged high-concurrency benchmark harness hardening ([PR #32](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/32) / `ae4dc1e`), verified on `main` run `42548506391`: added 50/100 session capacity propagation, decoupled media integrity from real-time pacing verdicts with strict multi-criterion validation, send-only duration tracking, and offline historical artifact reassessment; recorded empirical 50/100 results (integrity PASS, 20 ms pacing FAIL) | `In progress` (PR #32 merged; 50/100 real-time pacing qualification and M5 remain `In progress`) |
-| 2026-11-15 | Completed S1 Core Stabilization & Freeze Candidate: added `ModuleLifecycleManager` and ASGI `gateway_lifespan` module orchestration, fixed `_resolve_adapter` single-invocation binding in `testing/conformance.py`, documented and tested the supported alpha public API surface in `docs/PUBLIC_API_AND_COMPATIBILITY.md`, and clarified synchronous-factory/async-setup ownership | `Complete` (M2 closed; M4 external provider integrations, M7 Verimor pilot, and M8 production readiness remain deferred) |
+| 2026-11-15 | Completed S1 Core Stabilization & Freeze Candidate (`PR #47`) and S1-R2 Drain Safety Remediation (`PR #48` / `80ce011`..`6744655`): added `ModuleLifecycleManager`, fail-closed `DrainReport` inspection in `gateway_lifespan`, `_resolve_adapter` single-invocation binding, and `docs/PUBLIC_API_AND_COMPATIBILITY.md` | `Complete` (M2 closed) |
+| 2026-11-15 | Completed M4-R1 Adapter Conformance Readiness (`PR #42`, `PR #43`) and M4-R2 OpenAI Realtime Media Adapter (`PR #49` / `cc1ee6b`, verified on `main` run `43739935000`): `MOCK_VERIFIED` against local WebSocket server and `RealtimeAdapterConformanceSuite` (38 tests, 0 skips) | `MOCK_VERIFIED` (`LIVE_VERIFIED` pending) |
+| 2026-11-15 | Final Closeout & Maintenance Freeze: entered `MAINTENANCE — INTEGRATION PENDING`, replaced hardcoded `0.1.0a1` version in `.github/workflows/release.yml`, independently verified `v0.1.0a1` on PyPI, audited `main` branch protection, and recorded deferred Dependabot backlog (`#5, #6, #7, #25, #44, #45, #46`) | `MAINTENANCE — INTEGRATION PENDING` |
+
+---
+
+## 11. Maintenance Freeze Summary (`MAINTENANCE — INTEGRATION PENDING`)
+
+Development is temporarily paused at a verified, maintainable baseline (not project abandonment or GitHub repository archiving). CI, Dependabot, security reporting, and `main` branch protection remain active.
+
+### Completed Baseline
+- **Gateway Core & Composition:** `GatewayCore`, `compose_gateway_core`, `ModuleRegistry`, `ModuleLifecycleManager` (`main`).
+- **ASGI Runtime:** `create_gateway_app`, `gateway_lifespan`, `/health`, `/ready`, loopback-only defaults.
+- **Synthetic Communication Transport:** `/ws/synthetic-telephony/v1` and `/ws/synthetic-media/v1`.
+- **Voice Media Bridge:** `VoiceBridgeSession`, bounded queues, backpressure, barge-in turn control.
+- **Admission & Connection Lifecycle:** `AdmissionController`, `ConnectionSupervisor`, `VerifiedConnectionContext`.
+- **Drain Safety:** `InstanceDrainCoordinator` and fail-closed `DrainReport` lifespan verification (`PR #48`).
+- **Synthetic Load & Conformance Testing:** 1/5/25/50/100 call synthetic qualification and `RealtimeAdapterConformanceSuite` (`main`).
+- **OpenAI Realtime Adapter (`MOCK_VERIFIED`):** `kaiwen_gateway.adapters.openai_realtime` (`PR #49`, `main`).
+- **Alpha Packaging & Release Baseline:** `v0.1.0a1` published on GitHub Releases and PyPI (independently verified via PyPI JSON API); dynamic version inspection in `.github/workflows/release.yml`.
+
+### Pending Integrations & Gates
+- **OpenAI Realtime Live Verification (`LIVE_VERIFIED`):** Authorized live run with `OPENAI_API_KEY`.
+- **Kaiwen Agent Integration:** Alignment with `kaiwen-agent` public realtime APIs.
+- **Kaiwen Speech Integration:** Future speech adapter integration.
+- **Verimor Interoperability:** Official vendor WebSocket specification (`OPEN-001`, `OPEN-002`) and authorized interoperability testing.
+- **Production-Readiness Assessment:** Gate C / Gate D operational, legal, and multi-instance scaling review.
+
+### Deferred Maintenance Backlog (Open Dependabot PRs)
+Seven Dependabot PRs remain open as maintenance backlog (no open development PRs): `#5` (`astral-sh/setup-uv`), `#6` (`actions/checkout`), `#7` (`mypy`), `#25` (`websockets` 15.0.1 → 17.4, which conflicts with the current `websockets>=13.0,<16` constraint in `pyproject.toml`), `#44` (`actions/download-artifact`), `#45` (`actions/upload-artifact`), and `#46` (`ruff`).
 
 ---
 
