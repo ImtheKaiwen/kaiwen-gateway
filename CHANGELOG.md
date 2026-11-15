@@ -12,7 +12,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 ## [Unreleased]
 
 ### Added
+- **Host-Owned Module Lifecycle Orchestration (S1-A):** Added `ModuleLifecycleManager`, `ModuleLifecyclePolicy`, `ModuleLifecyclePhase`, `ModuleFailure`, `ModuleStartupError`, and `ModuleShutdownError` in `kaiwen_gateway.core` to execute registered `GatewayModule` `startup()` hooks in registration order and `shutdown()` hooks in reverse order with bounded timeouts, startup rollback, aggregate shutdown errors, and secret-free error reporting. Wired `gateway_lifespan` in `kaiwen_gateway.server` to start registered modules before marking readiness and drain active connections before stopping modules.
+- **Public API & Compatibility Policy (S1-C):** Published `docs/PUBLIC_API_AND_COMPATIBILITY.md` documenting alpha-stage compatibility expectations, version separation (package vs. Core contract vs. synthetic protocol), internal/private boundaries, and provider adapter ownership rules, backed by regression tests in `tests/test_public_api_compatibility.py`.
 - **AI Realtime Adapter Conformance Suite:** Added `RealtimeAdapterConformanceSuite` and `SyntheticUpstreamFailingAIAdapter` in `kaiwen_gateway.testing.conformance` (packaged with wheel distributions) allowing third-party AI provider adapter authors to verify 8 critical isolation, audio delivery, backpressure, turn cancellation, and failure dimensions deterministically with zero paid API calls.
+
+### Fixed
+- **Conformance Factory Resolution Safety (S1-B):** Replaced `TypeError`-retry cascading in `RealtimeAdapterConformanceSuite._resolve_adapter()` with pre-invocation signature inspection (`_resolve_adapter_binding`), guaranteeing exact single invocation and preserving internal initialization `TypeError` exceptions without stripping verified context.
 - **Context-Aware AI Port Factory Resolution:** Enhanced `create_gateway_app` and synthetic media endpoints to pass `call_id` and `tenant_id` to `ai_media_port_factory` while maintaining 100% backwards compatibility with zero-argument factories.
 - **AI Realtime Port Protocol Alias:** Exported `AIRealtimePort = AIRealtimeMediaPort` in `kaiwen_gateway.modules.voice.ports` for spec and naming compatibility.
 - **AI Provider Adapter Integration Guide:** Published `docs/guides/AI_ADAPTER_INTEGRATION_GUIDE.md` detailing interface contracts, 16kHz PCM16LE framing rules, barge-in turn cancellation, server-side secret management, and conformance test execution.

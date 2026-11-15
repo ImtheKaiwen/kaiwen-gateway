@@ -1,4 +1,17 @@
-"""ASGI lifespan coordination for Kaiwen Gateway."""
+"""ASGI lifespan coordination for Kaiwen Gateway.
+
+The reference ASGI host owns runtime orchestration for registered Gateway modules
+(see :mod:`kaiwen_gateway.core.module_lifecycle`):
+
+* Startup: registered modules start in registration order **before** the application is
+  marked started (readiness stays ``not_started`` until every module started). A module
+  failure rolls back already-started modules, leaves the instance permanently stopped and
+  refusing traffic, and fails the ASGI lifespan startup.
+* Shutdown: connections are drained first (bounded by the drain policy); only afterwards are
+  modules stopped in reverse order, so module resources outlive active calls. Module cleanup
+  is attempted even if the drain failed or the lifespan was cancelled, and is itself bounded
+  by per-hook timeouts.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +21,24 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from kaiwen_gateway.core.draining import InstanceDrainCoordinator, InstanceDrainState
+from kaiwen_gateway.core.module_lifecycle import ModuleLifecycleManager
 from kaiwen_gateway.server.exceptions import ServerLifecycleError
+
+
+async def _fail_closed_after_startup_error(
+    state: Any, coordinator: InstanceDrainCoordinator
+) -> None:
+    """Make a failed instance permanently non-serving (readiness 503, admission closed)."""
+    state.started = False
+    state.startup_failed = True
+    state.shutting_down = True
+    try:
+        if coordinator.state == InstanceDrainState.ACCEPTING:
+            await coordinator.drain()
+    except Exception:
+        # Nothing was admitted before startup completed; the instance is stopped regardless.
+        pass
+    state.stopped = True
 
 
 @asynccontextmanager
@@ -16,14 +46,16 @@ async def gateway_lifespan(app: Any) -> AsyncIterator[None]:
     """Manage startup and bounded graceful shutdown for a Gateway ASGI application.
 
     Startup:
-        Verifies instance state and marks the application started. Fails closed
-        if the instance was previously terminated or lacks required coordinators.
+        Verifies instance state, starts registered modules in registration order and only
+        then marks the application started. Fails closed if the instance was previously
+        terminated, lacks required coordinators, or any module fails to start.
 
     Shutdown:
-        Coordinates bounded draining via :class:`InstanceDrainCoordinator`.
-        Draining occurs before the application state transitions to stopped.
-        If shutdown is cancelled or encounters unhandled failures, the application
-        does not falsely report clean completion.
+        Coordinates bounded draining via :class:`InstanceDrainCoordinator`, then stops
+        modules in reverse registration order. Draining occurs before modules are closed and
+        before the application state transitions to stopped. If shutdown is cancelled or
+        encounters unhandled failures, the application does not falsely report clean
+        completion.
     """
     state = getattr(app, "state", None)
     if state is None:
@@ -45,16 +77,40 @@ async def gateway_lifespan(app: Any) -> AsyncIterator[None]:
             "Cannot start lifespan on a stopped, draining, or terminating Gateway instance"
         )
 
-    state.started = True
+    modules: ModuleLifecycleManager | None = getattr(state, "module_lifecycle", None)
+
+    state.started = False
     state.shutting_down = False
     state.stopped = False
     state.shutdown_failed = False
+    state.startup_failed = False
+
+    if modules is not None:
+        try:
+            await modules.startup()
+        except asyncio.CancelledError:
+            await _fail_closed_after_startup_error(state, coordinator)
+            raise
+        except Exception as exc:
+            await _fail_closed_after_startup_error(state, coordinator)
+            # ``exc`` is already a safe, secret-free ModuleStartupError (or state error).
+            raise ServerLifecycleError("Gateway module startup failed") from exc
+        except BaseException:
+            await _fail_closed_after_startup_error(state, coordinator)
+            raise
+
+    state.started = True
 
     try:
         yield
     finally:
         # Shutdown phase initiated
         state.shutting_down = True
+        control_flow_exc: BaseException | None = None
+        drain_failure: BaseException | None = None
+        module_failure: BaseException | None = None
+
+        # 1. Drain active connections first.
         try:
             if coordinator.state == InstanceDrainState.ACCEPTING:
                 await coordinator.drain()
@@ -62,15 +118,59 @@ async def gateway_lifespan(app: Any) -> AsyncIterator[None]:
                 await coordinator.wait_stopped()
 
             if coordinator.drain_error is not None:
+                drain_failure = coordinator.drain_error
+        except asyncio.CancelledError as exc:
+            control_flow_exc = exc
+            # If a real drain task is in progress (initiated by lifespan or an embedding
+            # host), wait for it to reach STOPPED before stopping dependent modules.
+            drain_task = getattr(coordinator, "_drain_task", None)
+            if drain_task is not None and not drain_task.done() and not coordinator.is_stopped:
+                try:
+                    await coordinator.wait_stopped()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as wait_exc:
+                    drain_failure = (
+                        coordinator.drain_error if coordinator.drain_error is not None else wait_exc
+                    )
+        except (KeyboardInterrupt, SystemExit) as exc:
+            control_flow_exc = exc
+        except Exception as exc:
+            drain_failure = coordinator.drain_error if coordinator.drain_error is not None else exc
+
+        # 2. Then close dependent module resources (always attempted, bounded).
+        if modules is not None:
+            try:
+                await modules.shutdown()
+            except asyncio.CancelledError as exc:
+                control_flow_exc = control_flow_exc or exc
+                # ModuleLifecycleManager shields its bounded shutdown task; join it so
+                # remaining modules finish closing before the event loop tears down.
+                try:
+                    await modules.shutdown()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as shutdown_exc:
+                    module_failure = module_failure or shutdown_exc
+            except (KeyboardInterrupt, SystemExit) as exc:
+                control_flow_exc = control_flow_exc or exc
+            except Exception as exc:
+                module_failure = exc
+
+        if control_flow_exc is not None:
+            state.shutdown_failed = True
+            raise control_flow_exc
+
+        if drain_failure is not None or module_failure is not None:
+            state.shutdown_failed = True
+            if drain_failure is not None and module_failure is not None:
+                raise ServerLifecycleError(
+                    "Gateway shutdown failed due to drain error and module shutdown errors"
+                ) from drain_failure
+            if drain_failure is not None:
                 raise ServerLifecycleError(
                     "Gateway shutdown failed due to drain error"
-                ) from coordinator.drain_error
+                ) from drain_failure
+            raise ServerLifecycleError("Gateway module shutdown failed") from module_failure
 
-            state.stopped = True
-        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-            state.shutdown_failed = True
-            raise
-        except Exception as exc:
-            state.shutdown_failed = True
-            cause = coordinator.drain_error if coordinator.drain_error is not None else exc
-            raise ServerLifecycleError("Gateway shutdown failed due to drain error") from cause
+        state.stopped = True
