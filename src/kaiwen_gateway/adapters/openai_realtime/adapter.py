@@ -121,6 +121,7 @@ class OpenAIRealtimeMediaAdapter:
         self._closed = False
         self._close_started = False
         self._close_done = asyncio.Event()
+        self._eof_reached = False
         self._eof_delivered = False
         self._terminal_error: Exception | None = None
 
@@ -175,10 +176,10 @@ class OpenAIRealtimeMediaAdapter:
         self._closed = True
         _drain_queue_nowait(self._inbound_queue)
         _drain_queue_nowait(self._outbound_queue)
-        if self._sender_task is not None and not self._sender_task.done():
-            self._sender_task.cancel()
-        if self._receiver_task is not None and not self._receiver_task.done():
-            self._receiver_task.cancel()
+        current = asyncio.current_task()
+        for task in (self._sender_task, self._receiver_task):
+            if task is not None and task is not current and not task.done():
+                task.cancel()
         try:
             self._outbound_queue.put_nowait(_ErrorSentinel(error))
         except asyncio.QueueFull:
@@ -207,19 +208,28 @@ class OpenAIRealtimeMediaAdapter:
                     self._connector(self._config),
                     timeout=self._config.connect_timeout_seconds,
                 )
-                session_update = self._config.build_session_update_event()
-                await asyncio.wait_for(
-                    transport.send_json(session_update),
-                    timeout=self._config.connect_timeout_seconds,
-                )
+                try:
+                    self._raise_if_closed()
+                    session_update = self._config.build_session_update_event()
+                    await asyncio.wait_for(
+                        transport.send_json(session_update),
+                        timeout=self._config.connect_timeout_seconds,
+                    )
+                    self._raise_if_closed()
+                except MediaPortClosedError:
+                    await self._close_transport_bounded(transport)
+                    raise
             except asyncio.CancelledError:
                 if transport is not None:
-                    await transport.close()
+                    await self._close_transport_bounded(transport)
+                self._closed = True
+                raise
+            except MediaPortClosedError:
                 self._closed = True
                 raise
             except Exception as exc:
                 if transport is not None:
-                    await transport.close()
+                    await self._close_transport_bounded(transport)
                 self._closed = True
                 wrapped = (
                     exc
@@ -244,6 +254,15 @@ class OpenAIRealtimeMediaAdapter:
                 name=f"openai-rt-receiver-{self._call_id}",
             )
             return transport
+
+    async def _close_transport_bounded(self, transport: OpenAIRealtimeTransport) -> None:
+        try:
+            await asyncio.wait_for(
+                transport.close(),
+                timeout=self._config.close_timeout_seconds,
+            )
+        except Exception:
+            pass
 
     async def _sender_loop(self, transport: OpenAIRealtimeTransport) -> None:
         try:
@@ -272,7 +291,7 @@ class OpenAIRealtimeMediaAdapter:
                 )
             )
             self._fail_sync(err)
-            await transport.close()
+            await self._close_transport_bounded(transport)
 
     async def _put_outbound_bounded(self, item: AudioFrame | _EOFSentinel | _ErrorSentinel) -> None:
         try:
@@ -306,9 +325,10 @@ class OpenAIRealtimeMediaAdapter:
                 )
             )
             self._fail_sync(err)
-            await transport.close()
+            await self._close_transport_bounded(transport)
 
     async def _handle_clean_eof(self) -> None:
+        self._eof_reached = True
         if self._active_response_id is not None:
             turn_id = self._response_turn_map.get(self._active_response_id, self._current_turn_id)
             if turn_id > self._fenced_turn_id:
@@ -410,6 +430,9 @@ class OpenAIRealtimeMediaAdapter:
         """Receive the next resampled 16 kHz PCM16LE AudioFrame, or None on clean EOF."""
         if self._terminal_error is not None:
             raise self._terminal_error
+        if self._eof_reached and self._outbound_queue.empty():
+            self._eof_delivered = True
+            return None
         if self._closed and self._outbound_queue.empty():
             if self._eof_delivered:
                 return None
@@ -418,6 +441,9 @@ class OpenAIRealtimeMediaAdapter:
         await self._ensure_connected()
 
         while True:
+            if self._eof_reached and self._outbound_queue.empty():
+                self._eof_delivered = True
+                return None
             item = await self._outbound_queue.get()
             if isinstance(item, _ErrorSentinel):
                 raise item.error

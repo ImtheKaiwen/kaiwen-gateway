@@ -707,3 +707,139 @@ def test_16_no_session_creation_before_trusted_admission() -> None:
                 pass
 
     assert factory_calls == []
+
+
+def test_17_eof_preserved_when_outbound_queue_full() -> None:
+    """Verify clean EOF is not lost if _outbound_queue is full when provider closes."""
+
+    async def _run() -> None:
+        class _FullQueueEOFTransport:
+            def __init__(self) -> None:
+                self._step = 0
+
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                return None
+
+            async def receive_json(self) -> dict[str, Any] | None:
+                self._step += 1
+                if self._step == 1:
+                    return {
+                        "type": "response.output_audio.delta",
+                        "response_id": "resp_full_eof",
+                        "delta": base64.b64encode(b"\x01\x00" * 480).decode("ascii"),
+                    }
+                return None
+
+            async def close(self) -> None:
+                return None
+
+        async def _connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            return _FullQueueEOFTransport()
+
+        cfg = OpenAIRealtimeConfig(
+            api_key="sk-test-eof-full",
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+            outbound_queue_capacity=1,
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_eof_full",
+            tenant_id="tenant_a",
+            config=cfg,
+            transport_connector=_connector,
+        )
+        await adapter._ensure_connected()
+        await asyncio.sleep(0.05)
+
+        frame = await asyncio.wait_for(adapter.receive_frame(), timeout=1.0)
+        assert frame is not None
+        eof = await asyncio.wait_for(adapter.receive_frame(), timeout=1.0)
+        assert eof is None
+        await adapter.close()
+
+    asyncio.run(_run())
+
+
+def test_18_transport_close_awaited_without_self_cancellation_on_loop_error() -> None:
+    """Verify failing background loop awaits transport.close() without cancelling itself."""
+
+    async def _run() -> None:
+        close_completed = asyncio.Event()
+
+        class _AsyncCloseTransport:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                return None
+
+            async def receive_json(self) -> dict[str, Any] | None:
+                raise ConnectionResetError("Simulated drop")
+
+            async def close(self) -> None:
+                await asyncio.sleep(0.01)
+                close_completed.set()
+
+        async def _connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            return _AsyncCloseTransport()
+
+        cfg = OpenAIRealtimeConfig(
+            api_key="sk-test-self-cancel",
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_self_cancel",
+            tenant_id="tenant_a",
+            config=cfg,
+            transport_connector=_connector,
+        )
+        with pytest.raises(OpenAIRealtimeError):
+            await asyncio.wait_for(adapter.receive_frame(), timeout=1.0)
+        await asyncio.wait_for(close_completed.wait(), timeout=1.0)
+        await adapter.close()
+
+    asyncio.run(_run())
+
+
+def test_19_close_during_connect_disposes_new_transport() -> None:
+    """Verify close() racing with _ensure_connected() disposes the new transport safely."""
+
+    async def _run() -> None:
+        connect_entered = asyncio.Event()
+        release_connect = asyncio.Event()
+        transport_closed = False
+
+        class _SlowConnectTransport:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                return None
+
+            async def receive_json(self) -> dict[str, Any] | None:
+                return None
+
+            async def close(self) -> None:
+                nonlocal transport_closed
+                transport_closed = True
+
+        async def _connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            connect_entered.set()
+            await release_connect.wait()
+            return _SlowConnectTransport()
+
+        cfg = OpenAIRealtimeConfig(
+            api_key="sk-test-race",
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_race",
+            tenant_id="tenant_a",
+            config=cfg,
+            transport_connector=_connector,
+        )
+        recv_task = asyncio.create_task(adapter.receive_frame())
+        await connect_entered.wait()
+        close_task = asyncio.create_task(adapter.close())
+        await asyncio.sleep(0.01)
+        release_connect.set()
+
+        await close_task
+        with pytest.raises(MediaPortClosedError):
+            await recv_task
+        assert transport_closed is True
+
+    asyncio.run(_run())

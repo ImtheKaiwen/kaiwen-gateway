@@ -126,9 +126,9 @@ jobs:
               mandatory = [line for line in req_lines if "extra ==" not in line]
               assert mandatory == [], f"Unexpected mandatory runtime dependencies in wheel: {mandatory}"
               optional = [line for line in req_lines if "extra ==" in line]
-              assert len(optional) == 3, f"Expected 3 optional dependencies, got: {optional}"
+              assert len(optional) == 4, f"Expected 4 optional dependencies, got: {optional}"
               for line in optional:
-                  assert 'extra ==' in line and 'server' in line
+                  assert 'extra ==' in line and ('server' in line or 'openai' in line)
 
           with tarfile.open(sdists[0], "r:gz") as tf:
               sdist_names = tf.getnames()
