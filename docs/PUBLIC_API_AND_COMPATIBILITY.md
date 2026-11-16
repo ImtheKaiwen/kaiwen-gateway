@@ -76,8 +76,8 @@ The following are **internal** and not covered by compatibility guarantees:
 
 ## 5. Breaking-Change and Deprecation Policy
 
-- **During Alpha (`0.x`):**
-  - Breaking changes may occur in minor or alpha iterations when required for correctness, security, or real provider integration.
+- **During Pre-1.0 (`0.x` Alpha / Beta):**
+  - Breaking changes may occur in minor or pre-release iterations when required for correctness, security, or real provider integration.
   - Any breaking change must be recorded in `CHANGELOG.md` with clear migration guidance.
 - **Post-1.0 Target Policy:**
   - Follow Semantic Versioning (`MAJOR.MINOR.PATCH`).
