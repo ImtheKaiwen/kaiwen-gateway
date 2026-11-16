@@ -1,7 +1,7 @@
 # Kaiwen Gateway — Public API Surface and Compatibility Policy
 
-> **Status:** Active Beta Candidate Reference (**Gateway Core + OpenAI Voice Adapters Beta**)
-> **Applies to:** `kaiwen-gateway` (`0.1.0b1` beta candidate; `v0.1.0a2` latest published on PyPI)
+> **Status:** Active Beta Reference (**Gateway Core + OpenAI Voice Adapters Beta**)
+> **Applies to:** `kaiwen-gateway` (`v0.1.0b1` published on PyPI & GitHub Releases)
 
 This document defines the supported public API surface, versioning model, compatibility expectations, internal boundaries, and provider adapter ownership rules for Kaiwen Gateway.
 

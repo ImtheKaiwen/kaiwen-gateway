@@ -1,9 +1,9 @@
 # Kaiwen Gateway — V1 Requirements
 
-> **Status:** V1 Requirements Baseline (synthetic alpha `v0.1.0a2` released; `main` in `MAINTENANCE — INTEGRATION PENDING`)
+> **Status:** V1 Requirements Baseline (public beta `v0.1.0b1` released; `main` in `MAINTENANCE — INTEGRATION PENDING`)
 > **Document version:** 1.0
-> **Latest published alpha:** `0.1.0a2` (synthetic alpha)
-> **Last updated:** 2026-11-15
+> **Latest published release:** `0.1.0b1` (Public Beta — Gateway Core + OpenAI Voice Adapters)
+> **Last updated:** 2026-11-16
 > **Scope:** Reusable Python library + deployable ASGI service; Voice is the only implemented communication module in V1.
 
 ## 1. Purpose and document rules

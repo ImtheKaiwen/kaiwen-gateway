@@ -1,9 +1,9 @@
 # Kaiwen Gateway — Development Roadmap
 
-> **Status:** `MAINTENANCE — INTEGRATION PENDING` (2026-11-15) — M0–M3 Complete; Core Stabilization S1 (`PR #47`) & Drain Safety S1-R2 (`PR #48`) Complete; M4-R1 Adapter Conformance (`PR #42`, `PR #43`) Complete; M4-R2 OpenAI Realtime Adapter (`PR #49`, `MOCK_VERIFIED` — `LIVE_VERIFIED` pending); M5 Synthetic Qualification Complete (`1/5/25/50/100` calls, `PR #35`/`#36`; full M5 depends on live external integrations); M6 Complete (`v0.1.0a1` published to GitHub Releases & PyPI on 2026-11-12; `PR #37`–`#41`, `ADR-0005`).
-> **Project phase:** `MAINTENANCE — INTEGRATION PENDING` (Synthetic Alpha `v0.1.0a2` released; temporary development pause, not project abandonment or repository archiving)
-> **Latest published release:** `v0.1.0a2` (synthetic-environment alpha, superseding `v0.1.0a1`)
-> **Last reviewed:** 2026-11-15
+> **Status:** `MAINTENANCE — INTEGRATION PENDING` (2026-11-16) — M0–M3 Complete; Core Stabilization S1 (`PR #47`) & Drain Safety S1-R2 (`PR #48`) Complete; M4-R1 Adapter Conformance (`PR #42`, `PR #43`) Complete; M4-R2/R3 OpenAI Realtime Adapter (`PR #49`, `PR #53`, `LIVE_VERIFIED` & `MOCK_VERIFIED`) Complete; M4-R4 OpenAI GPT-Live Adapter (`PR #54`, `LIVE_VERIFIED` & `MOCK_VERIFIED`) Complete; M5 Synthetic Qualification Complete (`1/5/25/50/100` calls, `PR #35`/`#36`; full M5 depends on live external integrations); M6 Complete (`v0.1.0a1` & `v0.1.0a2` published alphas); **`v0.1.0b1` Public Beta** published to GitHub Releases & PyPI on 2026-11-16 (`PR #55`).
+> **Project phase:** `MAINTENANCE — INTEGRATION PENDING` (Public Beta `v0.1.0b1` released; Kaiwen Agent, Kaiwen Speech, and Verimor integrations deferred)
+> **Latest published release:** `v0.1.0b1` (**Gateway Core + OpenAI Voice Adapters Beta**, superseding synthetic alphas `v0.1.0a2` and `v0.1.0a1`)
+> **Last reviewed:** 2026-11-16
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
 > **Primary scope:** Reusable Python library and optional ASGI service; **Voice is the only V1 functional module**.
 
@@ -389,7 +389,7 @@ A future idea becomes committed scope **only after** the maintainer approves an 
 | 2026-11-15 | Completed M4-R1 Adapter Conformance Readiness (`PR #42`, `PR #43`) and M4-R2 OpenAI Realtime Media Adapter (`PR #49` / `cc1ee6b`, verified on `main` run `43739935000`): `MOCK_VERIFIED` against local WebSocket server and `RealtimeAdapterConformanceSuite` (38 tests, 0 skips) | `MOCK_VERIFIED` (`LIVE_VERIFIED` pending) |
 | 2026-11-15 | Final Closeout & Maintenance Freeze: entered `MAINTENANCE — INTEGRATION PENDING`, replaced hardcoded `0.1.0a1` version in `.github/workflows/release.yml` (`PR #50`), independently verified `v0.1.0a1` on PyPI, audited `main` branch protection, and recorded deferred Dependabot backlog (`#5, #6, #7, #25, #44, #45, #46`) | `MAINTENANCE — INTEGRATION PENDING` |
 | 2026-11-15 | Released `v0.1.0a2` Synthetic Alpha (`PR #51` / `26f7034`): published GitHub prerelease `v0.1.0a2` and PyPI `kaiwen-gateway==0.1.0a2` via OIDC Trusted Publishing (`Release` run `43744346608`), including `S1`/`S1-R2` drain safety, `M4-R1` conformance suite, and `MOCK_VERIFIED` OpenAI Realtime adapter | `Complete` (`v0.1.0a2` published; `MAINTENANCE — INTEGRATION PENDING` preserved) |
-| 2026-11-16 | Completed M4-R3 Dual OpenAI API Live Verification: `kaiwen_gateway.adapters.openai_realtime` **`LIVE_VERIFIED`** against `wss://api.openai.com/v1/realtime?model=gpt-realtime` (2 sessions, completed + cancelled turns, 16k<->24k audio verified); standalone GPT-Live diagnostic probe (`tools/gpt_live_protocol_probe.py`) verified against `wss://api.openai.com/v1/live/sessions` (`gpt-live-1`, `GPT_LIVE_PROVIDER_SMOKE_PASS`; `GPT_LIVE_GATEWAY_INTEGRATION_NOT_IMPLEMENTED`); added `.env` fallback loading in `OpenAIRealtimeConfig.from_env` and server-cancelled partial-tail reset | `Complete` (`LIVE_VERIFIED` for OpenAI Realtime; `MAINTENANCE — INTEGRATION PENDING` preserved) |
+| 2026-11-16 | Completed M4-R4 OpenAI GPT-Live Adapter Integration & Published `v0.1.0b1` Public Beta (`PR #54`, `PR #55` / `3a3b5f2`): implemented `kaiwen_gateway.adapters.openai_gpt_live` (`LIVE_VERIFIED` & `MOCK_VERIFIED` on `gpt-live-1`), verified both OpenAI voice adapters end-to-end through `VoiceBridgeSession`, and published GitHub prerelease `v0.1.0b1` and PyPI `kaiwen-gateway==0.1.0b1` via OIDC Trusted Publishing (`Release` run `43928772418`) | `Complete` (`v0.1.0b1` published; `MAINTENANCE — INTEGRATION PENDING` preserved) |
 
 ---
 
@@ -405,11 +405,10 @@ Development is temporarily paused at a verified, maintainable baseline (not proj
 - **Admission & Connection Lifecycle:** `AdmissionController`, `ConnectionSupervisor`, `VerifiedConnectionContext`.
 - **Drain Safety:** `InstanceDrainCoordinator` and fail-closed `DrainReport` lifespan verification (`PR #48`).
 - **Synthetic Load & Conformance Testing:** 1/5/25/50/100 call synthetic qualification and `RealtimeAdapterConformanceSuite` (`main`).
-- **OpenAI Realtime Adapter (`MOCK_VERIFIED`):** `kaiwen_gateway.adapters.openai_realtime` (`PR #49`, `main`).
-- **Alpha Packaging & Release Baseline:** `v0.1.0a1` and `v0.1.0a2` published on GitHub Releases and PyPI (independently verified via PyPI JSON API); dynamic version inspection in `.github/workflows/release.yml`.
+- **OpenAI Voice Adapters (`LIVE_VERIFIED` & `MOCK_VERIFIED`):** `kaiwen_gateway.adapters.openai_realtime` (`PR #49`, `PR #53`) and `kaiwen_gateway.adapters.openai_gpt_live` (`PR #54`).
+- **Packaging & Release Baseline:** `v0.1.0b1` (Public Beta) and historical alphas `v0.1.0a2` / `v0.1.0a1` published on GitHub Releases and PyPI (independently verified via PyPI JSON API); dynamic version inspection in `.github/workflows/release.yml`.
 
 ### Pending Integrations & Gates
-- **OpenAI Realtime Live Verification (`LIVE_VERIFIED`):** Authorized live run with `OPENAI_API_KEY`.
 - **Kaiwen Agent Integration:** Alignment with `kaiwen-agent` public realtime APIs.
 - **Kaiwen Speech Integration:** Future speech adapter integration.
 - **Verimor Interoperability:** Official vendor WebSocket specification (`OPEN-001`, `OPEN-002`) and authorized interoperability testing.
