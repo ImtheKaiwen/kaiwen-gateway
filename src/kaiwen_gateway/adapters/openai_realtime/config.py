@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import pathlib
 from dataclasses import dataclass, field
 from typing import Any, Final
 from urllib.parse import quote, urlparse
@@ -30,6 +31,34 @@ def sanitize_provider_message(message: str, api_key: str | None = None) -> str:
     if api_key:
         cleaned = cleaned.replace(api_key, "[REDACTED]")
     return cleaned
+
+
+def _read_dotenv_var(dotenv_path: str | os.PathLike[str], env_var: str) -> str:
+    """Read ``env_var`` from a local ``.env`` file if present, without mutating ``os.environ``."""
+    path = pathlib.Path(dotenv_path)
+    if not path.is_file():
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        if key.strip() != env_var:
+            continue
+        cleaned = val.strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {'"', "'"}:
+            cleaned = cleaned[1:-1].strip()
+        if cleaned:
+            return cleaned
+    return ""
 
 
 def _is_loopback_host(hostname: str | None) -> bool:
@@ -111,6 +140,7 @@ class OpenAIRealtimeConfig:
         cls,
         *,
         env_var: str = "OPENAI_API_KEY",
+        dotenv_path: str | os.PathLike[str] | None = ".env",
         model: str = DEFAULT_OPENAI_REALTIME_MODEL,
         voice: str = DEFAULT_OPENAI_REALTIME_VOICE,
         instructions: str | None = None,
@@ -122,8 +152,10 @@ class OpenAIRealtimeConfig:
         outbound_queue_capacity: int = 32,
         backpressure_timeout_seconds: float = 0.05,
     ) -> OpenAIRealtimeConfig:
-        """Build configuration using a server-side environment variable for the API key."""
+        """Build configuration using a server-side environment variable or local ``.env`` file."""
         api_key = os.environ.get(env_var, "").strip()
+        if not api_key and dotenv_path is not None:
+            api_key = _read_dotenv_var(dotenv_path, env_var)
         if not api_key:
             raise OpenAIRealtimeError(
                 f"Missing required server environment variable {env_var!r} for OpenAI Realtime"

@@ -1,6 +1,7 @@
 # OpenAI Realtime Adapter Guide (M4-R2)
 
-> **Status:** `MOCK_VERIFIED` (published in `v0.1.0a2`, PR #49; `MAINTENANCE — INTEGRATION PENDING`) — Verified against a local mocked OpenAI Realtime WebSocket server and all 8 dimensions of `RealtimeAdapterConformanceSuite` (38 tests, 0 skips). **Not `LIVE_VERIFIED`**; live OpenAI API interoperability requires maintainer authorization and an `OPENAI_API_KEY`.
+> **Status:** `LIVE_VERIFIED` (`gpt-realtime` via `wss://api.openai.com/v1/realtime`) & `MOCK_VERIFIED` (32 offline adapter tests + 8 conformance dimensions, 0 skips).
+> **Separate Protocol Note (`GPT-Live`):** OpenAI's `wss://api.openai.com/v1/live/sessions` (`gpt-live-1`) protocol was separately verified via an isolated diagnostic probe (`tools/gpt_live_protocol_probe.py`, `GPT_LIVE_PROVIDER_SMOKE_PASS`), but **full Gateway `AIRealtimeMediaPort` integration for GPT-Live is not implemented (`GPT_LIVE_GATEWAY_INTEGRATION_NOT_IMPLEMENTED`)**.
 
 ---
 
@@ -75,12 +76,13 @@ app = create_gateway_app(
 
 | Capability | Status | Notes |
 | --- | --- | --- |
-| `AIRealtimeMediaPort` (`send_frame` / `receive_frame` / `close`) | `MOCK_VERIFIED` | Verified via `RealtimeAdapterConformanceSuite` (8/8 dimensions, 0 skips) and local `websockets` mock server |
-| `InterruptibleAIPort` (`response.cancel` + local purge) | `MOCK_VERIFIED` | Sends `response.cancel`, fences superseded `turn_id`s, resets `OutboundFramePacker`, purges `_outbound_queue` |
-| `PCM16LE` 16 kHz <-> 24 kHz Resampling | `MOCK_VERIFIED` | Stateful 2:3 and 3:2 linear interpolation; verified with 440 Hz sine wave and irregular chunk sizes |
+| `AIRealtimeMediaPort` (`send_frame` / `receive_frame` / `close`) | `LIVE_VERIFIED` & `MOCK_VERIFIED` | Verified offline via `RealtimeAdapterConformanceSuite` (8/8 dimensions, 0 skips) + 32 mock server tests, and live against `wss://api.openai.com/v1/realtime?model=gpt-realtime` (2026-11-16) |
+| `InterruptibleAIPort` (`response.cancel` + local purge) | `LIVE_VERIFIED` & `MOCK_VERIFIED` | Sends `response.cancel`, fences superseded `turn_id`s, resets `OutboundFramePacker`, purges `_outbound_queue`; verified live with mid-response `status="cancelled"` |
+| `PCM16LE` 16 kHz <-> 24 kHz Resampling | `LIVE_VERIFIED` & `MOCK_VERIFIED` | Stateful 2:3 and 3:2 linear interpolation; verified offline with 440 Hz sine wave and live with bidirectional 16 kHz <-> 24 kHz speech |
 | Provider Playback Buffer Clear (`can_clear_provider_playback`) | `UNSUPPORTED` | WebSocket client cannot clear audio already transmitted to telephony leg |
 | Playback Confirmation (`can_observe_playback_acks`) | `UNSUPPORTED` | `cannot_confirm_playback = True` |
-| Live OpenAI Realtime API Interoperability | `UNVERIFIED` | Requires maintainer-authorized live run with `OPENAI_API_KEY` (`LIVE_VERIFIED` pending) |
+| Live OpenAI Realtime API (`wss://api.openai.com/v1/realtime`) | `LIVE_VERIFIED` | Verified on `gpt-realtime` (`session.created`, `session.updated`, `input_audio_buffer.append`, `response.output_audio.delta`, `response.done` `completed` & `cancelled`, clean close) |
+| OpenAI GPT-Live Protocol (`wss://api.openai.com/v1/live/sessions`) | `GPT_LIVE_PROVIDER_SMOKE_PASS` / `GPT_LIVE_GATEWAY_INTEGRATION_NOT_IMPLEMENTED` | Standalone diagnostic probe (`tools/gpt_live_protocol_probe.py`) verified live on `gpt-live-1`; no Gateway `AIRealtimeMediaPort` adapter is implemented for `/v1/live/sessions` |
 
 ---
 
