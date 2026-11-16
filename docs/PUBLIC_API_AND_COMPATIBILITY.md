@@ -1,17 +1,17 @@
 # Kaiwen Gateway — Public API Surface and Compatibility Policy
 
-> **Status:** Active Alpha Reference (`MAINTENANCE — INTEGRATION PENDING`)
-> **Applies to:** `kaiwen-gateway` (`v0.1.0a2` published synthetic alpha)
+> **Status:** Active Beta Candidate Reference (**Gateway Core + OpenAI Voice Adapters Beta**)
+> **Applies to:** `kaiwen-gateway` (`0.1.0b1` beta candidate; `v0.1.0a2` latest published on PyPI)
 
 This document defines the supported public API surface, versioning model, compatibility expectations, internal boundaries, and provider adapter ownership rules for Kaiwen Gateway.
 
 ---
 
-## 1. Alpha-Stage Compatibility Expectations
+## 1. Pre-1.0 Beta Compatibility Expectations
 
-Kaiwen Gateway is currently in **Alpha (`Development Status :: 3 - Alpha`)**:
+Kaiwen Gateway is currently in **Beta (`Development Status :: 4 - Beta`)** for the **Gateway Core + OpenAI Voice Adapters** scope:
 
-- **No permanent API stability promise during alpha:** Public interfaces may evolve as real provider integrations and operational requirements are validated.
+- **No permanent API stability promise pre-1.0:** Public interfaces may evolve as deferred external integrations (Kaiwen Agent, Kaiwen Speech, Verimor) and operational requirements are validated.
 - **Controlled evolution:** Breaking changes to supported public symbols are made deliberately, documented in `CHANGELOG.md` (and ADRs where architectural), and never introduced silently.
 - **Explicit surface over implicit exports:** Only symbols listed in the documented package `__all__` exports below are part of the supported public API.
 
@@ -23,7 +23,7 @@ Kaiwen Gateway separates three independent version identifiers so package releas
 
 | Dimension | Identifier | Current Value | Scope |
 |---|---|---|---|
-| **Python Package Version** | `kaiwen_gateway.__version__` | `0.1.0a2` | Distribution releases on PyPI / GitHub Releases (intends SemVer post-1.0). |
+| **Python Package Version** | `kaiwen_gateway.__version__` | `0.1.0b1` | Distribution releases on PyPI / GitHub Releases (intends SemVer post-1.0). |
 | **Core Module Contract Version** | `kaiwen_gateway.core.CORE_CONTRACT_VERSION` | `"1.0"` | Compatibility of `GatewayModule` / `ModuleDescriptor` contracts enforced by `ModuleRegistry`. |
 | **Synthetic WebSocket Protocol Versions** | `SYNTHETIC_PROTOCOL_VERSION` / `SYNTHETIC_MEDIA_PROTOCOL_VERSION` | `"v1"` | Wire framing for `/ws/synthetic/v1` (control) and `/ws/synthetic-media/v1` (binary media). |
 

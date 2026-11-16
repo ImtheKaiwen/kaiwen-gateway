@@ -4,12 +4,16 @@ All notable **user-facing changes** to Kaiwen Gateway are recorded in this file.
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for its Python distribution. The **Python package version**, any **external Gateway wire/API protocol version**, and **provider adapter compatibility** are separate concerns; a package release does not automatically change a wire protocol version.
 
-> **Project status (2026-11-15): `MAINTENANCE — INTEGRATION PENDING` (Synthetic Alpha `v0.1.0a2` Released).**
-> Kaiwen Gateway `v0.1.0a2` is released and published to PyPI as a verified, installable synthetic-environment alpha (superseding `v0.1.0a1`), including S1/S1-R2 drain safety, the adapter conformance suite, and the `MOCK_VERIFIED` OpenAI Realtime adapter (`PR #47`–`#51`). Development remains paused pending live provider verification and external integrations.
+> **Project status (2026-11-16): `v0.1.0b1` Beta Candidate Prepared (**Gateway Core + OpenAI Voice Adapters Beta**; `v0.1.0a2` Latest Published on PyPI).**
+> Kaiwen Gateway `0.1.0b1` prepares the first beta release covering Gateway Core, ASGI server hosting, synthetic telephony/media transports, `VoiceBridgeSession`, `RealtimeAdapterConformanceSuite`, and both `LIVE_VERIFIED` OpenAI voice adapters (`kaiwen_gateway.adapters.openai_realtime` and `kaiwen_gateway.adapters.openai_gpt_live`).
 >
-> **Production use is not yet supported.** Live OpenAI Realtime verification (`LIVE_VERIFIED`), Kaiwen Agent, Kaiwen Speech, and live Verimor interoperability (`FR-INT-007`) remain pending.
+> **Production use is not yet supported.** Kaiwen Agent, Kaiwen Speech, and live Verimor PSTN/WSS interoperability (`FR-INT-007`) remain deferred external integrations.
 
 ## [Unreleased]
+
+---
+
+## [0.1.0b1] - 2026-11-16
 
 ### Added
 - **OpenAI GPT-Live Media Adapter (`M4-R4`, `LIVE_VERIFIED` & `MOCK_VERIFIED`):** Added `kaiwen_gateway.adapters.openai_gpt_live` (`OpenAIGPTLiveConfig`, `OpenAIGPTLiveMediaAdapter`, `OpenAIGPTLiveTransport`, `create_openai_gpt_live_adapter_factory`, `connect_openai_gpt_live_websocket`) implementing `AIRealtimeMediaPort` and `InterruptibleAIPort` against `wss://api.openai.com/v1/live/sessions` (`gpt-live-1`). Enforces strict `session.start` -> `session.started` ordering before `session.input_audio.append`, stateful 16 kHz <-> 24 kHz PCM16LE resampling, bounded queues, local output purge and turn fencing (`can_cancel_future_generation=False`, `can_discard_local_output=True`), and secret-free error handling. Verified against `RealtimeAdapterConformanceSuite` (8/8 dimensions), 9 offline integration tests, and live end-to-end through `VoiceBridgeSession` and `/ws/synthetic-media/v1`.
