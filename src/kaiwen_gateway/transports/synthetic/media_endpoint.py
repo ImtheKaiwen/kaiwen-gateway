@@ -26,7 +26,7 @@ from kaiwen_gateway.modules.voice.domain import (
     UnsupportedInterruptionCapabilityError,
     VoiceDomainError,
 )
-from kaiwen_gateway.modules.voice.ports import AIRealtimeMediaPort
+from kaiwen_gateway.modules.voice.ports import AIRealtimeMediaPort, InterruptibleAIPort
 from kaiwen_gateway.transports.synthetic.auth import SyntheticAuthBridge
 from kaiwen_gateway.transports.synthetic.media_adapter import WebSocketTelephonyMediaAdapter
 from kaiwen_gateway.transports.synthetic.media_protocol import (
@@ -703,10 +703,15 @@ async def synthetic_media_websocket_endpoint(websocket: WebSocket) -> None:
                         # Current active turn interruption: engage outbound ordering barrier
                         telephony_adapter.hold_outbound_barrier()
                         outcome = None
+                        require_future_cancel = (
+                            not isinstance(ai_port, InterruptibleAIPort)
+                            or ai_port.interruption_capabilities.can_cancel_future_generation
+                            or not ai_port.interruption_capabilities.can_discard_local_output
+                        )
                         try:
                             outcome = await voice_bridge.interrupt(
                                 turn_id=target_turn_id,
-                                require_future_generation_cancellation=True,
+                                require_future_generation_cancellation=require_future_cancel,
                                 timeout=2.0,
                             )
                         except UnsupportedInterruptionCapabilityError:

@@ -7,8 +7,8 @@
 > Development is temporarily paused at a verified maintenance baseline (this is a planned pause, not project abandonment or repository archiving).
 >
 > - **Latest Published Release (`v0.1.0a2`):** Installable, verified synthetic-environment alpha published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0a2/) and [GitHub Releases](https://github.com/ImtheKaiwen/kaiwen-gateway/releases/tag/v0.1.0a2) (superseding `v0.1.0a1`). Includes Core module lifecycle orchestration and public API policy (`S1`, PR #47), fail-closed lifespan drain safety (`S1-R2`, PR #48), provider-independent adapter conformance testing (`M4-R1`, PR #42/#43), and the OpenAI Realtime media adapter (`M4-R2`, PR #49).
-> - **Post-`v0.1.0a2` Live API Verification (`M4-R3` on `main`):** `kaiwen_gateway.adapters.openai_realtime` is now **`LIVE_VERIFIED`** against OpenAI's `wss://api.openai.com/v1/realtime` (`gpt-realtime`), and OpenAI's separate `wss://api.openai.com/v1/live/sessions` (`gpt-live-1`) protocol passed standalone diagnostic smoke verification (`GPT_LIVE_PROVIDER_SMOKE_PASS` via `tools/gpt_live_protocol_probe.py`; Gateway adapter integration for GPT-Live remains `GPT_LIVE_GATEWAY_INTEGRATION_NOT_IMPLEMENTED`).
-> - **Pending / Not Yet Supported:** **Production use is not supported.** Full Gateway adapter integration for GPT-Live (`/v1/live/sessions`), Kaiwen Agent integration, Kaiwen Speech integration, live Verimor PSTN/WSS interoperability (`FR-INT-007`), and production-readiness assessment remain pending.
+> - **Post-`v0.1.0a2` Dual OpenAI Voice Adapters (`M4-R3` & `M4-R4` on `main`):** Both OpenAI voice integrations — `kaiwen_gateway.adapters.openai_realtime` (`wss://api.openai.com/v1/realtime`, `gpt-realtime`) and `kaiwen_gateway.adapters.openai_gpt_live` (`wss://api.openai.com/v1/live/sessions`, `gpt-live-1`) — are implemented as first-class `AIRealtimeMediaPort` + `InterruptibleAIPort` Gateway adapters and are **`LIVE_VERIFIED`** end-to-end through `VoiceBridgeSession` as well as **`MOCK_VERIFIED`** via `RealtimeAdapterConformanceSuite`.
+> - **Pending / Not Yet Supported:** **Production use is not supported.** Kaiwen Agent integration, Kaiwen Speech integration, live Verimor PSTN/WSS interoperability (`FR-INT-007`), and production-readiness assessment remain deferred.
 
 Kaiwen Gateway is designed to be both a **reusable Python library** and a **deployable ASGI service**. It accepts connections from external systems, authenticates and isolates them, translates provider-specific protocols into well-defined internal contracts, and bridges live communication to application and AI backends.
 
@@ -98,6 +98,7 @@ See [`examples/quickstart_synthetic_media.py`](examples/quickstart_synthetic_med
 
 ```bash
 uv run python examples/quickstart_synthetic_media.py
+uv run python examples/openai_voice_adapters_quickstart.py
 ```
 
 ---
@@ -120,14 +121,14 @@ The following matrix distinguishes verified capabilities in the latest published
 | **Voice Media Bridge** | `FR-VOICE-001`, `FR-VOICE-005` | **Supported (`v0.1.0a2`, Verified)** | Asynchronous bidirectional media bridge (`VoiceBridgeSession`), isolated inbound/outbound audio pumps, turn tracking, backpressure bounds. |
 | **Barge-in Interruption** | `FR-VOICE-006` | **Supported (`v0.1.0a2`, Verified)** | User speech interruption triggers downstream AI cancellation, outbound buffer flushing, and synchronized turn incrementing. |
 | **Fake AI Echo Adapter & Conformance Suite** | `FR-INT-002` | **Supported (`v0.1.0a2`, Verified)** | In-process `BoundedFakeAIEchoPort` plus `RealtimeAdapterConformanceSuite` (`kaiwen_gateway.testing`, `M4-R1`). |
-| **OpenAI Realtime Media Adapter** | `FR-INT-003`, `FR-INT-005` | **`LIVE_VERIFIED` (`main`) / `MOCK_VERIFIED` (`v0.1.0a2`)** | `kaiwen_gateway.adapters.openai_realtime` (`[openai]` extra) verified offline (`RealtimeAdapterConformanceSuite` + 32 mock tests) and live (`M4-R3`) against `wss://api.openai.com/v1/realtime?model=gpt-realtime` (authentication, `session.update`, 16k<->24k audio, `response.done`, `response.cancel`, clean close). |
-| **OpenAI GPT-Live Protocol (`/v1/live/sessions`)** | `FR-INT-003` | **`GPT_LIVE_PROVIDER_SMOKE_PASS` / `GPT_LIVE_GATEWAY_INTEGRATION_NOT_IMPLEMENTED`** | Standalone diagnostic probe (`tools/gpt_live_protocol_probe.py`) verified live against `wss://api.openai.com/v1/live/sessions` (`gpt-live-1`); no Gateway `AIRealtimeMediaPort` adapter is implemented for GPT-Live. |
+| **OpenAI Realtime Media Adapter** | `FR-INT-003`, `FR-INT-005` | **`LIVE_VERIFIED` (`main`) / `MOCK_VERIFIED` (`v0.1.0a2`)** | `kaiwen_gateway.adapters.openai_realtime` (`[openai]` extra) verified offline (`RealtimeAdapterConformanceSuite` + 32 mock tests) and live (`M4-R3`) against `wss://api.openai.com/v1/realtime?model=gpt-realtime` (`can_cancel_future_generation=True`, `can_discard_local_output=True`). |
+| **OpenAI GPT-Live Media Adapter (`/v1/live/sessions`)** | `FR-INT-003`, `FR-INT-005` | **`LIVE_VERIFIED` & `MOCK_VERIFIED` (`main`, `M4-R4`)** | `kaiwen_gateway.adapters.openai_gpt_live` (`[openai]` extra) implementing `AIRealtimeMediaPort` + `InterruptibleAIPort` (`can_cancel_future_generation=False`, `can_discard_local_output=True`) against `wss://api.openai.com/v1/live/sessions` (`gpt-live-1`), verified offline (`RealtimeAdapterConformanceSuite` + 9 integration tests) and live end-to-end through `VoiceBridgeSession`. |
 | **Server-Owned Credentials** | `FR-INT-003`, `SEC-005` | **Supported (`v0.1.0a2`, Verified)** | Credentials and secrets stored only in server-controlled configuration/secret providers; redacted from logs and error summaries; never exposed to telephony clients. |
 | **Privacy & Zero Audio Persistence** | `SEC-006` | **Supported (`v0.1.0a2`, Verified)** | **Zero raw audio or transcript persistence by default.** No recording or transcript storage occurs without application-owned explicit opt-in adapters. |
-| **Outbound Egress & SSRF Protection** | `SEC-008` | **Supported (`v0.1.0a2`, Verified)** | In-process synthetic adapters; OpenAI Realtime transport enforces `wss://` (with loopback-only `ws://` for local testing). |
+| **Outbound Egress & SSRF Protection** | `SEC-008` | **Supported (`v0.1.0a2`, Verified)** | In-process synthetic adapters; OpenAI Realtime and GPT-Live transports enforce `wss://` (with loopback-only `ws://` for local testing). |
 | **Gateway Transport Overhead** | `NFR-PERF-004` (P1) | **Design Goal (Observed)** | Design goal is p95 Gateway-added transport processing overhead ≤ 50 ms under reference workload (excluding external network/model delays; not an established guarantee). Observed Gateway queue wait + bridge compute overhead was ~2.5 ms at 50 sessions and ~26 ms at 100 sessions under reference conditions. |
 | **Live Verimor Telephony** | `FR-INT-007` (P1) | **Deferred (Pending Vendor Spec)** | `OPEN-001` / `OPEN-002`. Blocked pending official vendor WebSocket specification and authorized interoperability testing. Wire format is strictly not guessed. |
-| **OpenAI Live Contract Verification** | `FR-INT-005` | **`LIVE_VERIFIED` (`gpt-realtime`, `M4-R3`)** | `OPEN-003` closed for `wss://api.openai.com/v1/realtime` (`gpt-realtime`) via authorized live smoke sessions on 2026-11-16 (`571.2 ms` first-frame latency, completed + cancelled turns verified). |
+| **OpenAI Live Contract Verification** | `FR-INT-005` | **`LIVE_VERIFIED` (`gpt-realtime` & `gpt-live-1`, `M4-R3` / `M4-R4`)** | `OPEN-003` closed for both `wss://api.openai.com/v1/realtime` (`gpt-realtime`) and `wss://api.openai.com/v1/live/sessions` (`gpt-live-1`) via authorized end-to-end Gateway live sessions on 2026-11-16. |
 | **Kaiwen Agent & Speech Integrations** | `FR-INT-004` | **Deferred (Pending Upstream APIs)** | `kaiwen-agent` and `kaiwen-speech` integrations remain outside the current maintenance baseline. |
 | **Tool Authorization Delegation** | `SEC-007` | **Deferred (Gate B Exception Accepted for Alpha)** | External agent tool authorization, approvals, and audit are owned by consuming application/agent, out of scope for synthetic audio gateway alpha. |
 | **Distributed / Multi-Instance State** | `Gate C/D`, `M8` | **Deferred (Out of Alpha Scope)** | Atomic replay store and distributed multi-worker coordination deferred to Gate C/D (M8). Current alpha is single-instance only. |
@@ -234,6 +235,8 @@ uv build
 | [`ROADMAP.md`](ROADMAP.md) | Milestone delivery status and deferred work packages. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Record of user-visible changes and version releases. |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Hexagonal architecture, ports, adapters, and data flow. |
+| [`docs/guides/OPENAI_REALTIME_ADAPTER.md`](docs/guides/OPENAI_REALTIME_ADAPTER.md) | OpenAI Realtime (`wss://api.openai.com/v1/realtime`, `gpt-realtime`) adapter guide and capability matrix. |
+| [`docs/guides/OPENAI_GPT_LIVE_ADAPTER.md`](docs/guides/OPENAI_GPT_LIVE_ADAPTER.md) | OpenAI GPT-Live (`wss://api.openai.com/v1/live/sessions`, `gpt-live-1`) adapter guide and capability matrix. |
 | [`docs/decisions/`](docs/decisions/) | Numbered Architecture Decision Records (`ADR-0001` through `ADR-0005`). |
 | [`SECURITY.md`](SECURITY.md) | Security policy and vulnerability disclosure instructions. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Development workflow and PR submission standards. |

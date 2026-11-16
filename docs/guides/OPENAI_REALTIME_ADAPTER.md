@@ -1,7 +1,7 @@
 # OpenAI Realtime Adapter Guide (M4-R2)
 
 > **Status:** `LIVE_VERIFIED` (`gpt-realtime` via `wss://api.openai.com/v1/realtime`) & `MOCK_VERIFIED` (32 offline adapter tests + 8 conformance dimensions, 0 skips).
-> **Separate Protocol Note (`GPT-Live`):** OpenAI's `wss://api.openai.com/v1/live/sessions` (`gpt-live-1`) protocol was separately verified via an isolated diagnostic probe (`tools/gpt_live_protocol_probe.py`, `GPT_LIVE_PROVIDER_SMOKE_PASS`), but **full Gateway `AIRealtimeMediaPort` integration for GPT-Live is not implemented (`GPT_LIVE_GATEWAY_INTEGRATION_NOT_IMPLEMENTED`)**.
+> **Companion Adapter (`GPT-Live`):** OpenAI's `wss://api.openai.com/v1/live/sessions` (`gpt-live-1`) protocol is supported via the dedicated [`kaiwen_gateway.adapters.openai_gpt_live`](OPENAI_GPT_LIVE_ADAPTER.md) adapter (`LIVE_VERIFIED` & `MOCK_VERIFIED`).
 
 ---
 
@@ -82,7 +82,7 @@ app = create_gateway_app(
 | Provider Playback Buffer Clear (`can_clear_provider_playback`) | `UNSUPPORTED` | WebSocket client cannot clear audio already transmitted to telephony leg |
 | Playback Confirmation (`can_observe_playback_acks`) | `UNSUPPORTED` | `cannot_confirm_playback = True` |
 | Live OpenAI Realtime API (`wss://api.openai.com/v1/realtime`) | `LIVE_VERIFIED` | Verified on `gpt-realtime` (`session.created`, `session.updated`, `input_audio_buffer.append`, `response.output_audio.delta`, `response.done` `completed` & `cancelled`, clean close) |
-| OpenAI GPT-Live Protocol (`wss://api.openai.com/v1/live/sessions`) | `GPT_LIVE_PROVIDER_SMOKE_PASS` / `GPT_LIVE_GATEWAY_INTEGRATION_NOT_IMPLEMENTED` | Standalone diagnostic probe (`tools/gpt_live_protocol_probe.py`) verified live on `gpt-live-1`; no Gateway `AIRealtimeMediaPort` adapter is implemented for `/v1/live/sessions` |
+| OpenAI GPT-Live Adapter (`wss://api.openai.com/v1/live/sessions`) | `LIVE_VERIFIED` & `MOCK_VERIFIED` | Dedicated [`kaiwen_gateway.adapters.openai_gpt_live`](OPENAI_GPT_LIVE_ADAPTER.md) adapter (`OpenAIGPTLiveMediaAdapter`) verified offline and live on `gpt-live-1` (`M4-R4`) |
 
 ---
 
