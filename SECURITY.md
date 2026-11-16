@@ -65,7 +65,7 @@ A model producing a poor answer **without a security boundary being crossed** is
 
 There are currently **no production-supported Gateway releases**. `v0.1.0b1` is an experimental public beta release (**Gateway Core + OpenAI Voice Adapters Beta**); future releases will document supported version ranges, upgrade/patch expectations, and end-of-support policy in this table.
 
-**Neither an alpha release nor this policy constitutes a security certification, penetration-test result, availability guarantee, or permission to process real customer calls.**
+**Neither an alpha or beta release nor this policy constitutes a security certification, penetration-test result, availability guarantee, or permission to process real customer calls.**
 
 ## 3. Coordinated disclosure and maintainer process
 

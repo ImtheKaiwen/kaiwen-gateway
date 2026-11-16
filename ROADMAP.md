@@ -326,7 +326,7 @@ These items are carried from [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md#8-dep
 | --- | --- | --- | --- |
 | `OPEN-001` — Verimor handshake/auth/direction | Unauthorized or incompatible WSS integration | Official vendor contract or approved capture | M7 |
 | `OPEN-002` — media/codec/control semantics | Corrupt audio, failed interruption, dropped calls | Verified wire examples/capability matrix | M7 |
-| `OPEN-003` — OpenAI Live current protocol | Fake success misrepresented as live integration | Current official spec + authorized sandbox smoke | Live interoperability claim |
+| `OPEN-003` — OpenAI Live current protocol | Fake success misrepresented as live integration | Current official spec + authorized sandbox smoke (**Closed for `gpt-realtime` & `gpt-live-1` in `M4-R3`/`M4-R4`, `v0.1.0b1`**) | Live interoperability claim (resolved for OpenAI) |
 | `OPEN-004` — data/consent/legal responsibilities | Personal data misuse or unlawful transfer | Documented organization approval and legal/privacy assessment | Any real customer processing |
 | `OPEN-005` — deployment, quotas and traffic | Unsupportable capacity/cost promises | Target region, provider quotas, benchmark profile | Pilot capacity/SLO |
 | `OPEN-006` — call handoff/transfer | Impossible fallback advertised as functional | Real vendor capability validation or graceful-close fallback | Transfer feature claim |

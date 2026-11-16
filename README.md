@@ -131,8 +131,8 @@ The following matrix distinguishes verified capabilities in the latest published
 | **Live Verimor Telephony** | `FR-INT-007` (P1) | **Deferred (Pending Vendor Spec)** | `OPEN-001` / `OPEN-002`. Blocked pending official vendor WebSocket specification and authorized interoperability testing. Wire format is strictly not guessed. |
 | **OpenAI Live Contract Verification** | `FR-INT-005` | **`LIVE_VERIFIED` (`gpt-realtime` & `gpt-live-1`, `M4-R3` / `M4-R4`)** | `OPEN-003` closed for both `wss://api.openai.com/v1/realtime` (`gpt-realtime`) and `wss://api.openai.com/v1/live/sessions` (`gpt-live-1`) via authorized end-to-end Gateway live sessions on 2026-11-16. |
 | **Kaiwen Agent & Speech Integrations** | `FR-INT-004` | **Deferred (Pending Upstream APIs)** | `kaiwen-agent` and `kaiwen-speech` integrations remain outside the current maintenance baseline. |
-| **Tool Authorization Delegation** | `SEC-007` | **Deferred (Gate B Exception Accepted for Alpha)** | External agent tool authorization, approvals, and audit are owned by consuming application/agent, out of scope for synthetic audio gateway alpha. |
-| **Distributed / Multi-Instance State** | `Gate C/D`, `M8` | **Deferred (Out of Alpha Scope)** | Atomic replay store and distributed multi-worker coordination deferred to Gate C/D (M8). Current alpha is single-instance only. |
+| **Tool Authorization Delegation** | `SEC-007` | **Deferred (Experimental Beta Scope)** | External agent tool authorization, approvals, and audit are owned by the consuming application/agent (`Gate B` exception accepted historically for synthetic alpha and retained for `v0.1.0b1`). |
+| **Distributed / Multi-Instance State** | `Gate C/D`, `M8` | **Deferred (Out of Beta Scope)** | Atomic replay store and distributed multi-worker coordination deferred to `Gate C/D` (`M8`). Current experimental beta (`v0.1.0b1`) is single-instance only. |
 | **Interactive Voice at $\ge 100$ Calls** | `NFR-PERF-006` (P1) | **Documented Limitation** | 100 concurrent calls achieve 100% media integrity (0% loss) and pass pacing criteria, but median p95 echo RTT reaches ~2,045 ms due to single-threaded event loop transit backlog. |
 
 ---
