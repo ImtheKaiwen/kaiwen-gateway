@@ -1,9 +1,9 @@
 # Kaiwen Gateway — V1 Architecture
 
-> **Status:** V1 Architecture Baseline (`ADR-0001`..`ADR-0005` accepted; synthetic alpha `v0.1.0a2` released; `main` in `MAINTENANCE — INTEGRATION PENDING`)
+> **Status:** V1 Architecture Baseline (`ADR-0001`..`ADR-0005` accepted; public beta `v0.1.0b1` released; `main` in `MAINTENANCE — INTEGRATION PENDING`)
 > **Document version:** 1.0
-> **Latest published alpha:** `0.1.0a2` (synthetic alpha)
-> **Last updated:** 2026-11-15
+> **Latest published release:** `0.1.0b1` (Public Beta — Gateway Core + OpenAI Voice Adapters)
+> **Last updated:** 2026-11-16
 > **Scope:** Reusable Python library + deployable ASGI server; **Voice** is the only V1 communication module.
 
 ## 1. Purpose, authority, and implementation status

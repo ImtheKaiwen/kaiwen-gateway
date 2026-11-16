@@ -4,10 +4,10 @@ All notable **user-facing changes** to Kaiwen Gateway are recorded in this file.
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for its Python distribution. The **Python package version**, any **external Gateway wire/API protocol version**, and **provider adapter compatibility** are separate concerns; a package release does not automatically change a wire protocol version.
 
-> **Project status (2026-11-16): `v0.1.0b1` Beta Candidate Prepared (**Gateway Core + OpenAI Voice Adapters Beta**; `v0.1.0a2` Latest Published on PyPI).**
-> Kaiwen Gateway `0.1.0b1` prepares the first beta release covering Gateway Core, ASGI server hosting, synthetic telephony/media transports, `VoiceBridgeSession`, `RealtimeAdapterConformanceSuite`, and both `LIVE_VERIFIED` OpenAI voice adapters (`kaiwen_gateway.adapters.openai_realtime` and `kaiwen_gateway.adapters.openai_gpt_live`).
+> **Project status (2026-11-16): `v0.1.0b1` Public Beta Released (Gateway Core + OpenAI Voice Adapters Beta; `MAINTENANCE — INTEGRATION PENDING`).**
+> Kaiwen Gateway `v0.1.0b1` is published on PyPI and GitHub Releases (superseding synthetic alphas `v0.1.0a2` and `v0.1.0a1`), covering Gateway Core, ASGI server hosting, synthetic telephony/media transports, `VoiceBridgeSession`, `RealtimeAdapterConformanceSuite`, and both `LIVE_VERIFIED` OpenAI voice adapters (`kaiwen_gateway.adapters.openai_realtime` and `kaiwen_gateway.adapters.openai_gpt_live`).
 >
-> **Production use is not yet supported.** Kaiwen Agent, Kaiwen Speech, and live Verimor PSTN/WSS interoperability (`FR-INT-007`) remain deferred external integrations.
+> **Experimental beta — production use is not supported.** Kaiwen Agent, Kaiwen Speech, and live Verimor PSTN/WSS interoperability (`FR-INT-007`) remain deferred external integrations.
 
 ## [Unreleased]
 

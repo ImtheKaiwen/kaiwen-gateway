@@ -2,14 +2,14 @@
 
 > **Project:** [Kaiwen Gateway](https://github.com/ImtheKaiwen/kaiwen-gateway)
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
-> **Phase:** `MAINTENANCE — INTEGRATION PENDING` (Synthetic Alpha `v0.1.0a2` released, including S1/S1-R2 drain safety and `MOCK_VERIFIED` OpenAI Realtime adapter)
-> **Latest published alpha:** `0.1.0a2` (PyPI & GitHub Releases)
-> **Document status:** Active contributor guide (accepted 2026-11-01; updated 2026-11-15)
-> **Last reviewed:** 2026-11-15
+> **Phase:** `MAINTENANCE — INTEGRATION PENDING` (Public Beta `v0.1.0b1` released — **Gateway Core + OpenAI Voice Adapters Beta**, superseding synthetic alphas `v0.1.0a2` and `v0.1.0a1`)
+> **Latest published release:** `v0.1.0b1` (PyPI & GitHub Releases)
+> **Document status:** Active contributor guide (accepted 2026-11-01; updated 2026-11-16)
+> **Last reviewed:** 2026-11-16
 
 Thank you for your interest in Kaiwen Gateway. This guide describes how to propose, develop, test, review, and document changes to the project. It applies to human contributors and complements the [coding-agent instructions](AGENTS.md). It does **not** grant permission to use production systems, customer data, paid AI services, or release credentials.
 
-**Current state:** Kaiwen Gateway `v0.1.0a2` is published on PyPI as a synthetic-environment alpha (superseding `v0.1.0a1`), including Core stabilization (`S1`, `S1-R2` in PR #48) and the `MOCK_VERIFIED` OpenAI Realtime media adapter (`M4-R2` in PR #49). Active feature development is temporarily paused (`MAINTENANCE — INTEGRATION PENDING`) while live OpenAI API verification (`LIVE_VERIFIED`), Kaiwen Agent, Kaiwen Speech, and Verimor interoperability remain deferred. Do not claim live provider interoperability or production readiness without verified evidence.
+**Current state:** Kaiwen Gateway `v0.1.0b1` is published on PyPI as an experimental public beta (**Gateway Core + OpenAI Voice Adapters Beta**, superseding `v0.1.0a2` and `v0.1.0a1`), including Core stabilization (`S1`, `S1-R2` in PR #48) and both `LIVE_VERIFIED` OpenAI voice adapters (`openai_realtime` and `openai_gpt_live`). Active feature development remains paused (`MAINTENANCE — INTEGRATION PENDING`) while Kaiwen Agent, Kaiwen Speech, and Verimor interoperability remain deferred. Do not claim production readiness without verified evidence.
 
 ## 1. Before you contribute
 
@@ -266,7 +266,7 @@ The eventual GitHub Actions setup should use least-privilege permissions, review
 - Running paid live tests, capturing customer media, or contacting real customers.
 - Changing repository protections, secret stores, or privileged GitHub settings.
 
-Releases require approved quality gates, known artifacts, and a separate maintainer decision. `0.1.0a2` is the latest published synthetic-environment alpha (superseding `0.1.0a1`); future releases require explicit maintainer authorization and tag-matched release automation. Follow [ROADMAP.md](ROADMAP.md) for the difference between synthetic alpha (`MOCK_VERIFIED`), real-provider pilot, and production readiness.
+Releases require approved quality gates, known artifacts, and a separate maintainer decision. `0.1.0b1` is the latest published public beta (superseding synthetic alphas `0.1.0a2` and `0.1.0a1`); future releases require explicit maintainer authorization and tag-matched release automation. Follow [ROADMAP.md](ROADMAP.md) for the difference between synthetic alpha (`MOCK_VERIFIED`), public beta (`LIVE_VERIFIED` OpenAI voice adapters), real-provider pilot, and production readiness.
 
 ## 9. Completion and handoff format
 
