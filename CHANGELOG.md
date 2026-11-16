@@ -11,6 +11,14 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+- **OpenAI Realtime Live API Verification (`M4-R3`, `LIVE_VERIFIED`):** Verified `kaiwen_gateway.adapters.openai_realtime` against the live OpenAI Realtime API (`wss://api.openai.com/v1/realtime?model=gpt-realtime`) across full bidirectional 16 kHz <-> 24 kHz PCM16LE audio streaming, `session.update`, completed response delivery, mid-response `response.cancel` turn interruption, and clean session teardown.
+- **GPT-Live Standalone Diagnostic Protocol Probe (`M4-R3`, `GPT_LIVE_PROVIDER_SMOKE_PASS`):** Added `tools/gpt_live_protocol_probe.py` (with offline tests in `tests/test_gpt_live_protocol_probe.py`) and verified provider-level interoperability with `wss://api.openai.com/v1/live/sessions` (`gpt-live-1`, `session.start` -> `session.started` -> `session.input_audio.append` -> `session.output_audio.delta`). Full Gateway `AIRealtimeMediaPort` integration for GPT-Live remains unimplemented (`GPT_LIVE_GATEWAY_INTEGRATION_NOT_IMPLEMENTED`).
+- **Optional `.env` Loading in `OpenAIRealtimeConfig.from_env()`:** Added safe local `.env` fallback parsing (`dotenv_path=".env"`) when `OPENAI_API_KEY` is not already present in `os.environ`, without mutating process environment variables or exposing secrets.
+
+### Fixed
+- **Server-Cancelled Response Partial Frame Reset:** Updated `OpenAIRealtimeMediaAdapter` to reset `_resampler_out` and `_packer` when `response.done` reports `status="cancelled"`, preventing residual sub-frame audio bytes from a server-VAD cancelled response from bleeding into subsequent responses.
+
 ---
 
 ## [0.1.0a2] - 2026-11-15

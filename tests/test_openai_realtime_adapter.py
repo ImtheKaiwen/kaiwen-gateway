@@ -1571,3 +1571,94 @@ def test_32_incomplete_response_done_content_filter_surfaces_sanitized_error() -
         assert adapter.is_closed is True
 
     asyncio.run(_run())
+
+
+def test_33_from_env_loads_dotenv_file_and_prefers_os_environ(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify OpenAIRealtimeConfig.from_env loads a local .env file and prefers os.environ."""
+    dotenv_file = tmp_path / ".env"
+    dotenv_file.write_text(
+        "# comment line\nexport TEST_OAI_KEY='sk-dotenv-secret-val'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("TEST_OAI_KEY", raising=False)
+
+    cfg = OpenAIRealtimeConfig.from_env(env_var="TEST_OAI_KEY", dotenv_path=dotenv_file)
+    assert cfg.api_key == "sk-dotenv-secret-val"
+    assert "sk-dotenv-secret-val" not in repr(cfg)
+
+    monkeypatch.setenv("TEST_OAI_KEY", "sk-os-environ-override")
+    cfg_override = OpenAIRealtimeConfig.from_env(env_var="TEST_OAI_KEY", dotenv_path=dotenv_file)
+    assert cfg_override.api_key == "sk-os-environ-override"
+
+    monkeypatch.delenv("TEST_OAI_KEY", raising=False)
+    with pytest.raises(OpenAIRealtimeError, match="Missing required server environment variable"):
+        OpenAIRealtimeConfig.from_env(env_var="TEST_OAI_KEY", dotenv_path=tmp_path / "missing.env")
+
+
+def test_34_server_vad_cancelled_response_done_discards_partial_tail() -> None:
+    """Verify server-initiated response.done status='cancelled' resets partial sub-frame state."""
+
+    async def _run() -> None:
+        server_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        # Response 1 sends only 240 bytes of 24kHz PCM (160 bytes at 16kHz < 640-byte frame),
+        # then server_vad auto-cancels Response 1 before a full frame is formed.
+        await server_events.put({"type": "response.created", "response": {"id": "resp_vad_cancel"}})
+        await server_events.put(
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "resp_vad_cancel",
+                "delta": base64.b64encode(b"\x09\x00" * 120).decode("ascii"),
+            }
+        )
+        await server_events.put(
+            {
+                "type": "response.done",
+                "response": {"id": "resp_vad_cancel", "status": "cancelled"},
+            }
+        )
+        # Response 2 sends a full 960-byte 24kHz chunk (640 bytes at 16kHz) and completes.
+        await server_events.put({"type": "response.created", "response": {"id": "resp_ok"}})
+        await server_events.put(
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "resp_ok",
+                "delta": base64.b64encode(b"\x02\x00" * 480).decode("ascii"),
+            }
+        )
+        await server_events.put(
+            {"type": "response.done", "response": {"id": "resp_ok", "status": "completed"}}
+        )
+        await server_events.put(None)
+
+        class _SeqTransport:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                return None
+
+            async def receive_json(self) -> dict[str, Any] | None:
+                return await server_events.get()
+
+            async def close(self) -> None:
+                return None
+
+        async def _connector(_cfg: OpenAIRealtimeConfig) -> OpenAIRealtimeTransport:
+            return _SeqTransport()
+
+        cfg = OpenAIRealtimeConfig(
+            api_key="sk-test-vad-cancel",
+            endpoint_url="wss://mock.openai.local/v1/realtime",
+        )
+        adapter = OpenAIRealtimeMediaAdapter(
+            call_id="call_vad_cancel",
+            tenant_id="tenant_a",
+            config=cfg,
+            transport_connector=_connector,
+        )
+        f1 = await asyncio.wait_for(adapter.receive_frame(), timeout=2.0)
+        assert f1 is not None
+        assert f1.payload == b"\x02\x00" * 320
+        assert await asyncio.wait_for(adapter.receive_frame(), timeout=2.0) is None
+        await adapter.close()
+
+    asyncio.run(_run())

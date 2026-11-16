@@ -434,6 +434,7 @@ class OpenAIRealtimeMediaAdapter:
 
         if event_type in {"response.output_audio.done", "response.done"}:
             resp_obj = event.get("response") if isinstance(event.get("response"), dict) else None
+            status = resp_obj.get("status") if resp_obj is not None else None
             resp_id = event.get("response_id")
             if resp_id is None and resp_obj is not None:
                 resp_id = resp_obj.get("id")
@@ -446,14 +447,16 @@ class OpenAIRealtimeMediaAdapter:
                     else self._current_turn_id
                 )
 
-            if turn_id > self._fenced_turn_id:
+            if status == "cancelled":
+                self._resampler_out.reset()
+                self._packer.reset()
+            elif turn_id > self._fenced_turn_id:
                 tail = self._packer.flush_partial(turn_id=turn_id)
                 if tail is not None:
                     await self._put_outbound_bounded(tail)
             if event_type == "response.done":
                 if isinstance(resp_id, str) and resp_id == self._active_response_id:
                     self._active_response_id = None
-                status = resp_obj.get("status") if resp_obj is not None else None
                 if status == "cancelled":
                     if self._pending_cancel_acks > 0:
                         self._pending_cancel_acks -= 1
