@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import time
 from collections.abc import Callable
 from typing import Any
 
 from kaiwen_gateway.adapters.openai_realtime.audio import (
+    GATEWAY_FRAME_DURATION_MS,
     OutboundFramePacker,
     PCM16Resampler16kTo24k,
     PCM16Resampler24kTo16k,
@@ -138,6 +140,7 @@ class OpenAIRealtimeMediaAdapter:
         self._pending_cancel_acks = 0
         self._pending_cancel_boundaries = 0
         self._response_turn_map: dict[str, int] = {}
+        self._delivered_outbound_seq = 0
 
     @property
     def call_id(self) -> str:
@@ -324,10 +327,11 @@ class OpenAIRealtimeMediaAdapter:
 
     async def _receiver_loop(self, transport: OpenAIRealtimeTransport) -> None:
         try:
-            while not self._closed:
+            while not self._closed and not self._eof_reached:
                 event = await transport.receive_json()
-                if event is None:
-                    await self._handle_clean_eof()
+                if event is None or self._eof_reached:
+                    if not self._eof_reached:
+                        await self._handle_clean_eof()
                     return
                 await self._handle_server_event(event)
         except asyncio.CancelledError:
@@ -568,6 +572,18 @@ class OpenAIRealtimeMediaAdapter:
                     raise MediaPortClosedError("OpenAIRealtimeMediaAdapter is closed")
             if item.turn_id is not None and item.turn_id <= self._fenced_turn_id:
                 continue
+            seq = self._delivered_outbound_seq
+            self._delivered_outbound_seq += 1
+            if item.sequence != seq:
+                item = AudioFrame(
+                    payload=item.payload,
+                    format=item.format,
+                    sample_rate=item.sample_rate,
+                    channels=item.channels,
+                    sequence=seq,
+                    timestamp_ms=seq * GATEWAY_FRAME_DURATION_MS,
+                    turn_id=item.turn_id,
+                )
             return item
 
     async def cancel_turn(self, turn_id: int) -> None:
@@ -620,6 +636,22 @@ class OpenAIRealtimeMediaAdapter:
             finally:
                 self._committed_turn_id = max(self._committed_turn_id, self._current_turn_id)
                 self._turn_transition_event.set()
+
+    async def push_eof(self, timeout: float | None = None) -> None:
+        """Signal clean end-of-stream once queued inbound frames have been transmitted."""
+        if self._closed or self._eof_reached:
+            return
+        wait_s = min(timeout if timeout is not None and timeout > 0 else 0.5, 0.5)
+        deadline = time.monotonic() + wait_s
+        while not self._inbound_queue.empty() and not self._closed and time.monotonic() < deadline:
+            await asyncio.sleep(0.005)
+        self._eof_reached = True
+        if self._receiver_task is not None and not self._receiver_task.done():
+            self._receiver_task.cancel()
+        try:
+            self._outbound_queue.put_nowait(_EOF)
+        except asyncio.QueueFull:
+            pass
 
     async def close(self) -> None:
         """Idempotently close the adapter, cancel background tasks, and close transport."""

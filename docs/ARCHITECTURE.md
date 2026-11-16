@@ -10,7 +10,7 @@
 
 This document describes **how** the requirements in [REQUIREMENTS.md](REQUIREMENTS.md) are structured and implemented: component boundaries, dependency direction, trust boundaries, media and control flows, failure handling, deployment topology, and verification strategy. The public product overview lives in [../README.md](../README.md); delivery sequence and current maintenance status belong in [../ROADMAP.md](../ROADMAP.md); enduring decisions belong in [decisions/](decisions/).
 
-**Implementation status boundary:** Gateway Core, ASGI server hosting, synthetic telephony/media transports, Voice Media Bridge, `S1`/`S1-R2` module lifecycle and drain safety, and the `MOCK_VERIFIED` OpenAI Realtime adapter (`PR #49`) are implemented and published in `v0.1.0a2`. **Live OpenAI API verification (`LIVE_VERIFIED`), Kaiwen Agent integration, Kaiwen Speech integration, and real Verimor interoperability remain pending.** Do not mark the system production-ready or Verimor-compatible based on synthetic verification.
+**Implementation status boundary:** Gateway Core, ASGI server hosting, synthetic telephony/media transports, Voice Media Bridge, `S1`/`S1-R2` module lifecycle and drain safety, and both OpenAI voice adapters (`kaiwen_gateway.adapters.openai_realtime` for `wss://api.openai.com/v1/realtime` and `kaiwen_gateway.adapters.openai_gpt_live` for `wss://api.openai.com/v1/live/sessions`, both `LIVE_VERIFIED` and `MOCK_VERIFIED`) are implemented. **Kaiwen Agent integration, Kaiwen Speech integration, and real Verimor interoperability remain deferred.** Do not mark the system production-ready or Verimor-compatible based on synthetic verification.
 
 Key constraints:
 

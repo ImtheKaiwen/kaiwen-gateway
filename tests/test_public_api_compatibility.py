@@ -9,6 +9,8 @@ import tomllib
 from pathlib import Path
 
 import kaiwen_gateway
+import kaiwen_gateway.adapters.openai_gpt_live as openai_gpt_live_pkg
+import kaiwen_gateway.adapters.openai_realtime as openai_realtime_pkg
 import kaiwen_gateway.core as core_pkg
 import kaiwen_gateway.modules.voice as voice_pkg
 import kaiwen_gateway.server as server_pkg
@@ -25,7 +27,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def test_supported_public_exports_exist_and_have_no_private_leaks() -> None:
     """All __all__ entries in supported public modules exist and exclude private names."""
-    for pkg in (kaiwen_gateway, core_pkg, voice_pkg, server_pkg, testing_pkg):
+    for pkg in (
+        kaiwen_gateway,
+        core_pkg,
+        voice_pkg,
+        server_pkg,
+        testing_pkg,
+        openai_realtime_pkg,
+        openai_gpt_live_pkg,
+    ):
         exported = getattr(pkg, "__all__", None)
         assert isinstance(exported, list) and len(exported) > 0, f"{pkg.__name__} missing __all__"
         for symbol in exported:
@@ -86,6 +96,28 @@ def test_key_public_symbols_remain_importable_from_documented_namespaces() -> No
         "create_test_frame",
     }
     assert expected_testing.issubset(set(testing_pkg.__all__))
+
+    expected_openai_realtime = {
+        "OpenAIRealtimeConfig",
+        "OpenAIRealtimeMediaAdapter",
+        "OpenAIRealtimeTransport",
+        "OpenAIRealtimeError",
+        "OpenAIRealtimeDependencyError",
+        "create_openai_realtime_adapter_factory",
+        "connect_openai_realtime_websocket",
+    }
+    assert expected_openai_realtime.issubset(set(openai_realtime_pkg.__all__))
+
+    expected_openai_gpt_live = {
+        "OpenAIGPTLiveConfig",
+        "OpenAIGPTLiveMediaAdapter",
+        "OpenAIGPTLiveTransport",
+        "OpenAIGPTLiveError",
+        "OpenAIGPTLiveDependencyError",
+        "create_openai_gpt_live_adapter_factory",
+        "connect_openai_gpt_live_websocket",
+    }
+    assert expected_openai_gpt_live.issubset(set(openai_gpt_live_pkg.__all__))
 
 
 def test_version_dimensions_are_distinct_and_consistent() -> None:

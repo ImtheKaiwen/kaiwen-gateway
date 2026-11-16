@@ -679,12 +679,13 @@ class VoiceBridgeSession:
 
             deadline = asyncio.get_running_loop().time() + timeout_float
 
-            # 1. Cancel upstream generation with bounded shared deadline and partial state reuse
+            # 1. Cancel upstream generation / local AI adapter turn buffer with bounded shared deadline
             future_cancelled = False
             if isinstance(self._ai_port, InterruptibleAIPort):
-                if self._ai_port.interruption_capabilities.can_cancel_future_generation:
+                ai_caps = self._ai_port.interruption_capabilities
+                if ai_caps.can_cancel_future_generation or ai_caps.can_discard_local_output:
                     if self._ai_cancelled_for_turn == target_turn:
-                        future_cancelled = True
+                        future_cancelled = ai_caps.can_cancel_future_generation
                     else:
                         t_rem = max(0.0, deadline - asyncio.get_running_loop().time())
                         if t_rem <= 0.0:
@@ -697,7 +698,7 @@ class VoiceBridgeSession:
                             async with asyncio.timeout(t_rem):
                                 await self._ai_port.cancel_turn(target_turn)
                             self._ai_cancelled_for_turn = target_turn
-                            future_cancelled = True
+                            future_cancelled = ai_caps.can_cancel_future_generation
                         except asyncio.CancelledError:
                             self._interruptions_failed += 1
                             self._record_error(VoiceErrorCategory.SESSION_CANCELLED)

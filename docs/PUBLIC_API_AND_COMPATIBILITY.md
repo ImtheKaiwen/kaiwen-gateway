@@ -59,6 +59,10 @@ Provider-neutral domain and streaming contracts (zero external provider dependen
 ### 3.5 Adapter Conformance Testing (`kaiwen_gateway.testing`)
 - `RealtimeAdapterConformanceSuite`, `SyntheticUpstreamFailingAIAdapter`, `create_test_frame`
 
+### 3.6 Optional OpenAI Voice Adapters (`kaiwen_gateway.adapters`, requires `kaiwen-gateway[openai]` or `kaiwen-gateway[server]` for live WebSocket transport)
+- **OpenAI Realtime (`kaiwen_gateway.adapters.openai_realtime`, `wss://api.openai.com/v1/realtime`):** `OpenAIRealtimeConfig`, `OpenAIRealtimeMediaAdapter`, `OpenAIRealtimeTransport`, `OpenAIRealtimeTransportConnector`, `OpenAIRealtimeError`, `OpenAIRealtimeDependencyError`, `create_openai_realtime_adapter_factory`, `connect_openai_realtime_websocket`, `DEFAULT_OPENAI_REALTIME_URL`, `DEFAULT_OPENAI_REALTIME_MODEL`, `DEFAULT_OPENAI_REALTIME_VOICE`, `OPENAI_PCM_SAMPLE_RATE`, `PCM16Resampler16kTo24k`, `PCM16Resampler24kTo16k`, `OutboundFramePacker`, `validate_inbound_frame`, `validate_endpoint_url`, `sanitize_provider_message`
+- **OpenAI GPT-Live (`kaiwen_gateway.adapters.openai_gpt_live`, `wss://api.openai.com/v1/live/sessions`):** `OpenAIGPTLiveConfig`, `OpenAIGPTLiveMediaAdapter`, `OpenAIGPTLiveTransport`, `OpenAIGPTLiveTransportConnector`, `OpenAIGPTLiveError`, `OpenAIGPTLiveDependencyError`, `create_openai_gpt_live_adapter_factory`, `connect_openai_gpt_live_websocket`, `DEFAULT_OPENAI_GPT_LIVE_URL`, `DEFAULT_OPENAI_GPT_LIVE_MODEL`, `DEFAULT_OPENAI_GPT_LIVE_VOICE`, `GPT_LIVE_PCM_SAMPLE_RATE`
+
 ---
 
 ## 4. Explicit Internal / Private APIs
