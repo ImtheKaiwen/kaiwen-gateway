@@ -11,6 +11,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+- **Core Additive Principal Identity & Admission (`E1`):** Added `PrincipalId`, `validate_principal_id`, `TenantPrincipalBinding`, `VerifiedPrincipalContext`, `PrincipalAuthorizationPort`, `bind_verified_principal_context`, `resolve_verified_principal_context`, `VerifiedConnectionIdentity`, `PrincipalAdmissionLease`, `AdmissionController.acquire_principal` / `admit_principal`, `PrincipalConnectionSupervisor`, and `InstanceDrainCoordinator.admit_principal_connection()` while preserving all Voice `call_id: str` public APIs unchanged.
+- **Events Foundation Module (`E1`, `kaiwen_gateway.modules.events`):** Added immutable `EventEnvelope` (`v1`, `64 KiB` max frame, max JSON depth `16`, finite floats), `PublishResult`, `EventConnectionConsumer` / `EventSubscription` (explicit connection-level consumer owning the single multiplexed outbound queue while subscription handles manage registration/lifecycle), `EventPublisherPort` / `EventSubscriptionPort` / `EventBrokerPort` / `DurableEventStorePort`, `EventsTelemetrySink` / `InMemoryEventsTelemetrySink`, `TokenBucketRateLimiter` (provisional process-local defaults `200/s` burst `400` publish, `10/s` burst `20` subscribe active by default), `InMemoryEventBroker` (wildcard scope enforcement, `128` events, `1 MiB`/conn, `32 MiB` global budget, `32` subscriptions/conn, `disconnect_slow_consumer` default, global budget backpressure without falsely disconnecting healthy connections), and `EventsModule` (`GatewayModule` lifecycle adapter rejecting restart after terminal shutdown).
+
 ---
 
 ## [0.1.0b1] - 2026-11-16

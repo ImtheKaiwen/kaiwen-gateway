@@ -46,6 +46,7 @@ from kaiwen_gateway.core.identity import (
     ConnectionId,
     TenantId,
     VerifiedConnectionContext,
+    VerifiedPrincipalContext,
 )
 
 
@@ -151,6 +152,88 @@ class AdmissionLease:
         return f"AdmissionLease(status={status!r})"
 
 
+class PrincipalAdmissionLease:
+    """Represents an active, acquired capacity reservation for a non-call principal context."""
+
+    __slots__ = (
+        "_context",
+        "_controller",
+        "_release_lock",
+        "_released",
+        "__weakref__",
+    )
+
+    def __init__(
+        self,
+        *,
+        controller: AdmissionController,
+        context: VerifiedPrincipalContext,
+    ) -> None:
+        self._controller: AdmissionController = controller
+        self._context: VerifiedPrincipalContext = context
+        self._released: bool = False
+        self._release_lock: asyncio.Lock = asyncio.Lock()
+
+    @property
+    def connection_id(self) -> str:
+        """Return the canonical connection identifier for this lease."""
+        return self._context.connection_id
+
+    @property
+    def tenant_id(self) -> str:
+        """Return the canonical tenant identifier for this lease."""
+        return self._context.tenant_id
+
+    @property
+    def provider_id(self) -> str:
+        """Return the canonical provider identifier for this lease."""
+        return self._context.provider_id
+
+    @property
+    def principal_id(self) -> str:
+        """Return the canonical principal identifier for this lease."""
+        return self._context.principal_id
+
+    @property
+    def controller(self) -> AdmissionController:
+        """Return the issuing AdmissionController instance."""
+        return self._controller
+
+    @property
+    def context(self) -> VerifiedPrincipalContext:
+        """Return the verified principal context bound to this lease."""
+        return self._context
+
+    @property
+    def is_active(self) -> bool:
+        """Return True if this lease is currently holding an active capacity reservation."""
+        return not self._released
+
+    async def release(self) -> bool:
+        """Release the capacity reservation held by this lease (idempotent and retry-safe)."""
+        async with self._release_lock:
+            if self._released:
+                return False
+            released = await self._controller._release_principal_lease(self)
+            self._released = True
+            return released
+
+    async def __aenter__(self) -> PrincipalAdmissionLease:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        await self.release()
+
+    def __repr__(self) -> str:
+        status = "active" if self.is_active else "released"
+        return f"PrincipalAdmissionLease(status={status!r})"
+
+
 class AdmissionController:
     """Process-local, tenant-scoped, concurrency-safe connection admission controller.
 
@@ -205,7 +288,7 @@ class AdmissionController:
             self._max_concurrent_connections = effective_config.max_concurrent_connections
             self._max_connections_per_tenant = effective_config.max_connections_per_tenant
 
-        self._active_leases: dict[str, AdmissionLease] = {}
+        self._active_leases: dict[str, AdmissionLease | PrincipalAdmissionLease] = {}
         self._tenant_counts: dict[str, int] = {}
         self._lock: asyncio.Lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -243,7 +326,24 @@ class AdmissionController:
             raise TypeError(
                 f"context must be a VerifiedConnectionContext instance, got {type(context).__name__}"
             )
+        lease = await self._acquire_verified(context)
+        assert isinstance(lease, AdmissionLease)
+        return lease
 
+    async def acquire_principal(self, context: VerifiedPrincipalContext) -> PrincipalAdmissionLease:
+        """Atomically admit a non-call principal connection using the shared capacity ceilings."""
+        if not isinstance(context, VerifiedPrincipalContext):
+            raise TypeError(
+                f"context must be a VerifiedPrincipalContext instance, got {type(context).__name__}"
+            )
+        lease = await self._acquire_verified(context)
+        assert isinstance(lease, PrincipalAdmissionLease)
+        return lease
+
+    async def _acquire_verified(
+        self,
+        context: VerifiedConnectionContext | VerifiedPrincipalContext,
+    ) -> AdmissionLease | PrincipalAdmissionLease:
         self._check_loop()
 
         async with self._lock:
@@ -269,23 +369,30 @@ class AdmissionController:
                 )
 
             # 4. Atomic reservation
-            lease = AdmissionLease(
-                controller=self,
-                context=context,
-            )
+            lease: AdmissionLease | PrincipalAdmissionLease
+            if isinstance(context, VerifiedConnectionContext):
+                lease = AdmissionLease(controller=self, context=context)
+            else:
+                lease = PrincipalAdmissionLease(controller=self, context=context)
             self._active_leases[context.connection_id] = lease
             self._tenant_counts[context.tenant_id] = current_tenant + 1
             return lease
 
     @asynccontextmanager
     async def admit(self, context: VerifiedConnectionContext) -> AsyncIterator[AdmissionLease]:
-        """Async context manager that acquires a lease and ensures release upon exit.
-
-        Guarantees cleanup upon normal block exit, unhandled errors, and first-order
-        task cancellations. Repeated or nested cancellations during release require
-        outer lifecycle supervision (M2.4).
-        """
+        """Async context manager that acquires a lease and ensures release upon exit."""
         lease = await self.acquire(context)
+        try:
+            yield lease
+        finally:
+            await lease.release()
+
+    @asynccontextmanager
+    async def admit_principal(
+        self, context: VerifiedPrincipalContext
+    ) -> AsyncIterator[PrincipalAdmissionLease]:
+        """Async context manager that acquires a principal lease and ensures release upon exit."""
+        lease = await self.acquire_principal(context)
         try:
             yield lease
         finally:
@@ -293,6 +400,14 @@ class AdmissionController:
 
     async def _release_lease(self, lease: AdmissionLease) -> bool:
         """Internal atomic release method called by AdmissionLease.release()."""
+        return await self._release_lease_entry(lease)
+
+    async def _release_principal_lease(self, lease: PrincipalAdmissionLease) -> bool:
+        """Internal atomic release method called by PrincipalAdmissionLease.release()."""
+        return await self._release_lease_entry(lease)
+
+    async def _release_lease_entry(self, lease: AdmissionLease | PrincipalAdmissionLease) -> bool:
+        """Shared atomic release implementation for call and principal leases."""
         if lease.controller is not self:
             raise InvalidLeaseError(
                 "Cannot release a lease issued by a different AdmissionController"
@@ -357,7 +472,7 @@ class AdmissionController:
         Note: Synchronous, lock-free inspection method intended for the owning thread
         and event-loop context.
         """
-        if not isinstance(lease, AdmissionLease):
+        if not isinstance(lease, (AdmissionLease, PrincipalAdmissionLease)):
             return False
         return self._active_leases.get(lease.connection_id) is lease
 
@@ -373,4 +488,5 @@ __all__ = [
     "AdmissionController",
     "AdmissionLease",
     "AdmissionSnapshot",
+    "PrincipalAdmissionLease",
 ]

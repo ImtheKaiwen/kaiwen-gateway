@@ -37,14 +37,21 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Final
 
-from kaiwen_gateway.core.admission import AdmissionController, AdmissionLease
+from kaiwen_gateway.core.admission import (
+    AdmissionController,
+    AdmissionLease,
+    PrincipalAdmissionLease,
+)
 from kaiwen_gateway.core.exceptions import (
     AdmissionError,
     ConnectionLifecycleError,
     CoreConfigurationError,
     InvalidConnectionTransitionError,
 )
-from kaiwen_gateway.core.identity import VerifiedConnectionContext
+from kaiwen_gateway.core.identity import (
+    VerifiedConnectionContext,
+    VerifiedPrincipalContext,
+)
 
 
 class ConnectionState(StrEnum):
@@ -185,36 +192,16 @@ class LifecyclePolicy:
             )
 
 
-class ConnectionSupervisor:
-    """Per-connection async task supervisor and lifecycle state machine manager.
-
-    Invariants (M2.4A):
-    - Single lifecycle owner: Owns the connection's state transitions and worker tasks.
-    - Single lease ownership by construction: Supervisor acquires and owns its dedicated lease
-      via `admit()`; no external lease injection or module-level shared registries.
-    - Guarded state machine: Transitions strictly adhere to `_ALLOWED_TRANSITIONS`.
-    - Admission bound: Cannot enter `ACTIVE` without a valid `AdmissionLease` acquired via `admit()`.
-    - Sibling cancellation: If any worker task raises an unhandled error, sibling tasks
-      are deterministically cancelled and awaited before cleanup.
-    - Idempotent cleanup: Multiple concurrent or sequential `close()` calls execute cleanup
-      exactly once without resource leaks.
-    - Cancellation resilience: Cleanup runs within an owned supervisory task, ensuring
-      that outer task cancellation does not prevent capacity lease release.
-    - Zero orphan tasks: All spawned worker tasks are cancelled, observed, and awaited on termination.
-    - Diagnostic privacy: Task names and terminal outcomes use safe synthetic names and canonical summaries.
-    - Stale callback isolation: Callbacks reference this supervisor instance; closing does
-      not affect subsequent supervisors even if the same connection ID is re-admitted.
-    """
+class _BaseConnectionSupervisor:
+    """Shared per-connection async task supervisor and lifecycle state machine manager."""
 
     MAX_FALLBACK_ATTEMPTS: Final[int] = 1
 
     __slots__ = (
-        "_context",
         "_controller",
         "_policy",
         "_state",
         "_outcome",
-        "_lease",
         "_worker_factories",
         "_worker_tasks",
         "_resources",
@@ -228,24 +215,17 @@ class ConnectionSupervisor:
     def __init__(
         self,
         *,
-        context: VerifiedConnectionContext,
         controller: AdmissionController,
         policy: LifecyclePolicy | None = None,
     ) -> None:
-        if not isinstance(context, VerifiedConnectionContext):
-            raise TypeError(
-                f"context must be a VerifiedConnectionContext instance, got {type(context).__name__}"
-            )
         if not isinstance(controller, AdmissionController):
             raise TypeError(
                 f"controller must be an AdmissionController instance, got {type(controller).__name__}"
             )
 
-        self._context: VerifiedConnectionContext = context
         self._controller: AdmissionController = controller
         self._policy: LifecyclePolicy = policy if policy is not None else LifecyclePolicy()
         self._outcome: ConnectionOutcome | None = None
-        self._lease: AdmissionLease | None = None
         self._state: ConnectionState = ConnectionState.NEW
         self._worker_factories: list[Callable[[], Coroutine[Any, Any, None]]] = []
         self._worker_tasks: list[asyncio.Task[None]] = []
@@ -259,17 +239,12 @@ class ConnectionSupervisor:
     @property
     def connection_id(self) -> str:
         """Return canonical connection identifier for this supervised connection."""
-        return self._context.connection_id
+        raise NotImplementedError
 
     @property
     def tenant_id(self) -> str:
         """Return canonical tenant identifier for this supervised connection."""
-        return self._context.tenant_id
-
-    @property
-    def context(self) -> VerifiedConnectionContext:
-        """Return the verified connection context bound to this supervisor."""
-        return self._context
+        raise NotImplementedError
 
     @property
     def controller(self) -> AdmissionController:
@@ -286,10 +261,13 @@ class ConnectionSupervisor:
         """Return current lifecycle state."""
         return self._state
 
-    @property
-    def lease(self) -> AdmissionLease | None:
-        """Return active AdmissionLease if admitted, or None."""
-        return self._lease
+    async def _acquire_lease(self) -> None:
+        """Acquire the capacity lease bound to this supervisor."""
+        raise NotImplementedError
+
+    def _active_lease_ref(self) -> AdmissionLease | PrincipalAdmissionLease | None:
+        """Return whichever lease is active on this supervisor."""
+        raise NotImplementedError
 
     @property
     def outcome(self) -> ConnectionOutcome | None:
@@ -335,7 +313,7 @@ class ConnectionSupervisor:
 
             try:
                 async with asyncio.timeout(self._policy.startup_timeout):
-                    lease = await self._controller.acquire(self._context)
+                    await self._acquire_lease()
             except AdmissionError:
                 self._transition_to(ConnectionState.REJECTED)
                 self._outcome = ConnectionOutcome(
@@ -371,7 +349,6 @@ class ConnectionSupervisor:
                 self._closed_event.set()
                 raise
 
-            self._lease = lease
             self._transition_to(ConnectionState.ADMITTED)
             return True
 
@@ -615,9 +592,10 @@ class ConnectionSupervisor:
             if self._state.is_terminal:
                 assert self._outcome is not None
                 # If a prior cleanup was cancelled leaving the lease active, retry release now
-                if self._lease is not None and self._lease.is_active:
+                active_lease = self._active_lease_ref()
+                if active_lease is not None and active_lease.is_active:
                     try:
-                        await self._lease.release()
+                        await active_lease.release()
                     except Exception:
                         pass
                 return self._outcome
@@ -710,18 +688,19 @@ class ConnectionSupervisor:
                     actual_reason = TerminalReason.TIMEOUT
 
             # 4. Release admission lease (idempotent, retry-safe with dedicated bounded window)
-            if self._lease is not None:
+            active_lease = self._active_lease_ref()
+            if active_lease is not None:
                 lease_window = min(1.0, max(0.1, self._policy.cleanup_timeout))
                 for _ in range(3):
-                    if not self._lease.is_active:
+                    if not active_lease.is_active:
                         break
                     try:
                         async with asyncio.timeout(lease_window):
-                            await self._lease.release()
+                            await active_lease.release()
                         break
                     except Exception:
                         pass
-                if self._lease.is_active:
+                if active_lease.is_active:
                     actual_terminal = ConnectionState.FAILED
                     actual_reason = TerminalReason.CLEANUP_FAILED
 
@@ -762,9 +741,6 @@ class ConnectionSupervisor:
         """Wait until connection reaches a terminal lifecycle state (alias for wait())."""
         return await self.wait()
 
-    async def __aenter__(self) -> ConnectionSupervisor:
-        return self
-
     async def __aexit__(
         self,
         exc_type: type[BaseException] | None,
@@ -782,7 +758,130 @@ class ConnectionSupervisor:
             await self.close(reason=TerminalReason.NORMAL)
 
     def __repr__(self) -> str:
-        return f"ConnectionSupervisor(state={self._state.value!r})"
+        return f"{type(self).__name__}(state={self._state.value!r})"
+
+
+class ConnectionSupervisor(_BaseConnectionSupervisor):
+    """Per-connection async task supervisor for verified call-scoped connections.
+
+    Invariants (M2.4A):
+    - Single lifecycle owner: Owns the connection's state transitions and worker tasks.
+    - Single lease ownership by construction: Supervisor acquires and owns its dedicated lease
+      via `admit()`; no external lease injection or module-level shared registries.
+    - Guarded state machine: Transitions strictly adhere to `_ALLOWED_TRANSITIONS`.
+    - Admission bound: Cannot enter `ACTIVE` without a valid `AdmissionLease` acquired via `admit()`.
+    - Sibling cancellation: If any worker task raises an unhandled error, sibling tasks
+      are deterministically cancelled and awaited before cleanup.
+    - Idempotent cleanup: Multiple concurrent or sequential `close()` calls execute cleanup
+      exactly once without resource leaks.
+    - Cancellation resilience: Cleanup runs within an owned supervisory task, ensuring
+      that outer task cancellation does not prevent capacity lease release.
+    - Zero orphan tasks: All spawned worker tasks are cancelled, observed, and awaited on termination.
+    - Diagnostic privacy: Task names and terminal outcomes use safe synthetic names and canonical summaries.
+    - Stale callback isolation: Callbacks reference this supervisor instance; closing does
+      not affect subsequent supervisors even if the same connection ID is re-admitted.
+    """
+
+    __slots__ = ("_context", "_lease")
+
+    def __init__(
+        self,
+        *,
+        context: VerifiedConnectionContext,
+        controller: AdmissionController,
+        policy: LifecyclePolicy | None = None,
+    ) -> None:
+        if not isinstance(context, VerifiedConnectionContext):
+            raise TypeError(
+                f"context must be a VerifiedConnectionContext instance, got {type(context).__name__}"
+            )
+        super().__init__(controller=controller, policy=policy)
+        self._context: VerifiedConnectionContext = context
+        self._lease: AdmissionLease | None = None
+
+    @property
+    def connection_id(self) -> str:
+        """Return canonical connection identifier for this supervised connection."""
+        return self._context.connection_id
+
+    @property
+    def tenant_id(self) -> str:
+        """Return canonical tenant identifier for this supervised connection."""
+        return self._context.tenant_id
+
+    @property
+    def context(self) -> VerifiedConnectionContext:
+        """Return the verified connection context bound to this supervisor."""
+        return self._context
+
+    @property
+    def lease(self) -> AdmissionLease | None:
+        """Return active AdmissionLease if admitted, or None."""
+        return self._lease
+
+    async def _acquire_lease(self) -> None:
+        self._lease = await self._controller.acquire(self._context)
+
+    def _active_lease_ref(self) -> AdmissionLease | None:
+        return self._lease
+
+    async def __aenter__(self) -> ConnectionSupervisor:
+        return self
+
+
+class PrincipalConnectionSupervisor(_BaseConnectionSupervisor):
+    """Per-connection async task supervisor for verified principal-scoped connections."""
+
+    __slots__ = ("_context", "_principal_lease")
+
+    def __init__(
+        self,
+        *,
+        context: VerifiedPrincipalContext,
+        controller: AdmissionController,
+        policy: LifecyclePolicy | None = None,
+    ) -> None:
+        if not isinstance(context, VerifiedPrincipalContext):
+            raise TypeError(
+                f"context must be a VerifiedPrincipalContext instance, got {type(context).__name__}"
+            )
+        super().__init__(controller=controller, policy=policy)
+        self._context: VerifiedPrincipalContext = context
+        self._principal_lease: PrincipalAdmissionLease | None = None
+
+    @property
+    def connection_id(self) -> str:
+        """Return canonical connection identifier for this supervised connection."""
+        return self._context.connection_id
+
+    @property
+    def tenant_id(self) -> str:
+        """Return canonical tenant identifier for this supervised connection."""
+        return self._context.tenant_id
+
+    @property
+    def context(self) -> VerifiedPrincipalContext:
+        """Return the verified principal context bound to this supervisor."""
+        return self._context
+
+    @property
+    def lease(self) -> PrincipalAdmissionLease | None:
+        """Return active PrincipalAdmissionLease if admitted, or None."""
+        return self._principal_lease
+
+    @property
+    def principal_lease(self) -> PrincipalAdmissionLease | None:
+        """Return active PrincipalAdmissionLease if admitted, or None."""
+        return self._principal_lease
+
+    async def _acquire_lease(self) -> None:
+        self._principal_lease = await self._controller.acquire_principal(self._context)
+
+    def _active_lease_ref(self) -> PrincipalAdmissionLease | None:
+        return self._principal_lease
+
+    async def __aenter__(self) -> PrincipalConnectionSupervisor:
+        return self
 
 
 __all__ = [
@@ -790,5 +889,6 @@ __all__ = [
     "ConnectionState",
     "ConnectionSupervisor",
     "LifecyclePolicy",
+    "PrincipalConnectionSupervisor",
     "TerminalReason",
 ]

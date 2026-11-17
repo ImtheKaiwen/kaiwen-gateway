@@ -143,6 +143,19 @@ class CallId:
 
 
 @dataclass(frozen=True, slots=True)
+class PrincipalId:
+    """Immutable value object representing a Gateway-trusted principal identifier."""
+
+    value: str
+
+    def __post_init__(self) -> None:
+        _validate_canonical_id(self.value, field_name="principal_id")
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@dataclass(frozen=True, slots=True)
 class PermissionScope:
     """Immutable value object representing a single canonical permission scope."""
 
@@ -174,6 +187,13 @@ def validate_connection_id(connection_id: object) -> str:
     if isinstance(connection_id, ConnectionId):
         return connection_id.value
     return _validate_canonical_id(connection_id, field_name="connection_id")
+
+
+def validate_principal_id(principal_id: object) -> str:
+    """Validate a principal identifier (``str`` or :class:`PrincipalId`)."""
+    if isinstance(principal_id, PrincipalId):
+        return principal_id.value
+    return _validate_canonical_id(principal_id, field_name="principal_id")
 
 
 def validate_call_id(call_id: object) -> str:
@@ -711,6 +731,249 @@ async def resolve_verified_connection_context(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class TenantPrincipalBinding:
+    """Server-owned authorization decision binding a provider to a tenant, principal, and scopes.
+
+    Used for non-call modules (such as Events) without fabricating synthetic ``call_id`` values.
+    """
+
+    authorized_provider_id: str
+    tenant_id: str
+    principal_id: str
+    allowed_scopes: frozenset[str] = frozenset()
+
+    def __init__(
+        self,
+        *,
+        authorized_provider_id: str | ProviderId,
+        tenant_id: str | TenantId,
+        principal_id: str | PrincipalId,
+        allowed_scopes: Iterable[str | PermissionScope] = (),
+    ) -> None:
+        canonical_provider = validate_provider_id(authorized_provider_id)
+        canonical_tenant = validate_tenant_id(tenant_id)
+        canonical_principal = validate_principal_id(principal_id)
+        canonical_scopes = validate_scopes(allowed_scopes, field_name="allowed_scopes")
+
+        object.__setattr__(self, "authorized_provider_id", canonical_provider)
+        object.__setattr__(self, "tenant_id", canonical_tenant)
+        object.__setattr__(self, "principal_id", canonical_principal)
+        object.__setattr__(self, "allowed_scopes", canonical_scopes)
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedPrincipalContext:
+    """Immutable, server-verified connection and principal security context (no ``call_id``)."""
+
+    provider_id: str
+    tenant_id: str
+    connection_id: str
+    principal_id: str
+    allowed_scopes: frozenset[str] = frozenset()
+
+    def __init__(
+        self,
+        *,
+        provider_id: str | ProviderId,
+        tenant_id: str | TenantId,
+        connection_id: str | ConnectionId,
+        principal_id: str | PrincipalId,
+        allowed_scopes: Iterable[str | PermissionScope] = (),
+    ) -> None:
+        canonical_provider = validate_provider_id(provider_id)
+        canonical_tenant = validate_tenant_id(tenant_id)
+        canonical_conn = validate_connection_id(connection_id)
+        canonical_principal = validate_principal_id(principal_id)
+        canonical_scopes = validate_scopes(allowed_scopes, field_name="allowed_scopes")
+
+        object.__setattr__(self, "provider_id", canonical_provider)
+        object.__setattr__(self, "tenant_id", canonical_tenant)
+        object.__setattr__(self, "connection_id", canonical_conn)
+        object.__setattr__(self, "principal_id", canonical_principal)
+        object.__setattr__(self, "allowed_scopes", canonical_scopes)
+
+    @property
+    def provider(self) -> ProviderId:
+        """Return the typed :class:`ProviderId` value object."""
+        return ProviderId(self.provider_id)
+
+    @property
+    def tenant(self) -> TenantId:
+        """Return the typed :class:`TenantId` value object."""
+        return TenantId(self.tenant_id)
+
+    @property
+    def connection(self) -> ConnectionId:
+        """Return the typed :class:`ConnectionId` value object."""
+        return ConnectionId(self.connection_id)
+
+    @property
+    def principal(self) -> PrincipalId:
+        """Return the typed :class:`PrincipalId` value object."""
+        return PrincipalId(self.principal_id)
+
+    def has_scope(self, scope: str | PermissionScope) -> bool:
+        """Return ``True`` if canonical ``scope`` is granted in ``allowed_scopes``."""
+        canonical = validate_scope(scope, field_name="scope")
+        return canonical in self.allowed_scopes
+
+    def require_scope(self, scope: str | PermissionScope) -> None:
+        """Verify that ``scope`` is granted in ``allowed_scopes`` or raise ``IdentityAuthorizationError``."""
+        canonical = validate_scope(scope, field_name="scope")
+        if canonical not in self.allowed_scopes:
+            raise IdentityAuthorizationError(
+                "Required permission scope is not granted in this VerifiedPrincipalContext"
+            )
+
+    def require_tenant_and_principal(
+        self,
+        *,
+        tenant_id: str | TenantId,
+        principal_id: str | PrincipalId | None = None,
+    ) -> None:
+        """Verify that a target operation matches this context's trusted tenant (and optional principal)."""
+        canonical_tenant = validate_tenant_id(tenant_id)
+        if canonical_tenant != self.tenant_id:
+            raise IdentityAuthorizationError(
+                "Cross-tenant access denied: target tenant_id does not match verified context"
+            )
+        if principal_id is not None:
+            canonical_principal = validate_principal_id(principal_id)
+            if canonical_principal != self.principal_id:
+                raise IdentityAuthorizationError(
+                    "Cross-principal access denied: target principal_id does not match verified context"
+                )
+
+
+@runtime_checkable
+class PrincipalAuthorizationPort(Protocol):
+    """Application/policy port that authorizes a tenant, principal, and scopes for a provider."""
+
+    async def authorize_principal(
+        self,
+        *,
+        principal: ProviderPrincipal,
+        connection_id: str,
+        claims: UntrustedConnectionClaims,
+    ) -> TenantPrincipalBinding:
+        """Authorize a tenant/principal binding for ``principal`` or raise :class:`IdentityAuthorizationError`."""
+
+
+def bind_verified_principal_context(
+    *,
+    principal: ProviderPrincipal,
+    binding: TenantPrincipalBinding,
+    connection_id: str | ConnectionId,
+    untrusted_claims: UntrustedConnectionClaims | None = None,
+) -> VerifiedPrincipalContext:
+    """Bind an authenticated :class:`ProviderPrincipal` and :class:`TenantPrincipalBinding` into :class:`VerifiedPrincipalContext`."""
+    if not isinstance(principal, ProviderPrincipal):
+        raise InvalidIdentityError(
+            "principal",
+            f"must be a ProviderPrincipal instance, got {type(principal).__name__}",
+        )
+    if not isinstance(binding, TenantPrincipalBinding):
+        raise InvalidIdentityError(
+            "binding",
+            f"must be a TenantPrincipalBinding instance, got {type(binding).__name__}",
+        )
+    canonical_connection_id = validate_connection_id(connection_id)
+
+    if untrusted_claims is not None and not isinstance(untrusted_claims, UntrustedConnectionClaims):
+        raise InvalidIdentityError(
+            "untrusted_claims",
+            f"must be an UntrustedConnectionClaims instance or None, "
+            f"got {type(untrusted_claims).__name__}",
+        )
+
+    if principal.provider_id != binding.authorized_provider_id:
+        raise IdentityAuthorizationError(
+            "Authenticated provider_id does not match binding.authorized_provider_id"
+        )
+
+    if untrusted_claims is not None:
+        if (
+            untrusted_claims.claimed_provider_id is not None
+            and untrusted_claims.claimed_provider_id != principal.provider_id
+        ):
+            raise IdentityAuthorizationError(
+                "Untrusted claimed_provider_id conflicts with authenticated provider principal"
+            )
+        if (
+            untrusted_claims.claimed_tenant_id is not None
+            and untrusted_claims.claimed_tenant_id != binding.tenant_id
+        ):
+            raise IdentityAuthorizationError(
+                "Untrusted claimed_tenant_id conflicts with server-authorized tenant_id"
+            )
+        if not untrusted_claims.claimed_scopes.issubset(binding.allowed_scopes):
+            raise IdentityAuthorizationError(
+                "Untrusted claimed_scopes attempt to escalate beyond server-authorized allowed_scopes"
+            )
+
+    return VerifiedPrincipalContext(
+        provider_id=principal.provider_id,
+        tenant_id=binding.tenant_id,
+        connection_id=canonical_connection_id,
+        principal_id=binding.principal_id,
+        allowed_scopes=binding.allowed_scopes,
+    )
+
+
+async def resolve_verified_principal_context(
+    *,
+    authenticator: ProviderAuthenticatorPort,
+    authorizer: PrincipalAuthorizationPort,
+    connection_id: str | ConnectionId,
+    untrusted_claims: UntrustedConnectionClaims | None = None,
+) -> VerifiedPrincipalContext:
+    """Authenticate provider first, authorize tenant/principal second, and bind immutable context."""
+    if not isinstance(authenticator, ProviderAuthenticatorPort):
+        raise InvalidIdentityError(
+            "authenticator",
+            f"must satisfy ProviderAuthenticatorPort, got {type(authenticator).__name__}",
+        )
+    if not isinstance(authorizer, PrincipalAuthorizationPort):
+        raise InvalidIdentityError(
+            "authorizer",
+            f"must satisfy PrincipalAuthorizationPort, got {type(authorizer).__name__}",
+        )
+    canonical_conn_id = validate_connection_id(connection_id)
+    claims = UntrustedConnectionClaims() if untrusted_claims is None else untrusted_claims
+    if not isinstance(claims, UntrustedConnectionClaims):
+        raise InvalidIdentityError(
+            "untrusted_claims",
+            f"must be an UntrustedConnectionClaims instance or None, got {type(claims).__name__}",
+        )
+
+    principal = await authenticator.authenticate_provider(
+        connection_id=canonical_conn_id,
+        claims=claims,
+    )
+    if not isinstance(principal, ProviderPrincipal):
+        raise InvalidIdentityError(
+            "principal",
+            f"authenticator must return a ProviderPrincipal instance, "
+            f"got {type(principal).__name__}",
+        )
+
+    binding = await authorizer.authorize_principal(
+        principal=principal,
+        connection_id=canonical_conn_id,
+        claims=claims,
+    )
+    return bind_verified_principal_context(
+        principal=principal,
+        binding=binding,
+        connection_id=canonical_conn_id,
+        untrusted_claims=claims,
+    )
+
+
+VerifiedConnectionIdentity = VerifiedConnectionContext | VerifiedPrincipalContext
+
+
 __all__ = [
     "CallAuthorizationPort",
     "CallId",
@@ -722,18 +985,26 @@ __all__ = [
     "MAX_SCOPE_LENGTH",
     "PROVIDER_CALL_REF_PATTERN",
     "PermissionScope",
+    "PrincipalAuthorizationPort",
+    "PrincipalId",
     "ProviderAuthenticatorPort",
     "ProviderId",
     "ProviderPrincipal",
     "SCOPE_NAME_PATTERN",
     "TenantCallBinding",
     "TenantId",
+    "TenantPrincipalBinding",
     "UntrustedConnectionClaims",
     "VerifiedConnectionContext",
+    "VerifiedConnectionIdentity",
+    "VerifiedPrincipalContext",
     "bind_verified_connection_context",
+    "bind_verified_principal_context",
     "resolve_verified_connection_context",
+    "resolve_verified_principal_context",
     "validate_call_id",
     "validate_connection_id",
+    "validate_principal_id",
     "validate_provider_call_ref",
     "validate_provider_id",
     "validate_scope",
