@@ -268,10 +268,20 @@ class EventEnvelope:
             raise InvalidEventError("max_event_bytes must be a positive int")
         if self.max_event_bytes <= 0:
             raise InvalidEventError("max_event_bytes must be positive")
+        if self.max_event_bytes > DEFAULT_MAX_EVENT_BYTES:
+            raise InvalidEventError(
+                f"max_event_bytes ({self.max_event_bytes}) cannot exceed canonical v1 limit "
+                f"{DEFAULT_MAX_EVENT_BYTES}"
+            )
         if not isinstance(self.max_json_depth, int) or isinstance(self.max_json_depth, bool):
             raise InvalidEventError("max_json_depth must be a positive int")
         if self.max_json_depth <= 0:
             raise InvalidEventError("max_json_depth must be positive")
+        if self.max_json_depth > DEFAULT_MAX_JSON_DEPTH:
+            raise InvalidEventError(
+                f"max_json_depth ({self.max_json_depth}) cannot exceed canonical v1 limit "
+                f"{DEFAULT_MAX_JSON_DEPTH}"
+            )
 
         object.__setattr__(self, "event_id", validate_event_id(self.event_id))
         object.__setattr__(self, "event_type", validate_event_type(self.event_type))
@@ -356,6 +366,8 @@ class PublishResult:
     delivered_subscribers: int
     dropped_subscribers: int
     disconnected_subscribers: int
+    dropped_global_budget: int = 0
+    accepted: bool = True
     durable_persisted: bool = False
 
 

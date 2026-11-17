@@ -66,8 +66,8 @@ Provider-neutral domain and streaming contracts (zero external provider dependen
 ### 3.7 Events Domain & Foundation (`kaiwen_gateway.modules.events`)
 Framework-independent Events foundation (zero mandatory third-party dependencies):
 - **Domain & Validation:** `EVENTS_PROTOCOL_VERSION`, `EventEnvelope`, `PublishResult`, `DurableEventRecord`, `SlowConsumerPolicy`, `EventDeliveryOutcome`, `validate_event_id`, `validate_event_type`, `validate_topic`, `validate_topic_pattern`, `topic_matches_pattern`, `validate_correlation_id`, `validate_timestamp`
-- **Ports:** `EventSubscription`, `EventPublisherPort`, `EventSubscriptionPort`, `EventBrokerPort`, `DurableEventStorePort`
-- **Broker, Rate Limiter, Module & Telemetry:** `EventBrokerConfig`, `EventBrokerStats`, `InMemoryEventBroker`, `InMemoryEventSubscription`, `RateLimitConfig`, `RateLimitDecision`, `TokenBucketRateLimiter`, `EventsModule`, `EventsTelemetrySink`, `InMemoryEventsTelemetrySink`, `EventsMetricsSnapshot`, `EventsErrorCategory`
+- **Ports:** `EventSubscription`, `EventConnectionConsumer`, `EventPublisherPort`, `EventSubscriptionPort`, `EventBrokerPort`, `DurableEventStorePort`
+- **Broker, Rate Limiter, Module & Telemetry:** `EventBrokerConfig`, `EventBrokerStats`, `InMemoryEventBroker`, `InMemoryEventConsumer`, `InMemoryEventSubscription`, `DEFAULT_PUBLISH_RATE_PER_SECOND`, `DEFAULT_PUBLISH_BURST`, `DEFAULT_SUBSCRIBE_RATE_PER_SECOND`, `DEFAULT_SUBSCRIBE_BURST`, `RateLimitConfig`, `RateLimitDecision`, `TokenBucketRateLimiter`, `EventsModule`, `EventsTelemetrySink`, `InMemoryEventsTelemetrySink`, `EventsMetricsSnapshot`, `EventsErrorCategory`
 - **Events Exceptions:** `EventsError`, `InvalidEventError`, `OversizedEventError`, `UnsupportedEventVersionError`, `EventAuthorizationError`, `EventRateLimitError`, `EventBackpressureError`, `EventsModuleClosedError`
 
 ---

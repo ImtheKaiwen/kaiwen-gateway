@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from kaiwen_gateway.modules.events.broker import (
+    DEFAULT_PUBLISH_BURST,
+    DEFAULT_PUBLISH_RATE_PER_SECOND,
+    DEFAULT_SUBSCRIBE_BURST,
+    DEFAULT_SUBSCRIBE_RATE_PER_SECOND,
     EventBrokerConfig,
     EventBrokerStats,
     InMemoryEventBroker,
+    InMemoryEventConsumer,
     InMemoryEventSubscription,
 )
 from kaiwen_gateway.modules.events.domain import (
@@ -50,6 +55,7 @@ from kaiwen_gateway.modules.events.module import EventsModule
 from kaiwen_gateway.modules.events.ports import (
     DurableEventStorePort,
     EventBrokerPort,
+    EventConnectionConsumer,
     EventPublisherPort,
     EventSubscription,
     EventSubscriptionPort,
@@ -78,6 +84,10 @@ __all__ = [
     "DEFAULT_MAX_QUEUED_EVENTS_PER_CONNECTION",
     "DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION",
     "DEFAULT_MAX_TOPIC_LENGTH",
+    "DEFAULT_PUBLISH_BURST",
+    "DEFAULT_PUBLISH_RATE_PER_SECOND",
+    "DEFAULT_SUBSCRIBE_BURST",
+    "DEFAULT_SUBSCRIBE_RATE_PER_SECOND",
     "DurableEventRecord",
     "DurableEventStorePort",
     "EVENTS_PROTOCOL_VERSION",
@@ -88,6 +98,7 @@ __all__ = [
     "EventBrokerConfig",
     "EventBrokerPort",
     "EventBrokerStats",
+    "EventConnectionConsumer",
     "EventDeliveryOutcome",
     "EventEnvelope",
     "EventPublisherPort",
@@ -101,6 +112,7 @@ __all__ = [
     "EventsModuleClosedError",
     "EventsTelemetrySink",
     "InMemoryEventBroker",
+    "InMemoryEventConsumer",
     "InMemoryEventSubscription",
     "InMemoryEventsTelemetrySink",
     "InvalidEventError",

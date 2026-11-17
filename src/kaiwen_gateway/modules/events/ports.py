@@ -15,7 +15,11 @@ from kaiwen_gateway.modules.events.domain import (
 
 @runtime_checkable
 class EventSubscription(Protocol):
-    """Handle representing an active topic subscription on a subscriber connection."""
+    """Registration and lifecycle handle for a topic subscription on a connection.
+
+    Subscriptions do not expose per-subscription `receive()` methods because all
+    subscriptions on a connection share a single multiplexed bounded outbound queue.
+    """
 
     @property
     def subscription_id(self) -> str:
@@ -42,12 +46,31 @@ class EventSubscription(Protocol):
         """Return True while this subscription and its underlying connection remain active."""
         ...
 
-    async def receive(self) -> EventEnvelope:
-        """Await the next delivered event from the connection's bounded queue."""
+    async def close(self) -> None:
+        """Unsubscribe this handle cleanly and idempotently."""
+        ...
+
+
+@runtime_checkable
+class EventConnectionConsumer(Protocol):
+    """Single connection-level consumer draining the multiplexed outbound queue."""
+
+    @property
+    def connection_id(self) -> str:
+        """Return canonical connection identifier bound to this consumer."""
+        ...
+
+    @property
+    def is_active(self) -> bool:
+        """Return True while the underlying subscriber connection remains open."""
+        ...
+
+    async def receive(self) -> EventEnvelope | None:
+        """Await the next multiplexed event for this connection, or None on close."""
         ...
 
     async def close(self) -> None:
-        """Unsubscribe this handle cleanly and idempotently."""
+        """Close the subscriber connection and release all queued bytes."""
         ...
 
     def __aiter__(self) -> AsyncIterator[EventEnvelope]: ...
@@ -83,40 +106,73 @@ class EventSubscriptionPort(Protocol):
 
 @runtime_checkable
 class EventBrokerPort(EventPublisherPort, EventSubscriptionPort, Protocol):
-    """Combined broker port for E1 in-memory and future E3 distributed implementations."""
+    """Unified live broker port for E1 in-memory and future E3 distributed adapters."""
+
+    async def startup(self) -> None:
+        """Initialize broker state for accepting subscriptions and publishes."""
+        ...
+
+    async def shutdown(self) -> None:
+        """Shut down the broker and release all connections and memory budgets."""
+        ...
+
+    def consumer(self, connection_id: str) -> EventConnectionConsumer:
+        """Return the connection-level consumer for `connection_id`."""
+        ...
 
     async def close_connection(self, connection_id: str) -> int:
         """Close all subscriptions and release queued bytes for a subscriber connection."""
         ...
 
-    async def close(self) -> None:
-        """Shut down the broker and release all connections and memory budgets."""
-        ...
-
 
 @runtime_checkable
 class DurableEventStorePort(Protocol):
-    """Interface-only durability port reserved for future E4 replay/streaming."""
+    """Interface-only durability port reserved for future E4 Redis Streams adapters."""
 
-    async def append(self, envelope: EventEnvelope) -> DurableEventRecord:
-        """Persist an event envelope and return its durable sequence record."""
+    async def append(self, event: EventEnvelope) -> str:
+        """Append an event envelope and return its stream entry identifier."""
         ...
 
-    async def read_since(
+    async def read_group(
         self,
-        tenant_id: str,
-        topic_pattern: str,
-        after_sequence_id: str | None = None,
         *,
+        tenant_id: str,
+        topic: str,
+        group: str,
+        consumer: str,
+        count: int,
+        block_ms: int,
+    ) -> list[DurableEventRecord]:
+        """Read unacknowledged/new records for a consumer group."""
+        ...
+
+    async def ack(
+        self,
+        *,
+        tenant_id: str,
+        topic: str,
+        group: str,
+        record_ids: Sequence[str],
+    ) -> int:
+        """Acknowledge processed stream records and return the count acknowledged."""
+        ...
+
+    async def replay(
+        self,
+        *,
+        tenant_id: str,
+        topic: str,
+        from_id: str = "0-0",
         limit: int = 100,
-    ) -> Sequence[DurableEventRecord]:
-        """Read persisted events for a tenant/pattern after an optional sequence cursor."""
+    ) -> list[DurableEventRecord]:
+        """Replay retained events from a stream cursor within retention bounds."""
         ...
 
 
 __all__ = [
     "DurableEventStorePort",
     "EventBrokerPort",
+    "EventConnectionConsumer",
     "EventPublisherPort",
     "EventSubscription",
     "EventSubscriptionPort",
