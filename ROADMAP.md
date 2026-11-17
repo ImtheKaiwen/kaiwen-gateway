@@ -282,16 +282,16 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - **Explicit non-goals:** No Python implementation, no `redis` dependency, no `ADR-0006` self-acceptance, no Notifications or Agent Streaming implementation.
 
 #### E1 — Events Foundation (`Not started`)
-- **Scope:** `src/kaiwen_gateway/modules/events/` (`EventEnvelope`, topic validation, `EventPublisherPort`, `EventSubscriptionPort`, `EventBrokerPort`, `DurableEventStorePort`, `EventsTelemetrySink`, `EventsModule`, `InMemoryEventBroker`, process-local `TokenBucketRateLimiter`, and additive `TenantPrincipalBinding` / `VerifiedPrincipalContext` in Core if approved).
+- **Scope:** `src/kaiwen_gateway/modules/events/` (`EventEnvelope`, topic validation, `EventPublisherPort`, `EventSubscriptionPort`, `EventBrokerPort`, `DurableEventStorePort`, `EventsTelemetrySink`, `EventsModule`, `InMemoryEventBroker`, single per-connection byte-bounded queue, process-local `TokenBucketRateLimiter`, and additive `TenantPrincipalBinding` / `VerifiedPrincipalContext` / `PrincipalAdmissionLease` in Core preserving `AdmissionLease.call_id: str` untouched).
 - **Prerequisites:** Maintainer approval of `D0` and `ADR-0006`.
-- **Deliverables & Test evidence:** Unit and broker conformance tests verifying multi-tenant isolation, bounded slow-consumer queues, rate limiting, `ModuleLifecycleManager` startup/shutdown, and zero-`redis` import isolation.
+- **Deliverables & Test evidence:** Unit and broker conformance tests verifying multi-tenant isolation, `1 MiB`/conn & `32 MiB` global byte-bound queues, rate limiting, `PrincipalAdmissionLease` shared capacity & zero-leak release, `ModuleLifecycleManager` startup/shutdown, and zero-`redis` import isolation.
 - **Exit gate:** `mypy`, `ruff`, and offline unit/conformance suites pass with `0` skips.
 - **Explicit non-goals:** No `/ws/events/v1` endpoint, no Redis client, no Notifications or Agent Streaming.
 
 #### E2 — WebSocket Events & Security (`Not started`)
-- **Scope:** `src/kaiwen_gateway/transports/events/` (`/ws/events/v1` endpoint, bearer auth, `events.subscribe` / `events.unsubscribe` / `session.ping` / `events.delivery`, `64 KiB` frame limit, unauthorized wildcard/publish denial, connection/idle/drain cleanup).
+- **Scope:** `src/kaiwen_gateway/transports/events/` (`/ws/events/v1` endpoint, explicit `events_ingress_mode="authenticated"` + `enable_events=True` fail-closed wiring, `Authorization: Bearer` + single-use `Origin`-checked browser ticket auth, `events.subscribe` / `events.unsubscribe` / `session.ping` / `events.delivery`, `64 KiB` frame limit, unauthorized wildcard/publish denial, slow-consumer `1008` disconnect, and drain cleanup).
 - **Prerequisites:** `E1` complete.
-- **Deliverables & Test evidence:** Loopback ASGI/WebSocket security and lifecycle tests covering forged tenant rejection, unauthorized wildcard rejection, `1009` oversized close, slow-consumer disconnect, and `DrainReport` clean shutdown.
+- **Deliverables & Test evidence:** Loopback ASGI/WebSocket security and lifecycle tests covering fail-closed app construction, expired/replayed/wrong-audience tickets, disallowed `Origin`s, `?token=` URL rejection, forged tenant rejection, unauthorized wildcard rejection, `1009` oversized close, slow-consumer disconnect, and `DrainReport` clean shutdown.
 - **Exit gate:** Security and WebSocket integration suite passes across Python 3.11–3.13.
 - **Explicit non-goals:** No Redis integration, no Notifications or Agent Streaming.
 

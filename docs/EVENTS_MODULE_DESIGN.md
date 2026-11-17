@@ -159,41 +159,63 @@ Client-to-server frames (`command` / `type` namespace) are strictly separated fr
 
 ---
 
-## 5. Security Model, Fail-Closed Ingress & Core Identity Integration (R1 & R5)
+## 5. Security Model, Fail-Closed Ingress, Browser Auth & Core Identity Compatibility (R1, R5, R6, R7, R8)
 
-### 5.1 Fail-Closed Events Ingress Configuration (R5)
-Enabling `/ws/events/v1` must never bypass Core ingress or authentication policies:
+### 5.1 Explicit Fail-Closed Events Ingress Configuration (R5 & R7)
+Enabling `/ws/events/v1` must never bypass Core's disabled-by-default posture, require synthetic Voice ingress, or allow an isolated boolean flag to expose an unauthenticated endpoint:
 
-1. **No Standalone `enable_events=True` Bypass:** Passing `enable_events=True` to `create_gateway_app(...)` when `CoreConfig.ingress_mode == "disabled"` **MUST** fail closed (either refusing to mount `/ws/events/v1` or raising `CoreConfigurationError` at app construction time).
-2. **Mandatory Authenticator / Authorizer Before Mount:** When Events WebSocket ingress is enabled (via an explicit authenticated Events ingress mode or `ingress_mode="synthetic"` / dedicated `events_auth_bridge` in `E2`), `create_gateway_app(...)` **MUST** require an explicit, non-None authenticator/verifier with replay protection enabled (or equivalent verified server-side credential verifier) and fail closed with `CoreConfigurationError` if missing.
-3. **Fail-Closed Defaults:** `CoreConfig.ingress_mode` remains `"disabled"` by default; Events WebSocket ingress defaults to `enable_events=False`.
+1. **Proposed `E2` Configuration API:**
+   - Keep `CoreConfig.ingress_mode` (`"disabled"` | `"synthetic"`) untouched for existing Voice/synthetic behavior.
+   - Add an explicit `events_ingress_mode: str = "disabled"` (`"disabled"` | `"authenticated"`) on `CoreConfig` (or an explicit `EventsIngressConfig`), plus `create_gateway_app(...)` parameters:
+     - `enable_events: bool = False`
+     - `events_authenticator: EventsAuthenticatorPort | None = None`
+     - `events_authorizer: EventsAuthorizerPort | None = None`
+     - `events_ticket_verifier: EventsTicketVerifierPort | None = None` (optional for browser tickets, or unified inside `events_authenticator`)
+     - `events_allowed_origins: tuple[str, ...] = ()` (explicit browser `Origin` allowlist)
+2. **Fail-Closed App-Construction Invariants (`CoreConfigurationError`):**
+   - `enable_events=True` with `events_ingress_mode="disabled"` **MUST** fail closed (`CoreConfigurationError`) at `create_gateway_app()` construction time.
+   - `enable_events=True` or `events_ingress_mode="authenticated"` without both `events_authenticator` and `events_authorizer` (or replay-protected verifier) **MUST** fail closed (`CoreConfigurationError`).
+   - Events can be enabled independently when `CoreConfig.ingress_mode == "disabled"` (Voice disabled, Events enabled) provided `events_ingress_mode == "authenticated"`, `enable_events=True`, and verified auth ports are supplied.
+   - No implicit production credentials or insecure fallback authenticators exist.
+3. **Positive & Negative Acceptance Scenarios (`E2`):**
+   - *Positive:* `CoreConfig(ingress_mode="disabled", events_ingress_mode="authenticated")` + `enable_events=True` + valid `events_authenticator`/`events_authorizer` mounts `/ws/events/v1` while keeping Voice endpoints disabled.
+   - *Positive:* Existing `create_gateway_app()` defaults (`ingress_mode="disabled"`, `events_ingress_mode="disabled"`, `enable_events=False`) continue rejecting all WebSocket upgrades unchanged.
+   - *Negative:* `create_gateway_app(enable_events=True)` without `events_ingress_mode="authenticated"` raises `CoreConfigurationError`.
+   - *Negative:* `create_gateway_app(CoreConfig(events_ingress_mode="authenticated"), enable_events=True)` without `events_authenticator` or `events_authorizer` raises `CoreConfigurationError`.
 
-### 5.2 Fail-Closed Trust Boundaries & Authorization (R5)
-1. **Authentication Before Privileged Operations:** `/ws/events/v1` authenticates bearer credentials (`Authorization: Bearer <token>`) **before** WebSocket `accept()` (rejecting invalid/missing/expired/replayed tokens pre-accept with HTTP `403` or `1008` without allocating subscriber queues or `AdmissionLease`s).
-2. **Server-Derived Tenant & Principal:** `tenant_id` and `principal_id` come **exclusively** from the verified server token/authenticator. Any `tenant_id` or `principal_id` inside a client JSON payload is ignored or rejected on mismatch (`1008`).
-3. **Subscription Authorization:** Every `events.subscribe` command checks the connection's immutable `allowed_scopes` (e.g., `events.subscribe` or scoped `events.subscribe.<topic_prefix>`) against `(verified_tenant_id, requested_topic)`. Wildcard patterns (`topic.*`) require an explicit wildcard scope (`events.subscribe.wildcard` or explicit prefix grant) and are denied by default (`events.error` `FORBIDDEN_SUBSCRIPTION`, or `1008` on policy abuse). Bare `*` is always rejected for public clients.
-4. **Server-Side Publish Authorization:** Public WebSocket clients cannot publish arbitrary events merely by holding an active connection; `events.publish` over `/ws/events/v1` is **disabled by default** and fails closed (`events.error` `FORBIDDEN_PUBLISH` / close `1008`). Trusted server-side publishers (Voice lifecycle hooks, Notifications, Agent Streaming) publish in-process via `EventPublisherPort` using server-verified `tenant_id` and `principal_id`.
-5. **Redaction & Resource Exhaustion Resistance:** Payloads are size-capped (`64 KiB` provisional), depth-capped (`16`), and never logged verbatim by default (`SEC-006`). Error responses use fixed sanitized codes.
+### 5.2 Browser-Compatible WebSocket Authentication Contract (R8)
+Because standard browser `WebSocket` APIs cannot set arbitrary `Authorization` headers during the handshake, `/ws/events/v1` defines two fail-closed authentication paths, both verified **before** `websocket.accept()`:
 
-### 5.3 Audit of Existing Core Identity & Backward-Compatible Integration (R1)
+1. **Server-to-Server / Python Clients (`Authorization: Bearer <token>`):**
+   - Reads `Authorization: Bearer <token>` from the HTTP upgrade headers and verifies it via the application-injected `EventsAuthenticatorPort` / `EventsAuthorizerPort`.
+2. **Browser Clients (Short-Lived, Scoped, Single-Use WebSocket Ticket):**
+   - **Application-Owned Issuance:** Gateway is **not** an identity provider. The consuming application's existing authenticated HTTP backend (e.g., `POST /api/events/ws-ticket`) mints a short-lived ticket (`ttl <= 30 s` provisional, `aud = "kaiwen-gateway:/ws/events/v1"`, server-derived `tenant_id`, `principal_id`, `allowed_scopes`, unique `jti` nonce, and bound `origin`).
+   - **Handshake Transport:** Browser connects via `wss://.../ws/events/v1?ticket=<single_use_ticket>`. Passing long-lived access tokens in query parameters (`?token=`, `?access_token=`, `?authorization=`) is **explicitly rejected** (`403`/`1008`).
+   - **Pre-Accept Verification, Origin & Replay Prevention:** Before `websocket.accept()`, the endpoint validates the `Origin` header against `events_allowed_origins` (rejecting mismatches pre-accept with `403`), verifies signature/expiry/audience via the injected `EventsTicketVerifierPort`, **atomically consumes** `jti` (single-use; process-local bounded cache in `E2` or Redis `SET NX EX` in `E3`), and binds `tenant_id` / `principal_id` strictly server-side.
+   - **Redaction & Browser Limitations:** Raw query strings, tickets, and bearer tokens are never written to logs (`SEC-006`). Honest limitations: browsers require an extra HTTPS `POST` before WebSocket connect; reverse-proxy access logs should strip `?ticket=` query parameters (mitigated by `<= 30 s` TTL + single-use consumption); and credential rotation requires opening a new WebSocket connection.
+   - **Deterministic Offline Security Tests (`E2`):** Test valid ticket pre-accept success, expired ticket rejection (`403`), wrong-audience ticket rejection, single-use replay rejection on second connect, disallowed `Origin` rejection, and rejection of `?token=` / `?access_token=` query parameters.
+
+### 5.3 Fail-Closed Trust Boundaries & Authorization (R5)
+1. **Authentication Before Privileged Operations:** Invalid/missing/expired/replayed credentials fail pre-accept (`403` / `1008`) without allocating subscriber queues or admission leases.
+2. **Server-Derived Tenant & Principal:** `tenant_id` and `principal_id` come **exclusively** from the verified server authenticator/ticket. Any `tenant_id` or `principal_id` in client JSON is ignored or rejected (`1008`).
+3. **Subscription Authorization:** Every `events.subscribe` checks immutable `allowed_scopes` against `(verified_tenant_id, requested_topic)`. Wildcard patterns (`topic.*`) require an explicit wildcard scope and are denied by default (`FORBIDDEN_SUBSCRIPTION`); bare `*` is always rejected for public clients.
+4. **Server-Side Publish Authorization:** `events.publish` over `/ws/events/v1` is **disabled by default** (`FORBIDDEN_PUBLISH` / `1008`). Trusted server-side modules publish in-process via `EventPublisherPort`.
+5. **Redaction & Resource Exhaustion Resistance:** Payloads are size-capped (`64 KiB` provisional), depth-capped (`16`), and never logged verbatim by default (`SEC-006`).
+
+### 5.4 Backward-Compatible `AdmissionLease` & Core Identity Integration (R1 & R6)
 - **Constraint Discovered in `core/`:**
-  - [`TenantCallBinding`](../src/kaiwen_gateway/core/identity.py#L400) and [`VerifiedConnectionContext`](../src/kaiwen_gateway/core/identity.py#L436) require a non-empty `call_id` (`validate_call_id`).
-  - [`AdmissionController.acquire(context)`](../src/kaiwen_gateway/core/admission.py#L170), [`AdmissionLease`](../src/kaiwen_gateway/core/admission.py#L63), and [`ConnectionSupervisor(context=..., controller=...)`](../src/kaiwen_gateway/core/lifecycle.py#L270) all type-check and store `VerifiedConnectionContext` (`tenant_id`, `connection_id`, `allowed_scopes`, `require_scope()`, `has_scope()`).
-  - Consequently, defining `VerifiedPrincipalContext` alone without integrating `AdmissionController`, `AdmissionLease`, and `ConnectionSupervisor` would either fail runtime/type checks or force Events to bypass Core admission and draining.
-- **Preferred Additive Solution (for `E1`/`E2`, zero changes in `D0`):**
-  1. **Keep `TenantCallBinding` & `VerifiedConnectionContext` intact for Voice:** `call_id` remains mandatory on `TenantCallBinding` and `VerifiedConnectionContext`; no Voice invariant is weakened and no fake `call_id` (e.g., `"events-none"`) is ever fabricated.
+  - [`TenantCallBinding`](../src/kaiwen_gateway/core/identity.py#L400) and [`VerifiedConnectionContext`](../src/kaiwen_gateway/core/identity.py#L436) require a non-empty `call_id`.
+  - [`AdmissionLease`](../src/kaiwen_gateway/core/admission.py#L63) exposes `call_id -> str` and `context -> VerifiedConnectionContext`. Weakening `AdmissionLease.call_id` to `str | None` would break strict `mypy` typing for existing Voice consumers.
+- **Preferred Backward-Compatible Solution (for `E1`/`E2`, zero changes in `D0`):**
+  1. **Preserve `TenantCallBinding`, `VerifiedConnectionContext`, and `AdmissionLease` (`call_id: str`) 100% unchanged for Voice.**
   2. **Add `TenantPrincipalBinding` & `VerifiedPrincipalContext` in `kaiwen_gateway.core.identity`:** Frozen dataclasses carrying `connection_id`, `provider_id`, `tenant_id`, `principal_id`, `allowed_scopes: frozenset[str]`, plus `has_scope()` / `require_scope()` / `require_tenant_and_principal()`.
-  3. **Define a Narrow Structural Protocol `VerifiedConnectionIdentity` (or `AdmissibleContext`) in `kaiwen_gateway.core.identity`:**
-     - Exposes `connection_id: str`, `tenant_id: str`, `provider_id: str`, `allowed_scopes: frozenset[str]`, `has_scope(scope: str) -> bool`, `require_scope(scope: str) -> None`.
-     - Satisfied by **both** `VerifiedConnectionContext` (Voice, retaining `call_id`) and `VerifiedPrincipalContext` (Events, carrying `principal_id` without `call_id`).
-  4. **Update `AdmissionController`, `AdmissionLease`, and `ConnectionSupervisor` Type Acceptance (Backward-Compatible):**
-     - Accept `VerifiedConnectionContext | VerifiedPrincipalContext` (via explicit `isinstance` check against the closed two-type union rather than arbitrary duck typing, preserving Core's fail-closed forge resistance).
-     - Expose `AdmissionLease.call_id: str | None` (`None` for principal leases, non-empty `str` for call leases) or a typed accessor without breaking Voice callers.
-     - `AdmissionController` continues to enforce global and per-tenant ceilings (`tenant_id`), deduplicate `connection_id`, and prune zero-count tenants identically for both Voice and Events.
-     - `ConnectionSupervisor` and `InstanceDrainCoordinator` supervise Events WebSocket connections with the exact same `ConnectionState` machine, `AdmissionLease` ownership, and `DrainReport` guarantees as Voice.
-- **Alternatives Considered & Rejected:**
-  - *Make `call_id: str | None = None` on `VerifiedConnectionContext`:* Rejected because Voice callers and `VoiceBridgeSession` rely on `context.call_id: str` always being non-empty; making it optional weakens static and runtime Voice invariants.
-  - *Duplicate a separate `EventsAdmissionController` and `EventsConnectionSupervisor` inside `modules/events/`:* Rejected because it would split global `max_concurrent_connections` / `max_connections_per_tenant` accounting and bypass `InstanceDrainCoordinator` during ASGI shutdown.
+  3. **Add `PrincipalAdmissionLease` as a Sibling Lease Class in `kaiwen_gateway.core.admission`:**
+     - Exposes `connection_id: str`, `tenant_id: str`, `provider_id: str`, `principal_id: str`, `context: VerifiedPrincipalContext`, `controller: AdmissionController`, `is_active: bool`, `async def release() -> bool` — **with no `call_id` attribute**.
+     - `AdmissionController.acquire()` uses `@overload` typing:
+       - `acquire(context: VerifiedConnectionContext) -> AdmissionLease` (Voice callers retain exact `AdmissionLease` and `lease.call_id: str` typing).
+       - `acquire(context: VerifiedPrincipalContext) -> PrincipalAdmissionLease` (Events callers receive `PrincipalAdmissionLease` with `principal_id: str` and no fake `call_id`).
+     - Both `AdmissionLease` and `PrincipalAdmissionLease` reserve/release against the **same** `AdmissionController._active_leases` and `_tenant_counts` (shared global and per-tenant capacity ceilings, zero duplicate admission controllers) and integrate with `ConnectionSupervisor` and `InstanceDrainCoordinator`.
+  4. **Regression Tests (`E1`):** Verify Voice `AdmissionLease.call_id: str` static & runtime compatibility, shared global/per-tenant ceiling enforcement across mixed Voice + Events leases, `PrincipalAdmissionLease` zero-leak release, and `mypy` strictness.
 
 ---
 
