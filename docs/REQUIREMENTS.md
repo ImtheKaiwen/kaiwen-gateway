@@ -318,4 +318,26 @@ Do not resolve any `OPEN-*` item by an unsupported assumption. For each closure,
 
 ---
 
+## 10. Post-Beta Events Module Requirements (`D0` Proposed Baseline)
+
+> **Status:** `Proposed` (applies to future milestones `E1`–`E4`; **Voice** remains the only implemented communication module in `v0.1.0b1`). See [`EVENTS_MODULE_DESIGN.md`](EVENTS_MODULE_DESIGN.md) and [`ADR-0006`](decisions/0006-events-module-architecture.md).
+
+| ID | Category | Requirement | Verifiable Acceptance Criterion |
+| --- | --- | --- | --- |
+| `FR-EVT-001` | Functional | Events **MUST** be implemented under `src/kaiwen_gateway/modules/events/` inside the single `kaiwen-gateway` distribution and register via `GatewayModule` (`module_id="events"`). | Package metadata produces one distribution; `ModuleLifecycleManager` starts/stops `events` cleanly. |
+| `FR-EVT-002` | Functional | Events **MUST** define `EventPublisherPort`, `EventSubscriptionPort`, and `DurableEventStorePort` with an in-process `InMemoryEventBroker` requiring zero external dependencies. | Unit tests exercise publish/subscribe/unsubscribe without `redis` installed. |
+| `FR-EVT-003` | Functional | `/ws/events/v1` **MUST** support versioned JSON envelopes (`protocol_version="v1"`), `events.subscribe`, `events.unsubscribe`, `session.ping`/`session.pong`, and `events.delivery`. | Loopback WebSocket tests verify each command/response and reject unknown versions (`1008`) and malformed JSON (`1007`). |
+| `FR-EVT-004` | Functional | Raw Voice `AudioFrame`s **MUST NOT** be routed through Events; future Notifications and Agent Streaming **MUST** consume Events via its ports. | Voice bridge tests confirm zero Events dependency; Events ports have no Voice audio imports. |
+| `SEC-EVT-001` | Security | `/ws/events/v1` **MUST** authenticate before accepting privileged operations and derive `tenant_id` / `principal_id` exclusively from server-verified credentials (using additive principal context, never fake `call_id`s). | Forged tokens fail pre-accept (`403`/`1008`); client-supplied `tenant_id` mismatches are rejected. |
+| `SEC-EVT-002` | Security | Public WebSocket clients **MUST NOT** publish arbitrary events or subscribe to unauthorized wildcards (`*` / ungranted `topic.*`) by default. | `events.publish` and unauthorized wildcard `events.subscribe` fail closed with `1008`. |
+| `SEC-EVT-003` | Security | `/ws/events/v1` **MUST** enforce maximum frame size (`65,536` bytes provisional) and redact secrets/payloads from error frames and default logs. | Oversized frames close `1009`; error frames and log captures contain zero secrets or raw payloads. |
+| `REL-EVT-001` | Reliability | Every subscriber **MUST** use a bounded `asyncio.Queue` with explicit overflow handling (`disconnect_slow_consumer` or configured `drop_oldest`) so one slow subscriber never stalls others. | Slow-consumer fault test proves fast subscribers and `publish()` remain unblocked. |
+| `REL-EVT-002` | Reliability | `EventsModule` shutdown and WebSocket disconnect **MUST** cancel subscriber tasks, drain/close queues, and release `AdmissionController` leases without orphan tasks. | Disconnect and shutdown tests verify `0` leaked tasks and `0` active admission leases. |
+| `NFR-EVT-PERF-001` | Performance | Process-local token-bucket rate limiters **MUST** enforce provisional per-connection message, publish, subscription-op, and max-subscription limits independently of `AdmissionController`. | Rate-limit tests verify deterministic rejection above configured burst/rate without affecting other tenants. |
+| `NFR-EVT-REDIS-001` | Compatibility / Redis | Optional Redis support (`kaiwen-gateway[redis]`) **MUST** separate `at-most-once` Pub/Sub from `at-least-once` Streams (`XACK` + `MAXLEN`), fail closed on outage, and remain optional for Core/Voice. | Base wheel installs and runs Core/Voice/InMemoryEvents with `redis` absent; Redis outage tests verify clean failure. |
+| `OBS-EVT-001` | Observability | Events **MUST** expose `EventsTelemetrySink` / `InMemoryEventsTelemetrySink` tracking connections, subscriptions, throughput, drops, rate-limit rejections, Redis errors, and latency without unbounded labels or payload logging. | Telemetry unit tests assert all counters/histograms update accurately with bounded label cardinality. |
+| `TEST-EVT-001` | Testability | All `E1`–`E3` behavior **MUST** be deterministically testable offline without live Redis or paid external services. | Full Events unit and mock-transport suites pass offline in CI. |
+
+---
+
 **Baseline summary:** Deliver a **small, secure, provider-neutral library and runnable server** with one working **Voice** module; verify it with synthetic bidirectional streaming before attempting a real Verimor integration. Maintain explicit separation between reusable Gateway transport concerns, Kaiwen Agent intelligence, and the consuming application's legal/business authority.

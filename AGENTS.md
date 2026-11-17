@@ -59,7 +59,7 @@ Use only authorized accounts and environments. Never bypass provider terms, cons
 
 **Conditional:** real Verimor adapter and live telephone interoperability only after the authoritative provider contract and authorized sandbox tests are available.
 
-**Not V1:** Messaging/Event/MCP gateways, general AI proxy, control dashboard, local Kaiwen Voice inference, SIP bridge without a separate approved specification, Kubernetes, Kafka, microservice decomposition, distributed call migration, plugin marketplace, CRM/billing system, or large-scale outbound-calling automation.
+**Not V1 (Historical V1 Scope) & Proposed Post-Beta Track:** Messaging/Event/MCP gateways, general AI proxy, control dashboard, local Kaiwen Voice inference, SIP bridge without a separate approved specification, Kubernetes, Kafka, microservice decomposition, distributed call migration, plugin marketplace, CRM/billing system, or large-scale outbound-calling automation were excluded from V1. **Post-beta (`v0.1.0b1`+):** A bounded **Events** module (`D0`–`E4`) is documented as a **proposed** post-beta initiative in [`docs/EVENTS_MODULE_DESIGN.md`](docs/EVENTS_MODULE_DESIGN.md) and [`ADR-0006`](docs/decisions/0006-events-module-architecture.md); implementation (`E1`+) must **not** begin until maintainers explicitly accept `ADR-0006` and authorize `E1`.
 
 Do not create empty future-module directories simply to make the repository look complete.
 

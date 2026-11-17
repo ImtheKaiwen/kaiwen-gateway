@@ -453,6 +453,15 @@ Future ADRs only when justified: audio bypasses general event bus; verified iden
 
 **Exit criteria for architecture review:** ownership boundaries are accepted, each trust boundary has an owner, no unverified provider wire format has entered Core, V1 non-goals remain excluded, and every P0 acceptance scenario can be mapped to a component and test. Record approval and relevant ADRs before expanding implementation scope.
 
+## 13. Proposed Post-Beta Events Architecture (`D0` — Not Yet Implemented)
+
+> **Implementation status:** **Voice** remains the **only implemented communication module** in `v0.1.0b1`. The Events architecture summarized here is a **`Proposed`** post-beta baseline ([`EVENTS_MODULE_DESIGN.md`](EVENTS_MODULE_DESIGN.md), [`ADR-0006`](decisions/0006-events-module-architecture.md)) and is not present in the runtime codebase.
+
+- **Module Boundary (`src/kaiwen_gateway/modules/events/`):** Registers with `GatewayCore` as a `GatewayModule` (`module_id="events"`), sharing `ModuleLifecycleManager` and `gateway_lifespan` drain orchestration without placing a generic event bus inside `kaiwen_gateway.core`.
+- **Transport Boundary (`src/kaiwen_gateway/transports/events/`):** Exposes `/ws/events/v1` via the ASGI host, delegating handshake/auth/frame I/O to the transport while keeping topic routing, bounded subscriber queues, and token-bucket rate limiting inside `modules/events/`.
+- **Voice Isolation:** Voice's `VoiceBridgeSession` PCM16LE media pumps remain completely isolated from Events; raw `AudioFrame`s are never serialized into Events.
+- **Optional Infrastructure (`kaiwen-gateway[redis]`):** `InMemoryEventBroker` requires zero external dependencies; optional `RedisPubSubEventBroker` (at-most-once live fan-out) and `RedisStreamsDurableStore` (at-least-once durable log) sit behind `modules/events/ports/`.
+
 ---
 
 **Architecture summary:** Keep the Core small, keep high-frequency media transient and call-scoped, reuse Kaiwen Agent rather than duplicating it, and ship a testable single-process library/server before considering distributed deployment. A functioning simulator is not evidence of real Verimor or OpenAI live-media interoperability.
