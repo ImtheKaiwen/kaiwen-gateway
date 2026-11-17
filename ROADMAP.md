@@ -69,7 +69,7 @@ Use only these milestone status values:
 | **M8** | Production-readiness decision (separate track) | `Not started` | M7 evidence and separately approved operations plan |
 | **D0** | Events Architecture & Documentation Baseline | `Complete` (`ADR-0006` `Accepted` 2026-11-17; `docs/EVENTS_MODULE_DESIGN.md`) | Maintainer architectural review |
 | **E1** | Events Foundation (`modules/events` core, ports, `InMemoryEventBroker`) | `Complete` (PR #59; `kaiwen_gateway.modules.events` + additive Core principal identity) | Maintainer acceptance of `D0` & `ADR-0006` |
-| **E2** | WebSocket Events & Security (`/ws/events/v1`, principal identity, rate limits) | `Not started` | `E1` |
+| **E2** | WebSocket Events & Security (`/ws/events/v1`, principal identity, rate limits) | `In review — PR pending` (implemented on `feat/e2-websocket-events`) | `E1` |
 | **E3** | Optional Redis Pub/Sub & Distributed Rate Limiting (`kaiwen-gateway[redis]`) | `Not started` | `E2` |
 | **E4** | Redis Streams Durable Store, Recovery & Load Qualification | `Not started` | `E3` |
 
@@ -272,7 +272,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 ### Post-Beta Events Initiative (`D0`–`E4`, `ADR-0006 Accepted` — Does Not Alter V1 Voice Baseline)
 
-> **Status note:** `Voice` remains the **only implemented communication module** in `v0.1.0b1`. [`ADR-0006`](docs/decisions/0006-events-module-architecture.md) and [`docs/EVENTS_MODULE_DESIGN.md`](docs/EVENTS_MODULE_DESIGN.md) are **Accepted** (`D0 Complete`); `E1` (Events Foundation) is **Complete** (PR #59), and `E2`–`E4` remain `Not started`.
+> **Status note:** `Voice` remains the **only implemented communication module** in `v0.1.0b1`. [`ADR-0006`](docs/decisions/0006-events-module-architecture.md) and [`docs/EVENTS_MODULE_DESIGN.md`](docs/EVENTS_MODULE_DESIGN.md) are **Accepted** (`D0 Complete`); `E1` (Events Foundation) is **Complete** (PR #59), `E2` is implemented on `feat/e2-websocket-events` pending PR review, and `E3`–`E4` remain `Not started`.
 
 #### D0 — Events Architecture & Documentation (`Complete`)
 - **Scope:** Architecture, dependency boundaries, broker/durable-store ports, `/ws/events/v1` protocol, fail-closed security model, provisional rate limits, optional Redis Pub/Sub & Streams semantics, observability, and requirements.
@@ -288,7 +288,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - **Exit gate:** `mypy`, `ruff`, and offline unit/conformance suites pass with `0` skips.
 - **Explicit non-goals:** No `/ws/events/v1` endpoint, no Redis client, no Notifications or Agent Streaming.
 
-#### E2 — WebSocket Events & Security (`Not started`)
+#### E2 — WebSocket Events & Security (`In review — PR pending`)
 - **Scope:** `src/kaiwen_gateway/transports/events/` (`/ws/events/v1` endpoint, explicit `events_ingress_mode="authenticated"` + `enable_events=True` fail-closed wiring, `Authorization: Bearer` + single-use short-lived `Origin`-checked browser ticket auth with process-local single-instance replay protection, secret-safe reverse-proxy logging guidance, `events.subscribe` / `events.unsubscribe` / `session.ping` / `events.delivery`, `64 KiB` frame limit, unauthorized wildcard/publish denial, slow-consumer `1008` disconnect, and drain cleanup).
 - **Prerequisites:** `E1` complete.
 - **Deliverables & Test evidence:** Loopback ASGI/WebSocket security and lifecycle tests covering fail-closed app construction, expired/replayed/wrong-audience tickets, disallowed `Origin`s, `?token=` URL rejection, forged tenant rejection, unauthorized wildcard rejection, `1009` oversized close, slow-consumer disconnect, and `DrainReport` clean shutdown.

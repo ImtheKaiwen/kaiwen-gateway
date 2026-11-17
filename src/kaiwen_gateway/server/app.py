@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from kaiwen_gateway.core.admission import AdmissionController
 from kaiwen_gateway.core.composition import GatewayCore, compose_gateway_core
-from kaiwen_gateway.core.config import INGRESS_MODE_SYNTHETIC, CoreConfig, validate_core_config
+from kaiwen_gateway.core.config import (
+    EVENTS_INGRESS_MODE_AUTHENTICATED,
+    EVENTS_INGRESS_MODE_DISABLED,
+    INGRESS_MODE_SYNTHETIC,
+    CoreConfig,
+    validate_core_config,
+)
 from kaiwen_gateway.core.draining import (
     DrainPolicy,
     InstanceDrainCoordinator,
@@ -16,9 +22,18 @@ from kaiwen_gateway.core.draining import (
 from kaiwen_gateway.core.exceptions import CoreConfigurationError
 from kaiwen_gateway.core.identity import CallAuthorizationPort, ProviderAuthenticatorPort
 from kaiwen_gateway.core.module_lifecycle import ModuleLifecycleManager, ModuleLifecyclePolicy
+from kaiwen_gateway.modules.events import (
+    BoundedTicketReplayCache,
+    EventBrokerConfig,
+    EventsAuthenticatorPort,
+    EventsAuthorizerPort,
+    EventsModule,
+    EventsTicketVerifierPort,
+)
 from kaiwen_gateway.modules.voice.ports import AIRealtimeMediaPort
 from kaiwen_gateway.server.exceptions import ServerDependencyError
 from kaiwen_gateway.server.lifespan import gateway_lifespan
+from kaiwen_gateway.transports.events import EVENTS_WS_ENDPOINT_PATH, events_websocket_endpoint
 from kaiwen_gateway.transports.synthetic import (
     SYNTHETIC_MEDIA_WS_ENDPOINT_PATH,
     SYNTHETIC_WS_ENDPOINT_PATH,
@@ -135,7 +150,13 @@ async def readiness_endpoint(request: Request) -> JSONResponse:
             status_code=503,
         )
 
-    if app_state.config.ingress_mode == INGRESS_MODE_SYNTHETIC:
+    voice_enabled = app_state.config.ingress_mode == INGRESS_MODE_SYNTHETIC
+    events_enabled = (
+        app_state.config.events_ingress_mode == EVENTS_INGRESS_MODE_AUTHENTICATED
+        and getattr(app_state, "enable_events", False)
+    )
+
+    if voice_enabled:
         bridge = getattr(app_state, "synthetic_auth_bridge", None)
         if (
             bridge is None
@@ -146,10 +167,42 @@ async def readiness_endpoint(request: Request) -> JSONResponse:
                 {"status": "unavailable", "reason": "synthetic_ingress_misconfigured"},
                 status_code=503,
             )
+
+    if events_enabled:
+        events_mod: EventsModule | None = getattr(app_state, "events_module", None)
+        if events_mod is None or not events_mod.is_started or events_mod.broker.is_closed:
+            return JSONResponse(
+                {"status": "unavailable", "reason": "events_not_started"},
+                status_code=503,
+            )
+
+    if voice_enabled and not events_enabled:
         return JSONResponse(
             {
                 "status": "ready",
                 "ingress_mode": "synthetic",
+                "instance": app_state.config.instance_name,
+            },
+            status_code=200,
+        )
+
+    if events_enabled and not voice_enabled:
+        return JSONResponse(
+            {
+                "status": "ready",
+                "ingress_mode": app_state.config.ingress_mode,
+                "events_ingress_mode": "authenticated",
+                "instance": app_state.config.instance_name,
+            },
+            status_code=200,
+        )
+
+    if voice_enabled and events_enabled:
+        return JSONResponse(
+            {
+                "status": "ready",
+                "ingress_mode": "synthetic",
+                "events_ingress_mode": "authenticated",
                 "instance": app_state.config.instance_name,
             },
             status_code=200,
@@ -191,6 +244,14 @@ def create_gateway_app(
     enable_synthetic_media: bool = False,
     ai_media_port_factory: Callable[..., AIRealtimeMediaPort] | None = None,
     module_lifecycle_policy: ModuleLifecyclePolicy | None = None,
+    enable_events: bool = False,
+    events_authenticator: EventsAuthenticatorPort | None = None,
+    events_authorizer: EventsAuthorizerPort | None = None,
+    events_ticket_verifier: EventsTicketVerifierPort | None = None,
+    events_allowed_origins: Sequence[str] = (),
+    events_broker_config: EventBrokerConfig | None = None,
+    events_module: EventsModule | None = None,
+    events_replay_cache: BoundedTicketReplayCache | None = None,
 ) -> Starlette:
     """Construct a fresh, instance-scoped ASGI application for Kaiwen Gateway.
 
@@ -236,6 +297,8 @@ def create_gateway_app(
         raise TypeError(
             f"enable_synthetic_media must be a bool, got {type(enable_synthetic_media).__name__}"
         )
+    if not isinstance(enable_events, bool):
+        raise TypeError(f"enable_events must be a bool, got {type(enable_events).__name__}")
     if ai_media_port_factory is not None and not callable(ai_media_port_factory):
         raise TypeError("ai_media_port_factory must be callable")
 
@@ -373,12 +436,93 @@ def create_gateway_app(
         ):
             raise TypeError("authorizer must satisfy CallAuthorizationPort")
 
+    # Resolve and validate Events ingress configuration (fail-closed)
+    effective_events_module: EventsModule | None = events_module
+    normalized_origins = tuple(events_allowed_origins)
+    for origin in normalized_origins:
+        if not isinstance(origin, str) or not origin:
+            raise CoreConfigurationError(
+                "events_allowed_origins entries must be non-empty strings",
+                field_name="events_allowed_origins",
+            )
+
+    if enable_events and effective_config.events_ingress_mode == EVENTS_INGRESS_MODE_DISABLED:
+        raise CoreConfigurationError(
+            "enable_events=True requires CoreConfig.events_ingress_mode='authenticated'",
+            field_name="events_ingress_mode",
+        )
+    if (
+        effective_config.events_ingress_mode == EVENTS_INGRESS_MODE_AUTHENTICATED
+        and not enable_events
+    ):
+        raise CoreConfigurationError(
+            "events_ingress_mode='authenticated' requires enable_events=True",
+            field_name="events_ingress_mode",
+        )
+
+    if enable_events:
+        if (events_authenticator is None) != (events_authorizer is None):
+            raise CoreConfigurationError(
+                "events_authenticator and events_authorizer must both be provided together"
+            )
+        if events_authenticator is not None and not isinstance(
+            events_authenticator, EventsAuthenticatorPort
+        ):
+            raise TypeError("events_authenticator must satisfy EventsAuthenticatorPort")
+        if events_authorizer is not None and not isinstance(
+            events_authorizer, EventsAuthorizerPort
+        ):
+            raise TypeError("events_authorizer must satisfy EventsAuthorizerPort")
+        if events_ticket_verifier is not None:
+            if not isinstance(events_ticket_verifier, EventsTicketVerifierPort):
+                raise TypeError("events_ticket_verifier must satisfy EventsTicketVerifierPort")
+            if not normalized_origins:
+                raise CoreConfigurationError(
+                    "events_ticket_verifier requires non-empty events_allowed_origins",
+                    field_name="events_allowed_origins",
+                )
+        if events_authenticator is None and events_ticket_verifier is None:
+            raise CoreConfigurationError(
+                "enable_events=True requires events_authenticator+events_authorizer "
+                "and/or events_ticket_verifier"
+            )
+
+        existing_events = core.find_module("events")
+        if existing_events is not None:
+            if not isinstance(existing_events, EventsModule):
+                raise CoreConfigurationError(
+                    "Registered 'events' module is not an EventsModule instance"
+                )
+            if (
+                effective_events_module is not None
+                and effective_events_module is not existing_events
+            ):
+                raise CoreConfigurationError(
+                    "Explicit events_module conflicts with module already registered on core"
+                )
+            effective_events_module = existing_events
+        else:
+            if effective_events_module is None:
+                effective_events_module = EventsModule(broker_config=events_broker_config)
+            elif not isinstance(effective_events_module, EventsModule):
+                raise TypeError("events_module must be an EventsModule instance")
+            core = compose_gateway_core(
+                config=effective_config,
+                modules=[*core.modules(), effective_events_module],
+            )
+
+    effective_replay_cache = (
+        events_replay_cache if events_replay_cache is not None else BoundedTicketReplayCache()
+    )
+
+    routes: list[Route | WebSocketRoute] = [
+        Route("/health", endpoint=health_endpoint, methods=["GET"]),
+        Route("/ready", endpoint=readiness_endpoint, methods=["GET"]),
+    ]
     if effective_config.ingress_mode == INGRESS_MODE_SYNTHETIC:
-        routes = [
-            Route("/health", endpoint=health_endpoint, methods=["GET"]),
-            Route("/ready", endpoint=readiness_endpoint, methods=["GET"]),
-            WebSocketRoute(SYNTHETIC_WS_ENDPOINT_PATH, endpoint=synthetic_websocket_endpoint),
-        ]
+        routes.append(
+            WebSocketRoute(SYNTHETIC_WS_ENDPOINT_PATH, endpoint=synthetic_websocket_endpoint)
+        )
         if enable_synthetic_media:
             routes.append(
                 WebSocketRoute(
@@ -386,19 +530,14 @@ def create_gateway_app(
                     endpoint=synthetic_media_websocket_endpoint,
                 )
             )
-        routes.extend(
-            [
-                WebSocketRoute("/", endpoint=reject_websocket_endpoint),
-                WebSocketRoute("/{path:path}", endpoint=reject_websocket_endpoint),
-            ]
-        )
-    else:
-        routes = [
-            Route("/health", endpoint=health_endpoint, methods=["GET"]),
-            Route("/ready", endpoint=readiness_endpoint, methods=["GET"]),
+    if enable_events:
+        routes.append(WebSocketRoute(EVENTS_WS_ENDPOINT_PATH, endpoint=events_websocket_endpoint))
+    routes.extend(
+        [
             WebSocketRoute("/", endpoint=reject_websocket_endpoint),
             WebSocketRoute("/{path:path}", endpoint=reject_websocket_endpoint),
         ]
+    )
 
     middleware = [Middleware(UpgradeRejectionMiddleware)]
 
@@ -418,6 +557,13 @@ def create_gateway_app(
     app.state.synthetic_auth_bridge = effective_auth_bridge
     app.state.enable_synthetic_media = enable_synthetic_media
     app.state.ai_media_port_factory = ai_media_port_factory
+    app.state.enable_events = enable_events
+    app.state.events_authenticator = events_authenticator
+    app.state.events_authorizer = events_authorizer
+    app.state.events_ticket_verifier = events_ticket_verifier
+    app.state.events_allowed_origins = normalized_origins
+    app.state.events_module = effective_events_module
+    app.state.events_replay_cache = effective_replay_cache
     app.state.module_lifecycle = ModuleLifecycleManager(core, policy=module_lifecycle_policy)
     app.state.started = False
     app.state.shutting_down = False

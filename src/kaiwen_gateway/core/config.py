@@ -20,6 +20,11 @@ INGRESS_MODE_SYNTHETIC: Final[str] = "synthetic"
 SUPPORTED_INGRESS_MODES: Final[frozenset[str]] = frozenset(
     {INGRESS_MODE_DISABLED, INGRESS_MODE_SYNTHETIC}
 )
+EVENTS_INGRESS_MODE_DISABLED: Final[str] = "disabled"
+EVENTS_INGRESS_MODE_AUTHENTICATED: Final[str] = "authenticated"
+SUPPORTED_EVENTS_INGRESS_MODES: Final[frozenset[str]] = frozenset(
+    {EVENTS_INGRESS_MODE_DISABLED, EVENTS_INGRESS_MODE_AUTHENTICATED}
+)
 
 _ALLOWED_CONFIG_KEYS: Final[frozenset[str]] = frozenset(
     {
@@ -27,6 +32,7 @@ _ALLOWED_CONFIG_KEYS: Final[frozenset[str]] = frozenset(
         "max_concurrent_connections",
         "max_connections_per_tenant",
         "ingress_mode",
+        "events_ingress_mode",
     }
 )
 
@@ -88,6 +94,22 @@ def _validate_ingress_mode(ingress_mode: object) -> str:
     return ingress_mode
 
 
+def _validate_events_ingress_mode(events_ingress_mode: object) -> str:
+    """Enforce fail-closed Events ingress policy."""
+    if not isinstance(events_ingress_mode, str):
+        raise CoreConfigurationError(
+            f"events_ingress_mode must be a str, got {type(events_ingress_mode).__name__}",
+            field_name="events_ingress_mode",
+        )
+    if events_ingress_mode not in SUPPORTED_EVENTS_INGRESS_MODES:
+        raise CoreConfigurationError(
+            f"Unsupported events_ingress_mode {events_ingress_mode!r}; "
+            f"(allowed: {sorted(SUPPORTED_EVENTS_INGRESS_MODES)})",
+            field_name="events_ingress_mode",
+        )
+    return events_ingress_mode
+
+
 @dataclass(frozen=True, slots=True)
 class CoreConfig:
     """Immutable, validated configuration for a single :class:`~kaiwen_gateway.core.GatewayCore` instance.
@@ -108,6 +130,7 @@ class CoreConfig:
     max_concurrent_connections: int = DEFAULT_MAX_CONCURRENT_CONNECTIONS
     max_connections_per_tenant: int = DEFAULT_MAX_CONNECTIONS_PER_TENANT
     ingress_mode: str = INGRESS_MODE_DISABLED
+    events_ingress_mode: str = EVENTS_INGRESS_MODE_DISABLED
 
     def __post_init__(self) -> None:
         validate_core_config(self)
@@ -148,12 +171,14 @@ class CoreConfig:
             DEFAULT_MAX_CONNECTIONS_PER_TENANT,
         )
         ingress_mode = data.get("ingress_mode", INGRESS_MODE_DISABLED)
+        events_ingress_mode = data.get("events_ingress_mode", EVENTS_INGRESS_MODE_DISABLED)
 
         return cls(
             instance_name=instance_name,  # type: ignore[arg-type]
             max_concurrent_connections=max_concurrent,  # type: ignore[arg-type]
             max_connections_per_tenant=max_per_tenant,  # type: ignore[arg-type]
             ingress_mode=ingress_mode,  # type: ignore[arg-type]
+            events_ingress_mode=events_ingress_mode,  # type: ignore[arg-type]
         )
 
 
@@ -178,6 +203,7 @@ def validate_core_config(config: object) -> CoreConfig:
             field_name="max_connections_per_tenant",
         )
     _validate_ingress_mode(config.ingress_mode)
+    _validate_events_ingress_mode(config.events_ingress_mode)
     return config
 
 
@@ -186,11 +212,14 @@ __all__ = [
     "DEFAULT_INSTANCE_NAME",
     "DEFAULT_MAX_CONCURRENT_CONNECTIONS",
     "DEFAULT_MAX_CONNECTIONS_PER_TENANT",
+    "EVENTS_INGRESS_MODE_AUTHENTICATED",
+    "EVENTS_INGRESS_MODE_DISABLED",
     "INGRESS_MODE_DISABLED",
     "INGRESS_MODE_SYNTHETIC",
     "INSTANCE_NAME_PATTERN",
     "MAX_CONFIGURED_CONNECTIONS",
     "MAX_INSTANCE_NAME_LENGTH",
+    "SUPPORTED_EVENTS_INGRESS_MODES",
     "SUPPORTED_INGRESS_MODES",
     "validate_core_config",
 ]
