@@ -70,8 +70,8 @@ Use only these milestone status values:
 | **D0** | Events Architecture & Documentation Baseline | `Ready for review` (`docs/EVENTS_MODULE_DESIGN.md`, `ADR-0006` `Proposed`) | Maintainer architectural review |
 | **E1** | Events Foundation (`modules/events` core, ports, `InMemoryEventBroker`) | `Not started` | Maintainer acceptance of `D0` & `ADR-0006` |
 | **E2** | WebSocket Events & Security (`/ws/events/v1`, principal identity, rate limits) | `Not started` | `E1` |
-| **E3** | Optional Redis Integration (`kaiwen-gateway[redis]`, Pub/Sub, Streams, RL) | `Not started` | `E2` |
-| **E4** | Durable Events & Load Qualification | `Not started` | `E3` |
+| **E3** | Optional Redis Pub/Sub & Distributed Rate Limiting (`kaiwen-gateway[redis]`) | `Not started` | `E2` |
+| **E4** | Redis Streams Durable Store, Recovery & Load Qualification | `Not started` | `E3` |
 
 Milestone IDs are stable; do not renumber completed milestones. Update the status table and evidence links after a reviewed change. If a stage is partially complete, keep it `In progress` or `Ready for review` rather than marking it `Complete`.
 
@@ -295,19 +295,19 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - **Exit gate:** Security and WebSocket integration suite passes across Python 3.11–3.13.
 - **Explicit non-goals:** No Redis integration, no Notifications or Agent Streaming.
 
-#### E3 — Optional Redis Integration (`Not started`)
-- **Scope:** Optional `kaiwen-gateway[redis]` extra (`pyproject.toml`), `RedisPubSubEventBroker` (at-most-once live fan-out), `RedisStreamsDurableStore` (`XADD`/`XREADGROUP`/`XACK`/bounded replay, at-least-once), and optional Redis distributed rate limiting.
+#### E3 — Optional Redis Pub/Sub & Distributed Rate Limiting (`Not started`)
+- **Scope:** Optional `kaiwen-gateway[redis]` extra (`pyproject.toml`), `RedisPubSubEventBroker` (at-most-once cross-instance live fan-out), distributed Redis token-bucket rate limiting, and Redis connection lifecycle/reconnect backoff management.
 - **Prerequisites:** `E2` complete.
-- **Deliverables & Test evidence:** Mocked + opt-in local Redis integration tests covering Pub/Sub reconnect backoff, Streams consumer-group ack/redelivery, fail-closed unavailability handling, and core-only zero-Redis import checks.
-- **Exit gate:** All unit + Redis integration tests pass without breaking `kaiwen-gateway` base wheel metadata.
-- **Explicit non-goals:** No Notifications or Agent Streaming implementations; no global cross-topic ordering or exactly-once claims.
+- **Deliverables & Test evidence:** Mocked + opt-in local Redis integration tests covering cross-instance Pub/Sub fan-out, reconnect backoff, distributed rate-limit counters, fail-closed unavailability handling, and core-only zero-Redis import checks.
+- **Exit gate:** All unit + Redis Pub/Sub tests pass without breaking `kaiwen-gateway` base wheel metadata.
+- **Explicit non-goals:** No Redis Streams durable store, no Notifications or Agent Streaming implementations, and no global cross-topic ordering claims.
 
-#### E4 — Durable Events & Qualification (`Not started`)
-- **Scope:** Multi-process paced Events load/fault harness, empirical validation of provisional rate-limit/queue/retention defaults, and qualification report.
+#### E4 — Redis Streams Durable Store, Recovery & Load Qualification (`Not started`)
+- **Scope:** `RedisStreamsDurableStore` (`XADD` / `XREADGROUP` / `XACK` / bounded replay), Pending Entries List (`XPENDING` / `XAUTOCLAIM`) crash recovery, `MAXLEN ~` retention/trimming policies, failure-injection testing, and multi-process paced load/memory-bound qualification harness.
 - **Prerequisites:** `E3` complete.
-- **Deliverables & Test evidence:** Repeatable multi-trial synthetic Events benchmark report (p50/p95/p99 latency, slow-consumer isolation, Redis outage behavior, memory bounds).
+- **Deliverables & Test evidence:** Failure-injection tests (consumer crash/redelivery, idempotent `event_id` handling, `MAXLEN` lag eviction) plus repeatable multi-trial synthetic Events benchmark report (p50/p95/p99 latency, `1 MiB` per-connection / `32 MiB` global byte-budget enforcement, slow-consumer isolation).
 - **Exit gate:** Empirical limits documented; readiness review before any Notifications or Agent Streaming integration.
-- **Explicit non-goals:** No production SLA certification without deployment-specific Gate D review.
+- **Explicit non-goals:** No exactly-once guarantees; no production SLA certification without deployment-specific Gate D review.
 
 ## 5. Milestone dependencies and review rhythm
 

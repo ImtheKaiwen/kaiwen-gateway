@@ -41,15 +41,17 @@ Adopt an independently bounded **Events** communication module under `src/kaiwen
    - Separate live ephemeral fan-out (`EventPublisherPort`, `EventSubscriptionPort`, unified `EventBrokerPort` capability) from optional durable stream storage (`DurableEventStorePort` with explicit consumer-group read, `ack`, and bounded replay).
    - Provide an in-process `InMemoryEventBroker` default (zero external dependencies) alongside optional `RedisPubSubEventBroker` (live cross-instance fan-out, at-most-once) and `RedisStreamsDurableStore` (append-only durable log, at-least-once with explicit `XACK`).
    - Do **not** claim global cross-topic ordering or exactly-once delivery.
-5. **Additive Generalized Principal Identity in Core (for `E1`/`E2`):**
+5. **Additive Generalized Principal Identity Integrated with Admission & Lifecycle (for `E1`/`E2`):**
    - Preserve `TenantCallBinding` and `VerifiedConnectionContext` unchanged for Voice (`call_id` remains mandatory for telephony/voice).
-   - Introduce an additive, call-free tenant/principal context (e.g., `TenantPrincipalBinding` / `VerifiedPrincipalContext`) or an explicit generalization in `kaiwen_gateway.core.identity` during `E1`/`E2` so Events connections and Admission/Supervisor infrastructure can bind `tenant_id`, `principal_id`, `connection_id`, and `allowed_scopes` without fabricating `call_id`s.
-6. **Fail-Closed Security & Trusted Server-Side Publishing:**
-   - Public WebSocket clients (`/ws/events/v1`) are authenticated before privileged operations, bound strictly to server-verified `tenant_id` and `principal_id` (ignoring any client-supplied tenant claims), and restricted from arbitrary publishing or unauthorized wildcard subscriptions by default.
-   - Future **Notifications** and **Agent Streaming** consume Events through typed application/port contracts (`EventPublisherPort`, `EventSubscriptionPort`, `DurableEventStorePort`) injected at the composition root without duplicating broker logic.
-7. **Provisional Rate Limiting, Bounded Queues & Explicit Overload Semantics:**
-   - Use bounded per-subscriber `asyncio.Queue`s with explicit slow-consumer overflow policies (drop-newest / disconnect slow subscriber) so one slow client never stalls the broker or other tenants.
+   - Introduce `TenantPrincipalBinding` and `VerifiedPrincipalContext` in `kaiwen_gateway.core.identity` alongside a closed two-type union / `VerifiedConnectionIdentity` structural contract accepted by `AdmissionController`, `AdmissionLease`, and `ConnectionSupervisor`. This ensures Events WebSocket connections share global/per-tenant capacity leases and `InstanceDrainCoordinator` lifecycle supervision without fabricating `call_id`s.
+6. **Fail-Closed Ingress, Security & Trusted Server-Side Publishing:**
+   - `/ws/events/v1` requires explicit authenticated ingress configuration (`enable_events=True` alone must fail closed if `ingress_mode="disabled"` or no authenticator/verifier is configured).
+   - Public WebSocket clients are authenticated pre-accept, bound strictly to server-verified `tenant_id` and `principal_id`, and denied arbitrary client publishing or unauthorized wildcard subscriptions by default.
+   - Future **Notifications** and **Agent Streaming** consume Events through typed port contracts (`EventPublisherPort`, `EventSubscriptionPort`, `DurableEventStorePort`) injected at the composition root without duplicating broker logic.
+7. **Provisional Rate Limiting, Byte-Bounded Queues & Explicit Overload Semantics:**
+   - Use **one** bounded outbound queue per subscriber connection (multiplexed across up to `32` subscriptions) enforcing **both** event count (`128`) and byte limits (`1 MiB` per connection, `32 MiB` global queued-byte budget) with `disconnect_slow_consumer` (`1008`) as the default slow-consumer policy.
    - Separate process-local token-bucket rate limiting from optional Redis distributed counters; treat all initial numerical defaults as **provisional** until `E4` benchmark evidence is collected.
+   - Separate **E3** (Redis Pub/Sub cross-instance live fan-out, distributed rate limiting, Redis connection lifecycle) from **E4** (Redis Streams durable store, PEL `XPENDING`/`XAUTOCLAIM` recovery, retention/trimming, durable delivery qualification, load/failure testing).
 
 ---
 
