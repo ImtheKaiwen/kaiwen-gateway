@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -303,10 +304,11 @@ def create_gateway_app(
     if (
         isinstance(events_send_timeout_seconds, bool)
         or not isinstance(events_send_timeout_seconds, (int, float))
+        or not math.isfinite(events_send_timeout_seconds)
         or events_send_timeout_seconds <= 0.0
     ):
         raise CoreConfigurationError(
-            "events_send_timeout_seconds must be a positive number",
+            "events_send_timeout_seconds must be a finite positive number",
             field_name="events_send_timeout_seconds",
         )
     if ai_media_port_factory is not None and not callable(ai_media_port_factory):

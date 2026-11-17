@@ -12,6 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 from kaiwen_gateway.core import (
     AdmissionController,
     CoreConfig,
+    CoreConfigurationError,
     InstanceDrainCoordinator,
     ProviderPrincipal,
     TenantPrincipalBinding,
@@ -214,3 +215,41 @@ def test_r4_outbound_delivery_frame_respects_65536_byte_limit() -> None:
             assert len(encoded) <= DEFAULT_MAX_EVENT_BYTES
             assert msg["type"] == "events.error"
             assert msg["code"] == "FRAME_TOO_LARGE"
+
+
+@pytest.mark.parametrize(
+    "bad_timeout",
+    [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        0,
+        0.0,
+        -1.0,
+        True,
+        False,
+        "5",
+        None,
+    ],
+)
+def test_events_send_timeout_seconds_rejects_invalid_values(bad_timeout: object) -> None:
+    with pytest.raises(CoreConfigurationError):
+        create_gateway_app(
+            CoreConfig(ingress_mode="disabled", events_ingress_mode="authenticated"),
+            enable_events=True,
+            events_authenticator=_Auth(),
+            events_authorizer=_Authz(),
+            events_send_timeout_seconds=bad_timeout,  # type: ignore[arg-type]
+        )
+
+
+def test_events_send_timeout_seconds_accepts_finite_positive_numbers() -> None:
+    for good_timeout in (5, 0.25):
+        app = create_gateway_app(
+            CoreConfig(ingress_mode="disabled", events_ingress_mode="authenticated"),
+            enable_events=True,
+            events_authenticator=_Auth(),
+            events_authorizer=_Authz(),
+            events_send_timeout_seconds=good_timeout,
+        )
+        assert app.state.events_send_timeout_seconds == float(good_timeout)

@@ -152,8 +152,8 @@ Client-to-server frames (`command` / `type` namespace) are strictly separated fr
 | Direction | `type` | Required Fields | Behavior |
 | --- | --- | --- | --- |
 | **Server -> Client** | `session.ready` | `protocol_version`, `connection_id`, `tenant_id`, `principal_id`, `allowed_scopes` | Sent immediately after authenticated upgrade. |
-| **Client -> Server** | `events.subscribe` | `request_id`, `topic` | Checks scope & subscription quota; binds to verified `tenant_id`; replies `events.subscribed` or `error`. |
-| **Client -> Server** | `events.unsubscribe` | `request_id`, `topic` | Removes subscription and cleans queue state; replies `events.unsubscribed`. |
+| **Client -> Server** | `events.subscribe` | `topic` (or `topic_pattern`), `request_id` (optional) | Checks scope & subscription quota; binds to verified `tenant_id`; replies `events.subscribed` (echoing `request_id` if provided) or `events.error`. |
+| **Client -> Server** | `events.unsubscribe` | `topic` (or additive `subscription_id` alias), `request_id` (optional) | Removes matching subscription(s) and cleans queue state; replies `events.unsubscribed` (echoing `request_id` if provided). |
 | **Client -> Server** | `session.ping` | `seq` (optional) | Replies `session.pong` (`seq` echoed). |
 | **Server -> Client** | `events.delivery` | `request_id` (optional), `event` (`EventEnvelope`) | Delivers matching tenant-scoped event from subscriber queue. |
 | **Server -> Client** | `events.error` | `request_id` (optional), `code`, `message` | Sanitized diagnostic error (no secrets, stack traces, or cross-tenant details). |
