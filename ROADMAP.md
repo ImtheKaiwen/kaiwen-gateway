@@ -67,6 +67,11 @@ Use only these milestone status values:
 | **M6** | Alpha packaging and release-readiness review | `Complete` (v0.1.0a1 published on PyPI & GitHub Releases 2026-11-12; PR #37–#41, ADR-0005) | M5 |
 | **M7** | Conditional Verimor pilot | `Blocked` (official protocol and authorizations) | M6 + `OPEN-*` dependencies |
 | **M8** | Production-readiness decision (separate track) | `Not started` | M7 evidence and separately approved operations plan |
+| **D0** | Events Architecture & Documentation Baseline | `Complete` (`ADR-0006` `Accepted` 2026-11-17; `docs/EVENTS_MODULE_DESIGN.md`) | Maintainer architectural review |
+| **E1** | Events Foundation (`modules/events` core, ports, `InMemoryEventBroker`) | `Not started` | Maintainer acceptance of `D0` & `ADR-0006` |
+| **E2** | WebSocket Events & Security (`/ws/events/v1`, principal identity, rate limits) | `Not started` | `E1` |
+| **E3** | Optional Redis Pub/Sub & Distributed Rate Limiting (`kaiwen-gateway[redis]`) | `Not started` | `E2` |
+| **E4** | Redis Streams Durable Store, Recovery & Load Qualification | `Not started` | `E3` |
 
 Milestone IDs are stable; do not renumber completed milestones. Update the status table and evidence links after a reviewed change. If a stage is partially complete, keep it `In progress` or `Ready for review` rather than marking it `Complete`.
 
@@ -264,6 +269,45 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - Documented tenancy and operational responsibilities between Gateway, Kaiwen Agent and the consuming organization.
 
 **Exit evidence:** Separate production readiness review (**Gate D**) with recorded approvals and measurable operational evidence. M8 does **not** authorize Kubernetes, a control dashboard, broad provider support or microservices by default.
+
+### Post-Beta Events Initiative (`D0`–`E4`, `Proposed` — Does Not Alter V1 Voice Baseline)
+
+> **Status note:** `Voice` remains the **only implemented communication module** in `v0.1.0b1`. The Events milestones below are a proposed post-beta track gated by maintainer acceptance of [`ADR-0006`](docs/decisions/0006-events-module-architecture.md) and [`docs/EVENTS_MODULE_DESIGN.md`](docs/EVENTS_MODULE_DESIGN.md).
+
+#### D0 — Events Architecture & Documentation (`Complete`)
+- **Scope:** Architecture, dependency boundaries, broker/durable-store ports, `/ws/events/v1` protocol, fail-closed security model, provisional rate limits, optional Redis Pub/Sub & Streams semantics, observability, and requirements.
+- **Prerequisites:** Published `v0.1.0b1` baseline (`91ee612`).
+- **Deliverables:** `docs/EVENTS_MODULE_DESIGN.md`, `docs/decisions/0006-events-module-architecture.md` (`Accepted`), `ROADMAP.md`, `docs/REQUIREMENTS.md`, `docs/ARCHITECTURE.md`, and `AGENTS.md` updates.
+- **Acceptance criteria & Exit gate:** All target documents consistent, zero Python/dependency/release changes, Markdown link verification passes, PR #58 reviewed and `ADR-0006` accepted by maintainer.
+- **Explicit non-goals:** No Python implementation, no `redis` dependency, no Notifications or Agent Streaming implementation.
+
+#### E1 — Events Foundation (`Not started`)
+- **Scope:** `src/kaiwen_gateway/modules/events/` (`EventEnvelope`, topic validation, `EventPublisherPort`, `EventSubscriptionPort`, `EventBrokerPort`, `DurableEventStorePort`, `EventsTelemetrySink`, `EventsModule`, `InMemoryEventBroker`, single per-connection byte-bounded queue, process-local `TokenBucketRateLimiter`, and additive `TenantPrincipalBinding` / `VerifiedPrincipalContext` / `PrincipalAdmissionLease` in Core preserving `AdmissionLease.call_id: str` untouched).
+- **Prerequisites:** Maintainer approval of `D0` and `ADR-0006`.
+- **Deliverables & Test evidence:** Unit and broker conformance tests verifying multi-tenant isolation, `1 MiB`/conn & `32 MiB` global byte-bound queues, rate limiting, `PrincipalAdmissionLease` shared capacity & zero-leak release, `ModuleLifecycleManager` startup/shutdown, and zero-`redis` import isolation.
+- **Exit gate:** `mypy`, `ruff`, and offline unit/conformance suites pass with `0` skips.
+- **Explicit non-goals:** No `/ws/events/v1` endpoint, no Redis client, no Notifications or Agent Streaming.
+
+#### E2 — WebSocket Events & Security (`Not started`)
+- **Scope:** `src/kaiwen_gateway/transports/events/` (`/ws/events/v1` endpoint, explicit `events_ingress_mode="authenticated"` + `enable_events=True` fail-closed wiring, `Authorization: Bearer` + single-use short-lived `Origin`-checked browser ticket auth with process-local single-instance replay protection, secret-safe reverse-proxy logging guidance, `events.subscribe` / `events.unsubscribe` / `session.ping` / `events.delivery`, `64 KiB` frame limit, unauthorized wildcard/publish denial, slow-consumer `1008` disconnect, and drain cleanup).
+- **Prerequisites:** `E1` complete.
+- **Deliverables & Test evidence:** Loopback ASGI/WebSocket security and lifecycle tests covering fail-closed app construction, expired/replayed/wrong-audience tickets, disallowed `Origin`s, `?token=` URL rejection, forged tenant rejection, unauthorized wildcard rejection, `1009` oversized close, slow-consumer disconnect, and `DrainReport` clean shutdown.
+- **Exit gate:** Security and WebSocket integration suite passes across Python 3.11–3.13; process-local replay scope explicitly documented as single-instance only.
+- **Explicit non-goals:** No Redis integration, no Notifications or Agent Streaming.
+
+#### E3 — Optional Redis Pub/Sub & Distributed Rate Limiting (`Not started`)
+- **Scope:** Optional `kaiwen-gateway[redis]` extra (`pyproject.toml`), `RedisPubSubEventBroker` (at-most-once cross-instance live fan-out), atomic cross-instance ticket replay protection (`SET NX EX`), distributed Redis token-bucket rate limiting, and Redis connection lifecycle/reconnect backoff management.
+- **Prerequisites:** `E2` complete.
+- **Deliverables & Test evidence:** Mocked + opt-in local Redis integration tests covering cross-instance Pub/Sub fan-out, atomic cross-instance ticket replay rejection, reconnect backoff, distributed rate-limit counters, fail-closed unavailability handling, and core-only zero-Redis import checks.
+- **Exit gate:** All unit + Redis Pub/Sub tests pass without breaking `kaiwen-gateway` base wheel metadata.
+- **Explicit non-goals:** No Redis Streams durable store, no Notifications or Agent Streaming implementations, and no global cross-topic ordering claims.
+
+#### E4 — Redis Streams Durable Store, Recovery & Load Qualification (`Not started`)
+- **Scope:** `RedisStreamsDurableStore` (`XADD` / `XREADGROUP` / `XACK` / bounded replay), Pending Entries List (`XPENDING` / `XAUTOCLAIM`) crash recovery, `MAXLEN ~` retention/trimming policies, failure-injection testing, and multi-process paced load/memory-bound qualification harness.
+- **Prerequisites:** `E3` complete.
+- **Deliverables & Test evidence:** Failure-injection tests (consumer crash/redelivery, idempotent `event_id` handling, `MAXLEN` lag eviction) plus repeatable multi-trial synthetic Events benchmark report (p50/p95/p99 latency, `1 MiB` per-connection / `32 MiB` global byte-budget enforcement, slow-consumer isolation).
+- **Exit gate:** Empirical limits documented; readiness review before any Notifications or Agent Streaming integration.
+- **Explicit non-goals:** No exactly-once guarantees; no production SLA certification without deployment-specific Gate D review.
 
 ## 5. Milestone dependencies and review rhythm
 
