@@ -11,6 +11,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+- **Core Additive Principal Identity & Admission (`E1`):** Added `PrincipalId`, `validate_principal_id`, `TenantPrincipalBinding`, `VerifiedPrincipalContext`, `PrincipalAuthorizationPort`, `bind_verified_principal_context`, `resolve_verified_principal_context`, `VerifiedConnectionIdentity`, `PrincipalAdmissionLease`, `AdmissionController.acquire_principal` / `admit_principal`, `PrincipalConnectionSupervisor`, and `InstanceDrainCoordinator.admit_principal_connection()` while preserving all Voice `call_id: str` public APIs unchanged.
+- **Events Foundation Module (`E1`, `kaiwen_gateway.modules.events`):** Added immutable `EventEnvelope` (`v1`, `64 KiB` max frame, max JSON depth `16`, finite floats), `PublishResult`, `EventPublisherPort` / `EventSubscriptionPort` / `EventBrokerPort` / `DurableEventStorePort`, `EventsTelemetrySink` / `InMemoryEventsTelemetrySink`, `TokenBucketRateLimiter` with TTL/LRU eviction, `InMemoryEventBroker` with single multiplexed bounded outbound queue per subscriber connection (`128` events, `1 MiB`/conn, `32 MiB` global budget, `32` subscriptions/conn, `disconnect_slow_consumer` default), and `EventsModule` (`GatewayModule` lifecycle adapter).
+
 ---
 
 ## [0.1.0b1] - 2026-11-16

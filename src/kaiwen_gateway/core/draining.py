@@ -48,7 +48,7 @@ import asyncio
 import math
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final
+from typing import Final, TypeVar
 
 from kaiwen_gateway.core.admission import AdmissionController
 from kaiwen_gateway.core.exceptions import (
@@ -58,13 +58,19 @@ from kaiwen_gateway.core.exceptions import (
     InstanceDrainingError,
     InvalidDrainTransitionError,
 )
-from kaiwen_gateway.core.identity import VerifiedConnectionContext
+from kaiwen_gateway.core.identity import (
+    VerifiedConnectionContext,
+    VerifiedPrincipalContext,
+)
 from kaiwen_gateway.core.lifecycle import (
     ConnectionState,
     ConnectionSupervisor,
     LifecyclePolicy,
+    PrincipalConnectionSupervisor,
     TerminalReason,
 )
+
+_S = TypeVar("_S", ConnectionSupervisor, PrincipalConnectionSupervisor)
 
 
 class InstanceDrainState(StrEnum):
@@ -252,7 +258,7 @@ class InstanceDrainCoordinator:
         )
         self._state: InstanceDrainState = InstanceDrainState.ACCEPTING
         self._lock: asyncio.Lock = asyncio.Lock()
-        self._supervisors: dict[str, ConnectionSupervisor] = {}
+        self._supervisors: dict[str, ConnectionSupervisor | PrincipalConnectionSupervisor] = {}
         self._drain_task: asyncio.Task[DrainReport] | None = None
         self._drain_error: BaseException | None = None
         self._report: DrainReport | None = None
@@ -335,29 +341,53 @@ class InstanceDrainCoordinator:
             raise TypeError(
                 f"context must be a VerifiedConnectionContext instance, got {type(context).__name__}"
             )
+        supervisor = ConnectionSupervisor(
+            context=context,
+            controller=self._controller,
+            policy=supervisor_policy or self._supervisor_policy,
+        )
+        return await self._admit_supervisor(context.connection_id, supervisor)
 
+    async def admit_principal_connection(
+        self,
+        context: VerifiedPrincipalContext,
+        *,
+        supervisor_policy: LifecyclePolicy | None = None,
+    ) -> PrincipalConnectionSupervisor:
+        """Admit a new managed non-call principal connection under supervisor ownership."""
+        if not isinstance(context, VerifiedPrincipalContext):
+            raise TypeError(
+                f"context must be a VerifiedPrincipalContext instance, got {type(context).__name__}"
+            )
+        supervisor = PrincipalConnectionSupervisor(
+            context=context,
+            controller=self._controller,
+            policy=supervisor_policy or self._supervisor_policy,
+        )
+        return await self._admit_supervisor(context.connection_id, supervisor)
+
+    async def _admit_supervisor(
+        self,
+        connection_id: str,
+        supervisor: _S,
+    ) -> _S:
         async with self._lock:
             if self._state != InstanceDrainState.ACCEPTING:
                 raise InstanceDrainingError(
                     f"Cannot admit new connection: instance is in {self._state.value} state"
                 )
 
-            if context.connection_id in self._supervisors:
-                raise DuplicateConnectionAdmissionError(context.connection_id)
+            if connection_id in self._supervisors:
+                raise DuplicateConnectionAdmissionError(connection_id)
 
-            supervisor = ConnectionSupervisor(
-                context=context,
-                controller=self._controller,
-                policy=supervisor_policy or self._supervisor_policy,
-            )
             # Register immediately into coordinator inventory so connection is tracked from inception
-            self._supervisors[context.connection_id] = supervisor
+            self._supervisors[connection_id] = supervisor
 
             try:
                 admitted = await supervisor.admit()
                 if not admitted:
                     # Clean capacity rejection: prune from inventory
-                    self._supervisors.pop(context.connection_id, None)
+                    self._supervisors.pop(connection_id, None)
                     return supervisor
 
                 tracker = asyncio.create_task(
@@ -368,8 +398,9 @@ class InstanceDrainCoordinator:
                 tracker.add_done_callback(self._on_tracker_done)
                 return supervisor
             except (KeyboardInterrupt, SystemExit):
-                if supervisor.lease is None or not supervisor.lease.is_active:
-                    self._supervisors.pop(context.connection_id, None)
+                active_lease = supervisor._active_lease_ref()
+                if active_lease is None or not active_lease.is_active:
+                    self._supervisors.pop(connection_id, None)
                 raise
             except BaseException:
                 # Admission cancelled or failed: shield rollback and wait for completion
@@ -381,8 +412,9 @@ class InstanceDrainCoordinator:
                 except Exception:
                     pass
                 finally:
-                    if supervisor.lease is None or not supervisor.lease.is_active:
-                        self._supervisors.pop(context.connection_id, None)
+                    active_lease = supervisor._active_lease_ref()
+                    if active_lease is None or not active_lease.is_active:
+                        self._supervisors.pop(connection_id, None)
                     # If rollback failed and lease is STILL active, KEEP in self._supervisors!
                 raise
 
@@ -397,7 +429,9 @@ class InstanceDrainCoordinator:
         if not task.cancelled():
             task.exception()
 
-    async def _track_supervisor_completion(self, supervisor: ConnectionSupervisor) -> None:
+    async def _track_supervisor_completion(
+        self, supervisor: ConnectionSupervisor | PrincipalConnectionSupervisor
+    ) -> None:
         """Background tracker observing supervisor termination to prune cleanly closed connections."""
         try:
             await supervisor.wait_closed()
@@ -408,8 +442,9 @@ class InstanceDrainCoordinator:
                 # If still ACCEPTING, and connection closed cleanly without an active lease,
                 # prune it to prevent unbounded dictionary growth.
                 if self._state == InstanceDrainState.ACCEPTING:
+                    active_lease = supervisor._active_lease_ref()
                     if supervisor.state == ConnectionState.CLOSED and (
-                        supervisor.lease is None or not supervisor.lease.is_active
+                        active_lease is None or not active_lease.is_active
                     ):
                         self._supervisors.pop(supervisor.connection_id, None)
 
@@ -464,7 +499,8 @@ class InstanceDrainCoordinator:
             graceful_supervisors: set[str] = {
                 s.connection_id
                 for s in initial_supervisors
-                if s.state == ConnectionState.CLOSED and (s.lease is None or not s.lease.is_active)
+                if s.state == ConnectionState.CLOSED
+                and ((lease := s._active_lease_ref()) is None or not lease.is_active)
             }
 
             if pending_supervisors and policy.grace_period > 0:
@@ -485,7 +521,8 @@ class InstanceDrainCoordinator:
 
             # Connections that reached CLOSED during Phase 1 without active lease
             for s in pending_supervisors:
-                if s.state == ConnectionState.CLOSED and (s.lease is None or not s.lease.is_active):
+                lease = s._active_lease_ref()
+                if s.state == ConnectionState.CLOSED and (lease is None or not lease.is_active):
                     graceful_supervisors.add(s.connection_id)
 
             graceful_completions = len(graceful_supervisors)
@@ -525,7 +562,8 @@ class InstanceDrainCoordinator:
                 if s.state == ConnectionState.FAILED:
                     failed_outcomes += 1
 
-                if s.lease is not None and s.lease.is_active:
+                lease = s._active_lease_ref()
+                if lease is not None and lease.is_active:
                     active_leases_remaining += 1
 
                 if s.connection_id in graceful_supervisors:
@@ -533,7 +571,7 @@ class InstanceDrainCoordinator:
 
                 # Candidate must either be successfully force-closed (CLOSED and no active lease)
                 # or counted as unresolved (FAILED, non-terminal, or lease still active).
-                if s.state == ConnectionState.CLOSED and (s.lease is None or not s.lease.is_active):
+                if s.state == ConnectionState.CLOSED and (lease is None or not lease.is_active):
                     force_closed += 1
                 else:
                     unresolved += 1
