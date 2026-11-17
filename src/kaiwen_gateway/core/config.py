@@ -114,16 +114,16 @@ def _validate_events_ingress_mode(events_ingress_mode: object) -> str:
 class CoreConfig:
     """Immutable, validated configuration for a single :class:`~kaiwen_gateway.core.GatewayCore` instance.
 
-    Scope and operational caveats (M2.2A):
+    Scope and operational caveats:
     - ``CoreConfig`` is pure, in-memory, and instance-scoped; importing or constructing it
       never reads environment variables, secret stores, or filesystem paths.
     - ``max_concurrent_connections`` and ``max_connections_per_tenant`` define validated
-      process-local capacity ceilings for future admission enforcement; they are **not yet**
-      enforced by an active connection admission controller or transport listener in M2.2A,
-      and they never coordinate capacity across multiple OS processes or hosts.
-    - ``ingress_mode`` defaults to ``"disabled"`` and fails closed on any other value because
-      ASGI/WSS ingress, TLS termination, and provider authentication are not yet implemented.
-      Possessing a valid ``CoreConfig`` does **not** mean a secure network server is running.
+      process-local capacity ceilings enforced by :class:`~kaiwen_gateway.core.AdmissionController`
+      and never coordinate capacity across multiple OS processes or hosts.
+    - ``ingress_mode`` (Voice) and ``events_ingress_mode`` (Events) both default to
+      ``"disabled"`` (fail-closed) and require explicit host wiring and injected authentication
+      when enabled via ``create_gateway_app()``. Possessing a valid ``CoreConfig`` does **not**
+      by itself mean a secure network server is running.
     """
 
     instance_name: str = DEFAULT_INSTANCE_NAME

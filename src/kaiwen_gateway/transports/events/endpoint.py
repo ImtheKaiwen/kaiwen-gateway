@@ -37,6 +37,7 @@ from kaiwen_gateway.transports.events.protocol import (
     CMD_SESSION_PING,
     EVENTS_MAX_FRAME_BYTES,
     EventsProtocolError,
+    OversizedEventsFrameError,
     build_delivery_frame,
     build_error_frame,
     build_session_pong_frame,
@@ -57,6 +58,7 @@ except ImportError:  # pragma: no cover
     WebSocketState = Any  # type: ignore[assignment,misc]
 
 DEFAULT_EVENTS_IDLE_TIMEOUT_SECONDS: Final[float] = 60.0
+DEFAULT_EVENTS_SEND_TIMEOUT_SECONDS: Final[float] = 5.0
 DEFAULT_CONTROL_RATE_PER_SECOND: Final[float] = 20.0
 DEFAULT_CONTROL_BURST: Final[float] = 40.0
 MAX_REPEATED_RATE_LIMIT_VIOLATIONS: Final[int] = 3
@@ -69,7 +71,8 @@ async def _safe_close_ws(websocket: WebSocket, *, code: int, reason: str) -> Non
     safe_reason = reason.encode("utf-8")[:120].decode("utf-8", errors="ignore")
     try:
         if getattr(websocket, "client_state", None) != WebSocketState.DISCONNECTED:
-            await websocket.close(code=code, reason=safe_reason)
+            async with asyncio.timeout(1.0):
+                await websocket.close(code=code, reason=safe_reason)
     except Exception:
         pass
 
@@ -200,13 +203,16 @@ async def events_websocket_endpoint(websocket: WebSocket) -> None:
         return
 
     broker = events_module.broker
-    owned_subs: set[str] = set()
+    owned_subs: dict[str, str] = {}
     subscribed_signal = asyncio.Event()
     stop_event = asyncio.Event()
     terminal_reason = TerminalReason.NORMAL
     send_lock = asyncio.Lock()
     idle_timeout: float = float(
         getattr(app_state, "events_idle_timeout_seconds", DEFAULT_EVENTS_IDLE_TIMEOUT_SECONDS)
+    )
+    send_timeout: float = float(
+        getattr(app_state, "events_send_timeout_seconds", DEFAULT_EVENTS_SEND_TIMEOUT_SECONDS)
     )
     control_limiter = TokenBucketRateLimiter(
         RateLimitConfig(
@@ -223,7 +229,8 @@ async def events_websocket_endpoint(websocket: WebSocket) -> None:
 
     async def _send_json_safe(payload: dict[str, Any]) -> None:
         async with send_lock:
-            await websocket.send_json(payload)
+            async with asyncio.timeout(send_timeout):
+                await websocket.send_json(payload)
 
     async def _cleanup_connection() -> None:
         subscribed_signal.set()
@@ -238,8 +245,13 @@ async def events_websocket_endpoint(websocket: WebSocket) -> None:
                 connection_id=connection_id,
                 tenant_id=verified_context.tenant_id,
                 principal_id=verified_context.principal_id,
+                allowed_scopes=sorted(verified_context.allowed_scopes),
             )
         )
+    except TimeoutError:
+        await asyncio.shield(supervisor.close(reason=TerminalReason.TIMEOUT))
+        await _safe_close_ws(websocket, code=1008, reason="Send timeout")
+        return
     except asyncio.CancelledError:
         await asyncio.shield(supervisor.close(reason=TerminalReason.CANCELLED))
         raise
@@ -301,7 +313,9 @@ async def events_websocket_endpoint(websocket: WebSocket) -> None:
                     return
 
                 if frame.command == CMD_SESSION_PING:
-                    await _send_json_safe(build_session_pong_frame(request_id=frame.request_id))
+                    await _send_json_safe(
+                        build_session_pong_frame(request_id=frame.request_id, seq=frame.seq)
+                    )
                     continue
 
                 if frame.command == CMD_EVENTS_SUBSCRIBE:
@@ -348,7 +362,7 @@ async def events_websocket_endpoint(websocket: WebSocket) -> None:
                         await _safe_close_ws(websocket, code=1008, reason="Events module closed")
                         return
 
-                    owned_subs.add(sub.subscription_id)
+                    owned_subs[sub.subscription_id] = sub.topic_pattern
                     subscribed_signal.set()
                     await _send_json_safe(
                         build_subscribed_frame(
@@ -360,25 +374,46 @@ async def events_websocket_endpoint(websocket: WebSocket) -> None:
                     continue
 
                 if frame.command == CMD_EVENTS_UNSUBSCRIBE:
-                    assert frame.subscription_id is not None
-                    if frame.subscription_id not in owned_subs:
+                    if frame.subscription_id is not None:
+                        if frame.subscription_id not in owned_subs:
+                            await _send_json_safe(
+                                build_unsubscribed_frame(
+                                    subscription_id=frame.subscription_id,
+                                    removed=False,
+                                    request_id=frame.request_id,
+                                )
+                            )
+                            continue
+                        removed = await broker.unsubscribe(frame.subscription_id)
+                        owned_subs.pop(frame.subscription_id, None)
                         await _send_json_safe(
                             build_unsubscribed_frame(
                                 subscription_id=frame.subscription_id,
-                                removed=False,
+                                removed=removed,
                                 request_id=frame.request_id,
                             )
                         )
                         continue
-                    removed = await broker.unsubscribe(frame.subscription_id)
-                    owned_subs.discard(frame.subscription_id)
+
+                    assert frame.topic_pattern is not None
+                    matching_ids = [
+                        sid for sid, pat in list(owned_subs.items()) if pat == frame.topic_pattern
+                    ]
+                    any_removed = False
+                    for sid in matching_ids:
+                        if await broker.unsubscribe(sid):
+                            any_removed = True
+                        owned_subs.pop(sid, None)
                     await _send_json_safe(
                         build_unsubscribed_frame(
-                            subscription_id=frame.subscription_id,
-                            removed=removed,
+                            topic=frame.topic_pattern,
+                            removed=any_removed,
                             request_id=frame.request_id,
                         )
                     )
+        except TimeoutError:
+            terminal_reason = TerminalReason.TIMEOUT
+            await _safe_close_ws(websocket, code=1008, reason="Send timeout")
         except WebSocketDisconnect:
             return
         except asyncio.CancelledError:
@@ -404,7 +439,17 @@ async def events_websocket_endpoint(websocket: WebSocket) -> None:
             async for envelope in consumer:
                 if stop_event.is_set():
                     return
-                await _send_json_safe(build_delivery_frame(envelope))
+                try:
+                    delivery_frame = build_delivery_frame(envelope)
+                except OversizedEventsFrameError:
+                    await _send_json_safe(
+                        build_error_frame(
+                            code="FRAME_TOO_LARGE",
+                            message="Outbound delivery frame exceeds maximum allowed size",
+                        )
+                    )
+                    continue
+                await _send_json_safe(delivery_frame)
 
             # Queue closed while session was still running (e.g. slow-consumer overflow or shutdown)
             if not stop_event.is_set() and not supervisor.is_closed:
@@ -413,6 +458,9 @@ async def events_websocket_endpoint(websocket: WebSocket) -> None:
                     code=1008,
                     reason="Slow consumer overflow or broker closed",
                 )
+        except TimeoutError:
+            terminal_reason = TerminalReason.TIMEOUT
+            await _safe_close_ws(websocket, code=1008, reason="Send timeout")
         except WebSocketDisconnect:
             return
         except asyncio.CancelledError:

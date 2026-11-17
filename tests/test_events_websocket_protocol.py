@@ -236,7 +236,7 @@ def test_protocol_validation_close_codes() -> None:
         bad_cases: list[tuple[str | bytes, int]] = [
             ("not json {{{", 1007),
             (b"\xff\xfe\xfd", 1007),
-            (json.dumps({"protocol_version": "v2", "type": "session.ping"}), 1007),
+            (json.dumps({"protocol_version": "v2", "type": "session.ping"}), 1008),
             (json.dumps({"protocol_version": "v1", "type": "unknown.cmd"}), 1007),
             (
                 json.dumps({"protocol_version": "v1", "type": "session.ping", "x": float("nan")})

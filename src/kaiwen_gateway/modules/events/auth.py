@@ -109,6 +109,8 @@ class BoundedTicketReplayCache:
     Scope caveat (E2):
         This cache is process-local only and does not coordinate across multiple worker
         processes or Gateway instances. Cross-instance atomic replay protection belongs to E3.
+        Unexpired consumed `jti` entries are never evicted early; if `max_entries` is
+        exhausted by unexpired entries, new ticket consumption fails closed (`False`).
     """
 
     __slots__ = ("_max_entries", "_clock", "_seen", "_lock")
@@ -151,8 +153,9 @@ class BoundedTicketReplayCache:
             self._evict_expired_unlocked(now)
             if jti in self._seen:
                 return False
-            while len(self._seen) >= self._max_entries:
-                self._seen.popitem(last=False)
+            if len(self._seen) >= self._max_entries:
+                # Fail closed: never evict an unexpired jti to make room.
+                return False
             self._seen[jti] = expires_at
             return True
 

@@ -89,6 +89,7 @@ class ParsedEventsClientFrame:
     topic_pattern: str | None = None
     subscription_id: str | None = None
     request_id: str | None = None
+    seq: int | str | None = None
 
 
 def _reject_non_finite_constant(constant: str) -> Any:
@@ -136,7 +137,7 @@ def parse_and_validate_events_client_frame(raw: str | bytes) -> ParsedEventsClie
         raise InvalidEventsFrameError("Frame root must be a JSON object")
 
     if data.get("protocol_version") != EVENTS_WS_PROTOCOL_VERSION:
-        raise InvalidEventsFrameError(
+        raise EventsPolicyViolationError(
             "Unsupported or missing protocol_version",
             error_code="UNSUPPORTED_VERSION",
         )
@@ -175,15 +176,32 @@ def parse_and_validate_events_client_frame(raw: str | bytes) -> ParsedEventsClie
 
     if command == CMD_EVENTS_UNSUBSCRIBE:
         sub_id = data.get("subscription_id")
-        if not isinstance(sub_id, str) or not sub_id:
-            raise InvalidEventsFrameError("events.unsubscribe requires non-empty subscription_id")
+        topic = data.get("topic", data.get("topic_pattern"))
+        if sub_id is not None:
+            if not isinstance(sub_id, str) or not sub_id:
+                raise InvalidEventsFrameError(
+                    "events.unsubscribe subscription_id must be a non-empty str"
+                )
+            return ParsedEventsClientFrame(
+                command=command,
+                subscription_id=sub_id,
+                request_id=request_id,
+            )
+        if not isinstance(topic, str) or not topic:
+            raise InvalidEventsFrameError(
+                "events.unsubscribe requires non-empty topic or subscription_id"
+            )
         return ParsedEventsClientFrame(
             command=command,
-            subscription_id=sub_id,
+            topic_pattern=topic,
             request_id=request_id,
         )
 
-    return ParsedEventsClientFrame(command=command, request_id=request_id)
+    seq = data.get("seq")
+    if seq is not None and (isinstance(seq, bool) or not isinstance(seq, (int, str))):
+        raise InvalidEventsFrameError("session.ping seq must be an int or str")
+
+    return ParsedEventsClientFrame(command=command, request_id=request_id, seq=seq)
 
 
 def build_session_ready_frame(
@@ -191,6 +209,7 @@ def build_session_ready_frame(
     connection_id: str,
     tenant_id: str,
     principal_id: str,
+    allowed_scopes: Sequence[str] = (),
 ) -> dict[str, Any]:
     return {
         "protocol_version": EVENTS_WS_PROTOCOL_VERSION,
@@ -198,6 +217,7 @@ def build_session_ready_frame(
         "connection_id": connection_id,
         "tenant_id": tenant_id,
         "principal_id": principal_id,
+        "allowed_scopes": sorted(allowed_scopes),
     }
 
 
@@ -220,37 +240,59 @@ def build_subscribed_frame(
 
 def build_unsubscribed_frame(
     *,
-    subscription_id: str,
     removed: bool,
+    subscription_id: str | None = None,
+    topic: str | None = None,
     request_id: str | None = None,
 ) -> dict[str, Any]:
     frame: dict[str, Any] = {
         "protocol_version": EVENTS_WS_PROTOCOL_VERSION,
         "type": EVENT_EVENTS_UNSUBSCRIBED,
-        "subscription_id": subscription_id,
         "removed": removed,
     }
+    if subscription_id is not None:
+        frame["subscription_id"] = subscription_id
+    if topic is not None:
+        frame["topic"] = topic
     if request_id is not None:
         frame["request_id"] = request_id
     return frame
 
 
-def build_session_pong_frame(*, request_id: str | None = None) -> dict[str, Any]:
+def build_session_pong_frame(
+    *,
+    request_id: str | None = None,
+    seq: int | str | None = None,
+) -> dict[str, Any]:
     frame: dict[str, Any] = {
         "protocol_version": EVENTS_WS_PROTOCOL_VERSION,
         "type": EVENT_SESSION_PONG,
     }
+    if seq is not None:
+        frame["seq"] = seq
     if request_id is not None:
         frame["request_id"] = request_id
     return frame
 
 
 def build_delivery_frame(envelope: EventEnvelope) -> dict[str, Any]:
-    return {
+    frame: dict[str, Any] = {
         "protocol_version": EVENTS_WS_PROTOCOL_VERSION,
         "type": EVENT_EVENTS_DELIVERY,
         "event": envelope.to_dict(),
     }
+    serialized = json.dumps(
+        frame,
+        allow_nan=False,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    if len(serialized) > EVENTS_MAX_FRAME_BYTES:
+        raise OversizedEventsFrameError(
+            f"Serialized events.delivery frame ({len(serialized)} bytes) exceeds "
+            f"maximum {EVENTS_MAX_FRAME_BYTES} bytes"
+        )
+    return frame
 
 
 def build_error_frame(

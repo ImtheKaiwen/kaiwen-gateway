@@ -252,6 +252,7 @@ def create_gateway_app(
     events_broker_config: EventBrokerConfig | None = None,
     events_module: EventsModule | None = None,
     events_replay_cache: BoundedTicketReplayCache | None = None,
+    events_send_timeout_seconds: float = 5.0,
 ) -> Starlette:
     """Construct a fresh, instance-scoped ASGI application for Kaiwen Gateway.
 
@@ -299,6 +300,15 @@ def create_gateway_app(
         )
     if not isinstance(enable_events, bool):
         raise TypeError(f"enable_events must be a bool, got {type(enable_events).__name__}")
+    if (
+        isinstance(events_send_timeout_seconds, bool)
+        or not isinstance(events_send_timeout_seconds, (int, float))
+        or events_send_timeout_seconds <= 0.0
+    ):
+        raise CoreConfigurationError(
+            "events_send_timeout_seconds must be a positive number",
+            field_name="events_send_timeout_seconds",
+        )
     if ai_media_port_factory is not None and not callable(ai_media_port_factory):
         raise TypeError("ai_media_port_factory must be callable")
 
@@ -564,6 +574,7 @@ def create_gateway_app(
     app.state.events_allowed_origins = normalized_origins
     app.state.events_module = effective_events_module
     app.state.events_replay_cache = effective_replay_cache
+    app.state.events_send_timeout_seconds = float(events_send_timeout_seconds)
     app.state.module_lifecycle = ModuleLifecycleManager(core, policy=module_lifecycle_policy)
     app.state.started = False
     app.state.shutting_down = False
