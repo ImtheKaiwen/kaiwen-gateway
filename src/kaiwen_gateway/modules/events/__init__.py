@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+from kaiwen_gateway.modules.events.auth import (
+    DEFAULT_MAX_TICKET_TTL_SECONDS,
+    DEFAULT_REPLAY_CACHE_MAX_ENTRIES,
+    EVENTS_TICKET_AUDIENCE,
+    BoundedTicketReplayCache,
+    EventsAuthenticatorPort,
+    EventsAuthorizerPort,
+    EventsTicketClaims,
+    EventsTicketVerifierPort,
+    verify_and_consume_ticket,
+)
 from kaiwen_gateway.modules.events.broker import (
     DEFAULT_PUBLISH_BURST,
     DEFAULT_PUBLISH_RATE_PER_SECOND,
@@ -73,6 +84,7 @@ from kaiwen_gateway.modules.events.telemetry import (
 )
 
 __all__ = [
+    "BoundedTicketReplayCache",
     "CORRELATION_ID_PATTERN",
     "DEFAULT_GLOBAL_QUEUED_BYTES_BUDGET",
     "DEFAULT_MAX_CORRELATION_ID_LENGTH",
@@ -83,14 +95,17 @@ __all__ = [
     "DEFAULT_MAX_QUEUED_BYTES_PER_CONNECTION",
     "DEFAULT_MAX_QUEUED_EVENTS_PER_CONNECTION",
     "DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION",
+    "DEFAULT_MAX_TICKET_TTL_SECONDS",
     "DEFAULT_MAX_TOPIC_LENGTH",
     "DEFAULT_PUBLISH_BURST",
     "DEFAULT_PUBLISH_RATE_PER_SECOND",
+    "DEFAULT_REPLAY_CACHE_MAX_ENTRIES",
     "DEFAULT_SUBSCRIBE_BURST",
     "DEFAULT_SUBSCRIBE_RATE_PER_SECOND",
     "DurableEventRecord",
     "DurableEventStorePort",
     "EVENTS_PROTOCOL_VERSION",
+    "EVENTS_TICKET_AUDIENCE",
     "EVENT_ID_PATTERN",
     "EVENT_TYPE_PATTERN",
     "EventAuthorizationError",
@@ -105,12 +120,16 @@ __all__ = [
     "EventRateLimitError",
     "EventSubscription",
     "EventSubscriptionPort",
+    "EventsAuthenticatorPort",
+    "EventsAuthorizerPort",
     "EventsError",
     "EventsErrorCategory",
     "EventsMetricsSnapshot",
     "EventsModule",
     "EventsModuleClosedError",
     "EventsTelemetrySink",
+    "EventsTicketClaims",
+    "EventsTicketVerifierPort",
     "InMemoryEventBroker",
     "InMemoryEventConsumer",
     "InMemoryEventSubscription",
@@ -132,4 +151,5 @@ __all__ = [
     "validate_timestamp",
     "validate_topic",
     "validate_topic_pattern",
+    "verify_and_consume_ticket",
 ]

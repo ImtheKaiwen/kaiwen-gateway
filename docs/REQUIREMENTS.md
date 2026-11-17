@@ -320,7 +320,7 @@ Do not resolve any `OPEN-*` item by an unsupported assumption. For each closure,
 
 ## 10. Post-Beta Events Module Requirements (`D0` Accepted Baseline)
 
-> **Status:** `Accepted` design baseline (`D0` Complete; implementation milestones `E1`–`E4` **`Not started`**; **Voice** remains the only implemented communication module in `v0.1.0b1`). See [`EVENTS_MODULE_DESIGN.md`](EVENTS_MODULE_DESIGN.md) and [`ADR-0006`](decisions/0006-events-module-architecture.md).
+> **Status:** `Accepted` design baseline (`D0` & `E1` Complete; `E2` In review; `E3`–`E4` **`Not started`**; **Voice** remains the only communication module released in `v0.1.0b1`). See [`EVENTS_MODULE_DESIGN.md`](EVENTS_MODULE_DESIGN.md) and [`ADR-0006`](decisions/0006-events-module-architecture.md).
 
 | ID | Category | Requirement | Verifiable Acceptance Criterion |
 | --- | --- | --- | --- |

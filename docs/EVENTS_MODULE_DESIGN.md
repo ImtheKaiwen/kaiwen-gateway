@@ -1,6 +1,6 @@
 # Kaiwen Gateway — Events Module Design Specification (`D0` Accepted Baseline)
 
-> **Status:** `Accepted` (`D0` Architectural Baseline — **Implementation `E1`–`E4` `Not started`**)
+> **Status:** `Accepted` (`D0` Architectural Baseline; **`E1` Complete** on `main` `3c8e490`; **`E2` In review** on `feat/e2-websocket-events`; **`E3`–`E4` `Not started`**)
 > **Baseline Reference:** `kaiwen-gateway v0.1.0b1` (`main` `91ee612fdfc179b94945ec9cde332748de57ea56`; **Voice** is the only implemented communication module)
 > **Related ADR:** [ADR-0006 — Events Module Architecture (`Accepted`)](decisions/0006-events-module-architecture.md)
 > **Related Docs:** [Architecture](ARCHITECTURE.md) · [Requirements](REQUIREMENTS.md) · [Roadmap](../ROADMAP.md) · [Public API Policy](PUBLIC_API_AND_COMPATIBILITY.md)
@@ -152,8 +152,8 @@ Client-to-server frames (`command` / `type` namespace) are strictly separated fr
 | Direction | `type` | Required Fields | Behavior |
 | --- | --- | --- | --- |
 | **Server -> Client** | `session.ready` | `protocol_version`, `connection_id`, `tenant_id`, `principal_id`, `allowed_scopes` | Sent immediately after authenticated upgrade. |
-| **Client -> Server** | `events.subscribe` | `request_id`, `topic` | Checks scope & subscription quota; binds to verified `tenant_id`; replies `events.subscribed` or `error`. |
-| **Client -> Server** | `events.unsubscribe` | `request_id`, `topic` | Removes subscription and cleans queue state; replies `events.unsubscribed`. |
+| **Client -> Server** | `events.subscribe` | `topic` (or `topic_pattern`), `request_id` (optional) | Checks scope & subscription quota; binds to verified `tenant_id`; replies `events.subscribed` (echoing `request_id` if provided) or `events.error`. |
+| **Client -> Server** | `events.unsubscribe` | `topic` (or additive `subscription_id` alias), `request_id` (optional) | Removes matching subscription(s) and cleans queue state; replies `events.unsubscribed` (echoing `request_id` if provided). |
 | **Client -> Server** | `session.ping` | `seq` (optional) | Replies `session.pong` (`seq` echoed). |
 | **Server -> Client** | `events.delivery` | `request_id` (optional), `event` (`EventEnvelope`) | Delivers matching tenant-scoped event from subscriber queue. |
 | **Server -> Client** | `events.error` | `request_id` (optional), `code`, `message` | Sanitized diagnostic error (no secrets, stack traces, or cross-tenant details). |
@@ -193,7 +193,7 @@ Because standard browser `WebSocket` APIs cannot set arbitrary `Authorization` h
 2. **Browser Clients (Short-Lived, Scoped, Single-Use WebSocket Ticket):**
    - **Application-Owned Issuance:** Gateway is **not** an identity provider. The consuming application's existing authenticated HTTP backend (e.g., `POST /api/events/ws-ticket`) mints a short-lived ticket (`ttl <= 30 s` provisional, `aud = "kaiwen-gateway:/ws/events/v1"`, server-derived `tenant_id`, `principal_id`, `allowed_scopes`, unique `jti` nonce, and bound `origin`).
    - **Handshake Transport:** Browser connects via `wss://.../ws/events/v1?ticket=<single_use_ticket>`. Passing long-lived access tokens in query parameters (`?token=`, `?access_token=`, `?authorization=`) is **explicitly rejected** (`403`/`1008`).
-   - **Pre-Accept Verification, Origin & Replay Prevention:** Before `websocket.accept()`, the endpoint validates the `Origin` header against `events_allowed_origins` (rejecting mismatches pre-accept with `403`), verifies signature/expiry/audience via the injected `EventsTicketVerifierPort`, **atomically consumes** `jti` (single-use: `E2` process-local bounded replay cache is **single-instance only**; `E3` **must** provide atomic cross-instance replay protection such as Redis `SET NX EX`), and binds `tenant_id` / `principal_id` strictly server-side.
+   - **Pre-Accept Verification, Origin & Replay Prevention:** Before `websocket.accept()`, the endpoint validates the `Origin` header against `events_allowed_origins` (rejecting mismatches pre-accept with `403`/`1008`), verifies signature/expiry/audience via the injected `EventsTicketVerifierPort`, **atomically consumes** `jti` (single-use: `E2` `BoundedTicketReplayCache` is **process-local / single-instance only**, never evicts unexpired `jti` entries early, and **fails closed** when `max_entries` is exhausted by unexpired entries; `E3` **must** provide atomic cross-instance replay protection such as Redis `SET NX EX`), and binds `tenant_id` / `principal_id` strictly server-side.
    - **Redaction, Reverse-Proxy Logging & Browser Limitations:** Raw query strings, tickets, and bearer tokens are never written to Gateway logs (`SEC-006`). Deployment guidance **must** require secret-safe reverse-proxy access logging (stripping `?ticket=` query parameters from proxy/CDN logs). Honest limitations: browsers require an extra HTTPS `POST` before WebSocket connect; and credential rotation requires opening a new WebSocket connection.
    - **Deterministic Offline Security Tests (`E2`):** Test valid ticket pre-accept success, expired ticket rejection (`403`), wrong-audience ticket rejection, single-use replay rejection on second connect, disallowed `Origin` rejection, and rejection of `?token=` / `?access_token=` query parameters.
 
