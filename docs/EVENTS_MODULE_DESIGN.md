@@ -87,15 +87,17 @@ flowchart TD
 To avoid redundant interfaces while keeping live fan-out distinct from durable stream storage, the proposed port contracts are:
 
 1. **`EventPublisherPort` (Live Fan-Out Write Side):**
-   - `async def publish(self, event: EventEnvelope) -> PublishResult`
-   - Publishes an immutable, already-authorized `EventEnvelope` to live subscribers matching `(event.tenant_id, event.topic)`.
-   - Returns `PublishResult(accepted: bool, delivered_local_count: int, dropped_slow_subscribers: int)` without blocking on slow consumers.
-2. **`EventSubscriptionPort` (Live Fan-Out Read Side):**
-   - `async def subscribe(self, *, tenant_id: str, subscriber_id: str, topic_pattern: str, queue_capacity: int) -> EventSubscription`
-   - `async def unsubscribe(self, *, tenant_id: str, subscriber_id: str, topic_pattern: str | None = None) -> None`
-   - Returns an `EventSubscription` handle exposing `async def receive(self) -> EventEnvelope | None` (bounded `asyncio.Queue` backed) and `async def close() -> None`.
+   - `async def publish(self, envelope: EventEnvelope) -> PublishResult`
+   - Publishes an immutable, already-authorized `EventEnvelope` to live subscribers matching `(envelope.tenant_id, envelope.topic)`.
+   - Returns `PublishResult(event_id, topic, matched_subscribers, delivered_subscribers, dropped_subscribers, disconnected_subscribers, dropped_global_budget, accepted, durable_persisted)` without blocking on slow consumers.
+   - **Partial fan-out semantics (`PublishResult.accepted`):** A `PublishResult` with `accepted=False` (or partially accepted fan-out where `delivered_subscribers > 0` and `dropped_global_budget > 0`) may already have delivered events to some subscribers. Applications must **not** assume blind retries are duplicate-free.
+2. **`EventSubscriptionPort` (Live Fan-Out Read & Registration Side):**
+   - `async def subscribe(self, context: VerifiedPrincipalContext, topic_pattern: str) -> EventSubscription`
+   - `async def unsubscribe(self, subscription_id: str) -> bool`
+   - Returns a registration/lifecycle-only `EventSubscription` handle (`subscription_id`, `connection_id`, `tenant_id`, `topic_pattern`, `is_active`, `async def close() -> None`).
+   - Queue consumption is owned by `EventConnectionConsumer` (`broker.consumer(connection_id)`), exposing `async def receive() -> EventEnvelope | None`, `__aiter__`/`__anext__`, and `async def close() -> None` over the connection's single multiplexed bounded outbound queue.
 3. **`EventBrokerPort` (Unified Live Broker Protocol):**
-   - Structural `Protocol` combining `EventPublisherPort` and `EventSubscriptionPort` plus `async def startup() -> None` and `async def shutdown() -> None` (satisfied by `InMemoryEventBroker` and `RedisPubSubEventBroker`).
+   - Structural `Protocol` combining `EventPublisherPort` and `EventSubscriptionPort` plus `async def startup() -> None`, `async def shutdown() -> None`, `def consumer(self, connection_id: str) -> EventConnectionConsumer`, and `async def close_connection(self, connection_id: str) -> int` (satisfied by `InMemoryEventBroker` and future `RedisPubSubEventBroker`).
 4. **`DurableEventStorePort` (Optional Append-Only Log & Replay):**
    - `async def append(self, event: EventEnvelope) -> str` (returns stream entry ID).
    - `async def read_group(self, *, tenant_id: str, topic: str, group: str, consumer: str, count: int, block_ms: int) -> list[DurableEventRecord]`
@@ -209,12 +211,10 @@ Because standard browser `WebSocket` APIs cannot set arbitrary `Authorization` h
 - **Preferred Backward-Compatible Solution (for `E1`/`E2`, zero changes in `D0`):**
   1. **Preserve `TenantCallBinding`, `VerifiedConnectionContext`, and `AdmissionLease` (`call_id: str`) 100% unchanged for Voice.**
   2. **Add `TenantPrincipalBinding` & `VerifiedPrincipalContext` in `kaiwen_gateway.core.identity`:** Frozen dataclasses carrying `connection_id`, `provider_id`, `tenant_id`, `principal_id`, `allowed_scopes: frozenset[str]`, plus `has_scope()` / `require_scope()` / `require_tenant_and_principal()`.
-  3. **Add `PrincipalAdmissionLease` as a Sibling Lease Class in `kaiwen_gateway.core.admission`:**
-     - Exposes `connection_id: str`, `tenant_id: str`, `provider_id: str`, `principal_id: str`, `context: VerifiedPrincipalContext`, `controller: AdmissionController`, `is_active: bool`, `async def release() -> bool` — **with no `call_id` attribute**.
-     - `AdmissionController.acquire()` uses `@overload` typing:
-       - `acquire(context: VerifiedConnectionContext) -> AdmissionLease` (Voice callers retain exact `AdmissionLease` and `lease.call_id: str` typing).
-       - `acquire(context: VerifiedPrincipalContext) -> PrincipalAdmissionLease` (Events callers receive `PrincipalAdmissionLease` with `principal_id: str` and no fake `call_id`).
-     - Both `AdmissionLease` and `PrincipalAdmissionLease` reserve/release against the **same** `AdmissionController._active_leases` and `_tenant_counts` (shared global and per-tenant capacity ceilings, zero duplicate admission controllers) and integrate with `ConnectionSupervisor` and `InstanceDrainCoordinator`.
+  3. **Add `PrincipalAdmissionLease`, `acquire_principal()`, and `PrincipalConnectionSupervisor` as Sibling Contracts in `core/`:**
+     - `PrincipalAdmissionLease` exposes `connection_id: str`, `tenant_id: str`, `provider_id: str`, `principal_id: str`, `context: VerifiedPrincipalContext`, `controller: AdmissionController`, `is_active: bool`, `async def release() -> bool` — **with no `call_id` attribute**.
+     - `AdmissionController.acquire(VerifiedConnectionContext) -> AdmissionLease` and `ConnectionSupervisor` remain strictly typed for Voice (`call_id: str`).
+     - `AdmissionController.acquire_principal(VerifiedPrincipalContext) -> PrincipalAdmissionLease`, `PrincipalConnectionSupervisor`, and `InstanceDrainCoordinator.admit_principal_connection()` reserve/release against the **same** `AdmissionController._active_leases` and `_tenant_counts` (shared global and per-tenant capacity ceilings, zero duplicate admission controllers).
   4. **Regression Tests (`E1`):** Verify Voice `AdmissionLease.call_id: str` static & runtime compatibility, shared global/per-tenant ceiling enforcement across mixed Voice + Events leases, `PrincipalAdmissionLease` zero-leak release, and `mypy` strictness.
 
 ---

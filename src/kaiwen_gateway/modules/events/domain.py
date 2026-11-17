@@ -358,7 +358,15 @@ class EventEnvelope:
 
 @dataclass(frozen=True, slots=True)
 class PublishResult:
-    """Bounded diagnostic summary of a single event publish operation."""
+    """Bounded diagnostic summary of a single event publish operation.
+
+    Note on ``accepted``:
+        ``accepted=False`` indicates that one or more matched subscribers could not be
+        enqueued (for example due to global queued-byte budget exhaustion). A failed or
+        partially accepted fan-out (``accepted=False`` with ``delivered_subscribers > 0``)
+        may already have delivered the event to other subscribers. Applications must not
+        assume blind retries are duplicate-free.
+    """
 
     event_id: str
     topic: str

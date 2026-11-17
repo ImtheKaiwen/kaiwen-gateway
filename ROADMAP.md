@@ -68,7 +68,7 @@ Use only these milestone status values:
 | **M7** | Conditional Verimor pilot | `Blocked` (official protocol and authorizations) | M6 + `OPEN-*` dependencies |
 | **M8** | Production-readiness decision (separate track) | `Not started` | M7 evidence and separately approved operations plan |
 | **D0** | Events Architecture & Documentation Baseline | `Complete` (`ADR-0006` `Accepted` 2026-11-17; `docs/EVENTS_MODULE_DESIGN.md`) | Maintainer architectural review |
-| **E1** | Events Foundation (`modules/events` core, ports, `InMemoryEventBroker`) | `Not started` | Maintainer acceptance of `D0` & `ADR-0006` |
+| **E1** | Events Foundation (`modules/events` core, ports, `InMemoryEventBroker`) | `Complete` (PR #59; `kaiwen_gateway.modules.events` + additive Core principal identity) | Maintainer acceptance of `D0` & `ADR-0006` |
 | **E2** | WebSocket Events & Security (`/ws/events/v1`, principal identity, rate limits) | `Not started` | `E1` |
 | **E3** | Optional Redis Pub/Sub & Distributed Rate Limiting (`kaiwen-gateway[redis]`) | `Not started` | `E2` |
 | **E4** | Redis Streams Durable Store, Recovery & Load Qualification | `Not started` | `E3` |
@@ -272,7 +272,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 ### Post-Beta Events Initiative (`D0`–`E4`, `ADR-0006 Accepted` — Does Not Alter V1 Voice Baseline)
 
-> **Status note:** `Voice` remains the **only implemented communication module** in `v0.1.0b1`. [`ADR-0006`](docs/decisions/0006-events-module-architecture.md) and [`docs/EVENTS_MODULE_DESIGN.md`](docs/EVENTS_MODULE_DESIGN.md) are **Accepted** (`D0 Complete`); `E1` is implemented on the feature branch pending PR review, and `E2`–`E4` remain `Not started`.
+> **Status note:** `Voice` remains the **only implemented communication module** in `v0.1.0b1`. [`ADR-0006`](docs/decisions/0006-events-module-architecture.md) and [`docs/EVENTS_MODULE_DESIGN.md`](docs/EVENTS_MODULE_DESIGN.md) are **Accepted** (`D0 Complete`); `E1` (Events Foundation) is **Complete** (PR #59), and `E2`–`E4` remain `Not started`.
 
 #### D0 — Events Architecture & Documentation (`Complete`)
 - **Scope:** Architecture, dependency boundaries, broker/durable-store ports, `/ws/events/v1` protocol, fail-closed security model, provisional rate limits, optional Redis Pub/Sub & Streams semantics, observability, and requirements.
@@ -281,7 +281,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - **Acceptance criteria & Exit gate:** All target documents consistent, zero Python/dependency/release changes, Markdown link verification passes, PR #58 reviewed and `ADR-0006` accepted by maintainer.
 - **Explicit non-goals:** No Python implementation, no `redis` dependency, no Notifications or Agent Streaming implementation.
 
-#### E1 — Events Foundation (`In review — PR pending`)
+#### E1 — Events Foundation (`Complete`)
 - **Scope:** `src/kaiwen_gateway/modules/events/` (`EventEnvelope`, topic validation, `EventPublisherPort`, `EventSubscriptionPort`, `EventBrokerPort`, `DurableEventStorePort`, `EventsTelemetrySink`, `EventsModule`, `InMemoryEventBroker`, single per-connection byte-bounded queue, process-local `TokenBucketRateLimiter`, and additive `TenantPrincipalBinding` / `VerifiedPrincipalContext` / `PrincipalAdmissionLease` in Core preserving `AdmissionLease.call_id: str` untouched).
 - **Prerequisites:** Maintainer approval of `D0` and `ADR-0006`.
 - **Deliverables & Test evidence:** Unit and broker conformance tests verifying multi-tenant isolation, `1 MiB`/conn & `32 MiB` global byte-bound queues, rate limiting, `PrincipalAdmissionLease` shared capacity & zero-leak release, `ModuleLifecycleManager` startup/shutdown, and zero-`redis` import isolation.

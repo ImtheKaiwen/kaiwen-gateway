@@ -91,3 +91,16 @@ Before transitioning this ADR from `Proposed` to `Accepted` and authorizing `E1`
 2. Maintainers approve the additive Core principal-identity approach (`TenantPrincipalBinding` / `VerifiedPrincipalContext` without weakening `TenantCallBinding.call_id` for Voice).
 3. Maintainers approve the separation between live fan-out (`at-most-once`) and durable Redis Streams (`at-least-once`), plus the default prohibition on untrusted client-side WebSocket publishing.
 4. Maintainers review and accept the provisional rate-limit/backpressure defaults and the `D0`–`E4` milestone plan in [`ROADMAP.md`](../../ROADMAP.md).
+
+---
+
+## 7. Implementation Refinement (2026-11-18 — Maintainer-Approved for `E1`)
+
+During `E1` implementation, strict `mypy` verification against existing Core/Voice subclasses and test fixtures showed that `@overload`ing `AdmissionController.acquire()` or widening `ConnectionSupervisor.context` / `lease` breaks existing Voice callers and subclasses. The maintainer explicitly approved the following additive refinements without altering `ADR-0006`'s architectural goals:
+
+1. **Additive Sibling Core Design (Superseding §2.5 `@overload` Sketch):**
+   - `AdmissionController.acquire(VerifiedConnectionContext) -> AdmissionLease` and `ConnectionSupervisor` remain strictly typed for Voice (`call_id: str`).
+   - Non-call principal connections use additive sibling contracts sharing the same `AdmissionController` capacity accounting and `InstanceDrainCoordinator` lifecycle: `AdmissionController.acquire_principal(VerifiedPrincipalContext) -> PrincipalAdmissionLease`, `PrincipalConnectionSupervisor`, and `InstanceDrainCoordinator.admit_principal_connection()`.
+2. **Connection-Level Consumer Ownership:**
+   - `EventSubscription` handles returned by `subscribe()` are registration/lifecycle handles only (`close()`), without per-subscription `receive()`.
+   - A single connection-level `EventConnectionConsumer` (`broker.consumer(connection_id)`) drains the connection's multiplexed bounded outbound queue (`receive() -> EventEnvelope | None`), preventing events from unrelated topics on the same connection from being read through an incompatible subscription handle.

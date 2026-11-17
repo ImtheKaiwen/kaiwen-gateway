@@ -207,7 +207,11 @@ def test_r6_events_module_rejects_restart_after_terminal_shutdown() -> None:
     asyncio.run(scenario())
 
 
-def test_r7_default_broker_enforces_provisional_rate_limits() -> None:
+def test_r7_default_broker_enforces_provisional_rate_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("kaiwen_gateway.modules.events.ratelimit.time.monotonic", lambda: 100.0)
+
     async def scenario() -> None:
         broker = InMemoryEventBroker()
         await broker.startup()
@@ -219,5 +223,78 @@ def test_r7_default_broker_enforces_provisional_rate_limits() -> None:
         with pytest.raises(EventRateLimitError):
             await broker.subscribe(ctx, "call.status")
         await broker.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_cross_principal_connection_id_reuse_rejected() -> None:
+    async def scenario() -> None:
+        broker = InMemoryEventBroker()
+        await broker.startup()
+        await broker.subscribe(
+            _ctx(connection_id="shared-conn", principal_id="principal-1"),
+            "call.status",
+        )
+        with pytest.raises(EventAuthorizationError):
+            await broker.subscribe(
+                _ctx(connection_id="shared-conn", principal_id="principal-2"),
+                "call.status",
+            )
+        await broker.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_default_publish_rate_limit_burst_of_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("kaiwen_gateway.modules.events.ratelimit.time.monotonic", lambda: 100.0)
+
+    async def scenario() -> None:
+        broker = InMemoryEventBroker()
+        await broker.startup()
+        envelopes = [_env(event_id=f"evt-{i}", principal_id="pub-burst-1") for i in range(401)]
+        for env in envelopes[:400]:
+            res = await broker.publish(env)
+            assert res.accepted is True
+        with pytest.raises(EventRateLimitError):
+            await broker.publish(envelopes[400])
+        await broker.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_partial_fanout_under_global_byte_budget_pressure() -> None:
+    async def scenario() -> None:
+        probe = _env(event_id="e1", payload={"data": "x" * 400})
+        budget = probe.serialized_bytes * 3
+        broker = InMemoryEventBroker(
+            EventBrokerConfig(
+                max_queued_events_per_connection=10,
+                max_queued_bytes_per_connection=budget,
+                global_queued_bytes_budget=budget,
+            )
+        )
+        await broker.startup()
+        sub1 = await broker.subscribe(_ctx(connection_id="c1"), "call.status")
+        sub2 = await broker.subscribe(_ctx(connection_id="c2"), "call.status")
+        cons1 = broker.consumer("c1")
+        cons2 = broker.consumer("c2")
+
+        r1 = await broker.publish(_env(event_id="e1", payload={"data": "x" * 400}))
+        assert r1.accepted is True
+        assert r1.delivered_subscribers == 2
+
+        # Partial fan-out: one subscriber receives e2, the second drops due to global budget
+        r2 = await broker.publish(_env(event_id="e2", payload={"data": "x" * 400}))
+        assert r2.accepted is False
+        assert r2.delivered_subscribers == 1
+        assert r2.dropped_global_budget == 1
+        assert r2.disconnected_subscribers == 0
+        assert sub1.is_active is True
+        assert sub2.is_active is True
+
+        assert await cons1.receive() is not None
+        assert await cons2.receive() is not None
+        await broker.shutdown()
+        assert broker.stats().queued_bytes == 0
 
     asyncio.run(scenario())
