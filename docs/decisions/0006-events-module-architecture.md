@@ -1,13 +1,13 @@
-# ADR-0006: Adopt a Bounded, Port-Driven Events Module Architecture (`Proposed`)
+# ADR-0006: Adopt a Bounded, Port-Driven Events Module Architecture
 
-- **Status:** Proposed
-- **Date:** 2026-11-17
+- **Status:** Accepted
+- **Date:** 2026-11-17 (accepted 2026-11-17)
 - **Decision owners:** Kaiwen Gateway maintainers
 - **Scope:** Post-`v0.1.0b1` Events communication module (`src/kaiwen_gateway/modules/events/`), optional Redis infrastructure (`kaiwen-gateway[redis]`), and `/ws/events/v1` WebSocket transport
 - **Related decisions:** [ADR-0001 — Modular Monolith](0001-modular-monolith.md) · [ADR-0002 — Hexagonal Architecture](0002-hexagonal-architecture.md) · [ADR-0003 — Library and Server](0003-library-and-server.md) · [ADR-0004 — Synthetic Binary WebSocket Media](0004-synthetic-binary-websocket-media.md)
 - **Related documents:** [Events Module Design](../EVENTS_MODULE_DESIGN.md) · [Architecture](../ARCHITECTURE.md) · [Requirements](../REQUIREMENTS.md) · [Roadmap](../../ROADMAP.md)
 
-> **Decision status note:** This ADR is **`Proposed`** for architectural review during milestone **D0**. It does **not** authorize implementation of Events runtime code, Redis dependencies, or new package extras until explicitly accepted by the maintainers.
+> **Decision status note:** This ADR was **accepted** by the maintainer on 2026-11-17 as the architectural baseline for the post-`v0.1.0b1` Events track (**D0 Complete**). Acceptance applies to the architectural design only; implementation milestones **E1–E4 remain `Not started`** until separately authorized, and **Voice** remains the only implemented communication module in `v0.1.0b1`.
 
 ---
 
@@ -46,7 +46,7 @@ Adopt an independently bounded **Events** communication module under `src/kaiwen
    - Introduce `TenantPrincipalBinding`, `VerifiedPrincipalContext`, and sibling `PrincipalAdmissionLease` (`principal_id: str`, no `call_id`) with `@overload`ed `AdmissionController.acquire()` and `ConnectionSupervisor` support so Voice retains strict `str` `call_id` typing while Events shares the same `AdmissionController` capacity ceilings and `InstanceDrainCoordinator` lifecycle without duplicating controllers or fabricating `call_id`s.
 6. **Explicit Fail-Closed Ingress, Dual Bearer/Ticket Auth & Trusted Server-Side Publishing:**
    - `/ws/events/v1` uses an explicit `events_ingress_mode="authenticated"` (plus `enable_events=True`, `events_authenticator`, `events_authorizer`, and `events_allowed_origins` for browsers), allowing Events to be enabled independently of Voice without ever bypassing disabled ingress or missing authentication.
-   - Supports both `Authorization: Bearer <token>` (server-to-server) and application-issued short-lived, scoped, single-use WebSocket tickets (`?ticket=`, pre-accept `Origin` + replay consumption; long-lived tokens in URLs rejected).
+   - Supports both `Authorization: Bearer <token>` (server-to-server) and application-issued short-lived, scoped, single-use WebSocket tickets (`?ticket=`, pre-accept `Origin` + replay consumption; `E2` process-local replay protection is single-instance only, `E3` must provide atomic cross-instance replay protection, and deployment guidance requires secret-safe reverse-proxy access logging; long-lived tokens in URLs rejected).
    - Public WebSocket clients are denied arbitrary publishing and unauthorized wildcards by default; future **Notifications** and **Agent Streaming** consume Events through typed port contracts (`EventPublisherPort`, `EventSubscriptionPort`, `DurableEventStorePort`) injected at the composition root.
 7. **Provisional Rate Limiting, Byte-Bounded Queues & Explicit Overload Semantics:**
    - Use **one** bounded outbound queue per subscriber connection (multiplexed across up to `32` subscriptions) enforcing **both** event count (`128`) and byte limits (`1 MiB` per connection, `32 MiB` global queued-byte budget) with `disconnect_slow_consumer` (`1008`) as the default slow-consumer policy.
