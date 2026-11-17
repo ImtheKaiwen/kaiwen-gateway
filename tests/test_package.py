@@ -62,13 +62,14 @@ def test_runtime_dependencies_remain_empty() -> None:
     assert pyproject_data["project"]["dependencies"] == []
     assert "server" in pyproject_data["project"]["optional-dependencies"]
     assert "openai" in pyproject_data["project"]["optional-dependencies"]
+    assert "redis" in pyproject_data["project"]["optional-dependencies"]
     reqs = importlib.metadata.requires("kaiwen-gateway")
     mandatory_reqs = [r for r in (reqs or []) if "extra ==" not in r]
     assert mandatory_reqs == []
     optional_reqs = [r for r in (reqs or []) if "extra ==" in r]
-    assert len(optional_reqs) == 4
+    assert len(optional_reqs) == 5
     for r in optional_reqs:
-        assert ("server" in r or "openai" in r) and "extra ==" in r
+        assert ("server" in r or "openai" in r or "redis" in r) and "extra ==" in r
 
 
 def test_import_has_no_runtime_side_effects_in_isolated_subprocess(tmp_path: Path) -> None:

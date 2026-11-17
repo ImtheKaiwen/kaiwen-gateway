@@ -30,6 +30,7 @@ from kaiwen_gateway.modules.events import (
     EventsAuthorizerPort,
     EventsModule,
     EventsTicketVerifierPort,
+    TicketReplayCachePort,
 )
 from kaiwen_gateway.modules.voice.ports import AIRealtimeMediaPort
 from kaiwen_gateway.server.exceptions import ServerDependencyError
@@ -176,6 +177,11 @@ async def readiness_endpoint(request: Request) -> JSONResponse:
                 {"status": "unavailable", "reason": "events_not_started"},
                 status_code=503,
             )
+        if not getattr(events_mod.broker, "is_healthy", True):
+            return JSONResponse(
+                {"status": "unavailable", "reason": "events_backend_unavailable"},
+                status_code=503,
+            )
 
     if voice_enabled and not events_enabled:
         return JSONResponse(
@@ -252,7 +258,7 @@ def create_gateway_app(
     events_allowed_origins: Sequence[str] = (),
     events_broker_config: EventBrokerConfig | None = None,
     events_module: EventsModule | None = None,
-    events_replay_cache: BoundedTicketReplayCache | None = None,
+    events_replay_cache: TicketReplayCachePort | None = None,
     events_send_timeout_seconds: float = 5.0,
 ) -> Starlette:
     """Construct a fresh, instance-scoped ASGI application for Kaiwen Gateway.

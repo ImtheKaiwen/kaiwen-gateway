@@ -16,16 +16,17 @@ from kaiwen_gateway.core.exceptions import (
 from kaiwen_gateway.core.identity import VerifiedPrincipalContext, bind_verified_principal_context
 from kaiwen_gateway.core.lifecycle import ConnectionState, TerminalReason
 from kaiwen_gateway.modules.events.auth import (
-    BoundedTicketReplayCache,
     EventsAuthenticatorPort,
     EventsAuthorizerPort,
     EventsTicketVerifierPort,
+    TicketReplayCachePort,
     verify_and_consume_ticket,
 )
 from kaiwen_gateway.modules.events.domain import (
     EventAuthorizationError,
     EventBackpressureError,
     EventRateLimitError,
+    EventsBackendUnavailableError,
     EventsModuleClosedError,
     InvalidEventError,
 )
@@ -125,9 +126,7 @@ async def _authenticate_events_handshake(
         ticket_verifier: EventsTicketVerifierPort | None = getattr(
             app_state, "events_ticket_verifier", None
         )
-        replay_cache: BoundedTicketReplayCache | None = getattr(
-            app_state, "events_replay_cache", None
-        )
+        replay_cache: TicketReplayCachePort | None = getattr(app_state, "events_replay_cache", None)
         allowed_origins: tuple[str, ...] = getattr(app_state, "events_allowed_origins", ())
         if ticket_verifier is None or replay_cache is None or not allowed_origins:
             raise EventAuthorizationError("Browser ticket authentication is not configured")
@@ -178,6 +177,9 @@ async def events_websocket_endpoint(websocket: WebSocket) -> None:
             connection_id=connection_id,
             app_state=app_state,
         )
+    except EventsBackendUnavailableError:
+        await _safe_close_ws(websocket, code=1011, reason="Backend unavailable")
+        return
     except (EventAuthorizationError, IdentityError, InvalidEventError):
         await _safe_close_ws(
             websocket,
@@ -358,6 +360,16 @@ async def events_websocket_endpoint(websocket: WebSocket) -> None:
                             )
                         )
                         continue
+                    except EventsBackendUnavailableError:
+                        await _send_json_safe(
+                            build_error_frame(
+                                code="BACKEND_UNAVAILABLE",
+                                message="Events backend unavailable",
+                                request_id=frame.request_id,
+                            )
+                        )
+                        await _safe_close_ws(websocket, code=1011, reason="Backend unavailable")
+                        return
                     except EventsModuleClosedError:
                         await _safe_close_ws(websocket, code=1008, reason="Events module closed")
                         return

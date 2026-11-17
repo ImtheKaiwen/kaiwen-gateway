@@ -5,7 +5,8 @@ from __future__ import annotations
 from kaiwen_gateway.core.contracts import CORE_CONTRACT_VERSION, ModuleDescriptor
 from kaiwen_gateway.modules.events.broker import EventBrokerConfig, InMemoryEventBroker
 from kaiwen_gateway.modules.events.domain import EventsModuleClosedError
-from kaiwen_gateway.modules.events.ratelimit import TokenBucketRateLimiter
+from kaiwen_gateway.modules.events.ports import EventBrokerPort
+from kaiwen_gateway.modules.events.ratelimit import RateLimiterPort
 from kaiwen_gateway.modules.events.telemetry import EventsTelemetrySink
 
 
@@ -26,18 +27,18 @@ class EventsModule:
     def __init__(
         self,
         *,
-        broker: InMemoryEventBroker | None = None,
+        broker: EventBrokerPort | None = None,
         broker_config: EventBrokerConfig | None = None,
         telemetry: EventsTelemetrySink | None = None,
-        publish_rate_limiter: TokenBucketRateLimiter | None = None,
-        subscribe_rate_limiter: TokenBucketRateLimiter | None = None,
+        publish_rate_limiter: RateLimiterPort | None = None,
+        subscribe_rate_limiter: RateLimiterPort | None = None,
     ) -> None:
         self._descriptor: ModuleDescriptor = ModuleDescriptor(
             module_id="events",
             contract_version=CORE_CONTRACT_VERSION,
-            description="E1 bounded in-memory tenant-scoped events foundation",
+            description="E1/E3 bounded tenant-scoped events module",
         )
-        self._broker: InMemoryEventBroker = (
+        self._broker: EventBrokerPort = (
             broker
             if broker is not None
             else InMemoryEventBroker(
@@ -56,7 +57,7 @@ class EventsModule:
         return self._descriptor
 
     @property
-    def broker(self) -> InMemoryEventBroker:
+    def broker(self) -> EventBrokerPort:
         """Return the underlying bounded event broker."""
         return self._broker
 

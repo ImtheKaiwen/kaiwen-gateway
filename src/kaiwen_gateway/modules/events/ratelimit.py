@@ -8,8 +8,18 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 from kaiwen_gateway.modules.events.domain import InvalidEventError
+
+
+@runtime_checkable
+class RateLimiterPort(Protocol):
+    """Port for process-local or distributed token-bucket rate limiters."""
+
+    async def check(self, key: str, *, cost: float = 1.0) -> RateLimitDecision:
+        """Atomically check and consume `cost` tokens for `key`."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,5 +161,6 @@ class TokenBucketRateLimiter:
 __all__ = [
     "RateLimitConfig",
     "RateLimitDecision",
+    "RateLimiterPort",
     "TokenBucketRateLimiter",
 ]

@@ -69,6 +69,14 @@ class EventsModuleClosedError(EventsError):
     """Raised when operations are attempted on a stopped or unstarted Events module."""
 
 
+class EventsBackendUnavailableError(EventsError):
+    """Raised when a configured distributed Events backend (such as Redis) is unavailable."""
+
+
+class EventsDependencyError(EventsError):
+    """Raised when an optional Events extra (such as `kaiwen-gateway[redis]`) is missing."""
+
+
 class SlowConsumerPolicy(StrEnum):
     """Policy applied when a subscriber connection's outbound queue overflows."""
 
@@ -407,6 +415,8 @@ __all__ = [
     "EventBackpressureError",
     "EventDeliveryOutcome",
     "EventEnvelope",
+    "EventsBackendUnavailableError",
+    "EventsDependencyError",
     "EventsError",
     "EventsModuleClosedError",
     "EventRateLimitError",
