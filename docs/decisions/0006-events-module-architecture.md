@@ -79,7 +79,7 @@ Adopt an independently bounded **Events** communication module under `src/kaiwen
 - **Security:** Enforces pre-operation authentication, server-derived `tenant_id` / `principal_id`, per-channel/topic scope checks, explicit denial of unauthorized wildcards, strict JSON payload/size bounds, and secret/payload redaction in logs and error responses.
 - **Performance:** Voice media pumps remain isolated from Events. Per-subscriber bounded queues isolate slow WebSocket consumers. Redis Pub/Sub and Redis Streams I/O occur off the Voice event path.
 - **Migration & Compatibility:** No breaking changes to existing `v0.1.0b1` Core, Voice, Server, or OpenAI Adapter APIs. Core identity generalization in `E1`/`E2` must be strictly **additive** so existing `TenantCallBinding` callers are unaffected.
-- **Operational Risks:** Redis unavailability, split-brain rate limits across workers without Redis, and unbounded Redis Stream growth without explicit `MAXLEN` trimming policies (addressed in [Events Module Design §11–§12](../EVENTS_MODULE_DESIGN.md)).
+- **Operational Risks:** Redis unavailability, split-brain rate limits across workers without Redis, and unbounded Redis Stream growth without explicit `MAXLEN` trimming policies (addressed in [Events Module Design §7 & §9.2](../EVENTS_MODULE_DESIGN.md)).
 
 ---
 

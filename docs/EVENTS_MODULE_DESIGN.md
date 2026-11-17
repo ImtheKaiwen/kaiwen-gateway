@@ -182,12 +182,13 @@ Enabling `/ws/events/v1` must never bypass Core ingress or authentication polici
   - Consequently, defining `VerifiedPrincipalContext` alone without integrating `AdmissionController`, `AdmissionLease`, and `ConnectionSupervisor` would either fail runtime/type checks or force Events to bypass Core admission and draining.
 - **Preferred Additive Solution (for `E1`/`E2`, zero changes in `D0`):**
   1. **Keep `TenantCallBinding` & `VerifiedConnectionContext` intact for Voice:** `call_id` remains mandatory on `TenantCallBinding` and `VerifiedConnectionContext`; no Voice invariant is weakened and no fake `call_id` (e.g., `"events-none"`) is ever fabricated.
-  2. **Add `TenantPrincipalBinding` & `VerifiedPrincipalContext` in `kaiwen_gateway.core.identity`:** Frozen dataclasses carrying `connection_id`, `authorized_provider_id`, `tenant_id`, `principal_id`, `allowed_scopes: frozenset[str]`, plus `has_scope()` / `require_scope()` / `require_tenant_and_principal()`.
+  2. **Add `TenantPrincipalBinding` & `VerifiedPrincipalContext` in `kaiwen_gateway.core.identity`:** Frozen dataclasses carrying `connection_id`, `provider_id`, `tenant_id`, `principal_id`, `allowed_scopes: frozenset[str]`, plus `has_scope()` / `require_scope()` / `require_tenant_and_principal()`.
   3. **Define a Narrow Structural Protocol `VerifiedConnectionIdentity` (or `AdmissibleContext`) in `kaiwen_gateway.core.identity`:**
-     - Exposes `connection_id: str`, `tenant_id: str`, `authorized_provider_id: str`, `allowed_scopes: frozenset[str]`, `has_scope(scope: str) -> bool`, `require_scope(scope: str) -> None`.
+     - Exposes `connection_id: str`, `tenant_id: str`, `provider_id: str`, `allowed_scopes: frozenset[str]`, `has_scope(scope: str) -> bool`, `require_scope(scope: str) -> None`.
      - Satisfied by **both** `VerifiedConnectionContext` (Voice, retaining `call_id`) and `VerifiedPrincipalContext` (Events, carrying `principal_id` without `call_id`).
   4. **Update `AdmissionController`, `AdmissionLease`, and `ConnectionSupervisor` Type Acceptance (Backward-Compatible):**
      - Accept `VerifiedConnectionContext | VerifiedPrincipalContext` (via explicit `isinstance` check against the closed two-type union rather than arbitrary duck typing, preserving Core's fail-closed forge resistance).
+     - Expose `AdmissionLease.call_id: str | None` (`None` for principal leases, non-empty `str` for call leases) or a typed accessor without breaking Voice callers.
      - `AdmissionController` continues to enforce global and per-tenant ceilings (`tenant_id`), deduplicate `connection_id`, and prune zero-count tenants identically for both Voice and Events.
      - `ConnectionSupervisor` and `InstanceDrainCoordinator` supervise Events WebSocket connections with the exact same `ConnectionState` machine, `AdmissionLease` ownership, and `DrainReport` guarantees as Voice.
 - **Alternatives Considered & Rejected:**
