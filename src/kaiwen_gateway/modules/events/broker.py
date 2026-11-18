@@ -63,6 +63,11 @@ def _is_subscription_authorized(
     if "events:admin" in scopes:
         return True
 
+    if "notifications:subscribe:tenant" in scopes and (
+        canonical_pattern == "notifications.r.*" or canonical_pattern.startswith("notifications.r.")
+    ):
+        return True
+
     if canonical_pattern.endswith(".*"):
         if "events:subscribe:wildcard" in scopes:
             return True

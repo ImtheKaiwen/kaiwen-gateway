@@ -27,6 +27,11 @@ from kaiwen_gateway.modules.events import (
     InMemoryEventBroker,
     SlowConsumerPolicy,
 )
+from kaiwen_gateway.modules.events.redis import (
+    RedisClientConfig,
+    RedisPubSubBrokerConfig,
+    RedisPubSubEventBroker,
+)
 from kaiwen_gateway.modules.notifications import (
     NOTIFICATIONS_SCHEMA_VERSION,
     DenyAllProducerAuthorizer,
@@ -775,3 +780,267 @@ def test_slow_consumer_disconnect_isolated_from_healthy_recipient() -> None:
             delivered = ws_healthy.receive_json()
             assert delivered["type"] == "events.delivery"
             assert delivered["event"]["event_id"] == notif_c.notification_id
+
+
+class _PermissiveTopicAuthorizer:
+    async def authorize_subscribe(
+        self,
+        *,
+        context: VerifiedPrincipalContext,
+        topic_pattern: str,
+    ) -> None:
+        return None
+
+
+def test_permissive_topic_authorizer_cannot_bypass_recipient_isolation() -> None:
+    token_map = {
+        "tok-b": (
+            "tenant-alpha",
+            "user-b",
+            frozenset({"events:subscribe", "events:subscribe:wildcard"}),
+        ),
+    }
+    app = create_gateway_app(
+        CoreConfig(events_ingress_mode="authenticated"),
+        enable_events=True,
+        events_authenticator=_TokenMapAuthenticator(token_map),
+        events_authorizer=_TokenMapAuthorizer(token_map),
+        enable_notifications=True,
+        events_topic_authorizer=_PermissiveTopicAuthorizer(),
+    )
+    topic_a = derive_recipient_topic("tenant-alpha", "user-a")
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/ws/events/v1", headers={"Authorization": "Bearer tok-b"}
+        ) as ws_b:
+            assert ws_b.receive_json()["type"] == "session.ready"
+            for idx, pattern in enumerate((topic_a, "notifications.r.*", "notifications.*")):
+                ws_b.send_json(
+                    {
+                        "protocol_version": EVENTS_PROTOCOL_VERSION,
+                        "type": "events.subscribe",
+                        "topic_pattern": pattern,
+                        "request_id": f"bypass-{idx}",
+                    }
+                )
+                err = ws_b.receive_json()
+                assert err["type"] == "events.error"
+                assert err["code"] == "FORBIDDEN_SUBSCRIPTION"
+
+    async def _check_direct_broker() -> None:
+        app_direct = create_gateway_app(
+            CoreConfig(events_ingress_mode="authenticated"),
+            enable_events=True,
+            events_authenticator=_TokenMapAuthenticator(token_map),
+            events_authorizer=_TokenMapAuthorizer(token_map),
+            enable_notifications=True,
+            events_topic_authorizer=_PermissiveTopicAuthorizer(),
+        )
+        broker = app_direct.state.events_module.broker
+        await broker.startup()
+        try:
+            ctx = VerifiedPrincipalContext(
+                provider_id="idp",
+                tenant_id="tenant-alpha",
+                connection_id="conn_perm_1",
+                principal_id="user-b",
+                allowed_scopes=frozenset({"events:subscribe", "events:subscribe:wildcard"}),
+            )
+            with pytest.raises(EventAuthorizationError):
+                await broker.subscribe(ctx, topic_a)
+            with pytest.raises(EventAuthorizationError):
+                await broker.subscribe(ctx, "notifications.*")
+        finally:
+            await broker.shutdown()
+
+    asyncio.run(_check_direct_broker())
+
+    # Explicit EventsModule with permissive topic_authorizer fails closed at startup
+    with pytest.raises(CoreConfigurationError):
+        create_gateway_app(
+            CoreConfig(events_ingress_mode="authenticated"),
+            enable_events=True,
+            events_authenticator=_TokenMapAuthenticator(token_map),
+            events_authorizer=_TokenMapAuthorizer(token_map),
+            events_module=EventsModule(topic_authorizer=_PermissiveTopicAuthorizer()),
+            enable_notifications=True,
+            events_topic_authorizer=_PermissiveTopicAuthorizer(),
+        )
+
+
+def test_host_additional_policy_cannot_bypass_but_can_further_restrict() -> None:
+    class _HostDenyOrdersSecret:
+        async def authorize_subscribe(
+            self,
+            *,
+            context: VerifiedPrincipalContext,
+            topic_pattern: str,
+        ) -> None:
+            if topic_pattern == "orders.secret":
+                raise EventAuthorizationError("Host policy denies orders.secret")
+
+    token_map = {
+        "tok-a": ("tenant-alpha", "user-a", frozenset({"events:subscribe"})),
+    }
+    app = create_gateway_app(
+        CoreConfig(events_ingress_mode="authenticated"),
+        enable_events=True,
+        events_authenticator=_TokenMapAuthenticator(token_map),
+        events_authorizer=_TokenMapAuthorizer(token_map),
+        enable_notifications=True,
+        events_topic_authorizer=_HostDenyOrdersSecret(),
+    )
+    self_topic = derive_recipient_topic("tenant-alpha", "user-a")
+    other_topic = derive_recipient_topic("tenant-alpha", "user-b")
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/ws/events/v1", headers={"Authorization": "Bearer tok-a"}
+        ) as ws:
+            assert ws.receive_json()["type"] == "session.ready"
+            # Self notification topic allowed
+            ws.send_json(
+                {
+                    "protocol_version": EVENTS_PROTOCOL_VERSION,
+                    "type": "events.subscribe",
+                    "topic_pattern": self_topic,
+                    "request_id": "self-ok",
+                }
+            )
+            assert ws.receive_json()["type"] == "events.subscribed"
+
+            # Cross-recipient denied by mandatory NotificationsTopicAuthorizer
+            ws.send_json(
+                {
+                    "protocol_version": EVENTS_PROTOCOL_VERSION,
+                    "type": "events.subscribe",
+                    "topic_pattern": other_topic,
+                    "request_id": "other-deny",
+                }
+            )
+            assert ws.receive_json()["code"] == "FORBIDDEN_SUBSCRIPTION"
+
+            # Additional host policy restriction enforced
+            ws.send_json(
+                {
+                    "protocol_version": EVENTS_PROTOCOL_VERSION,
+                    "type": "events.subscribe",
+                    "topic_pattern": "orders.secret",
+                    "request_id": "host-deny",
+                }
+            )
+            assert ws.receive_json()["code"] == "FORBIDDEN_SUBSCRIPTION"
+
+
+def test_subscription_scope_consistency_inmemory_and_redis_broker() -> None:
+    async def _run() -> None:
+        in_mem = InMemoryEventBroker(topic_authorizer=NotificationsTopicAuthorizer())
+        await in_mem.startup()
+
+        class _StubRedis:
+            def pubsub(self) -> Any:
+                raise AssertionError("pubsub not needed for auth-rejection tests")
+
+            async def aclose(self) -> None:
+                return None
+
+        redis_broker = RedisPubSubEventBroker(
+            config=RedisPubSubBrokerConfig(
+                redis=RedisClientConfig(url="redis://127.0.0.1:6379/0"),
+                broker=EventBrokerConfig(enable_rate_limiting=False),
+            ),
+            redis_client=_StubRedis(),
+            topic_authorizer=NotificationsTopicAuthorizer(),
+        )
+
+        self_topic = derive_recipient_topic("tenant-alpha", "user-a")
+        other_topic = derive_recipient_topic("tenant-alpha", "user-b")
+
+        # 1. notifications:subscribe:self without events:subscribe is denied by broker
+        self_only_ctx = VerifiedPrincipalContext(
+            provider_id="idp",
+            tenant_id="tenant-alpha",
+            connection_id="conn_s1",
+            principal_id="user-a",
+            allowed_scopes=frozenset({"notifications:subscribe:self"}),
+        )
+        # 2. notifications:subscribe:tenant standalone: allowed for notifications.r.*,
+        #    denied for non-notification topics
+        tenant_admin_ctx = VerifiedPrincipalContext(
+            provider_id="idp",
+            tenant_id="tenant-alpha",
+            connection_id="conn_t1",
+            principal_id="admin-a",
+            allowed_scopes=frozenset({"notifications:subscribe:tenant"}),
+        )
+        # 3. events:subscribe + events:subscribe:wildcard denied for cross-recipient & wildcards
+        wildcard_ctx = VerifiedPrincipalContext(
+            provider_id="idp",
+            tenant_id="tenant-alpha",
+            connection_id="conn_w1",
+            principal_id="user-a",
+            allowed_scopes=frozenset({"events:subscribe", "events:subscribe:wildcard"}),
+        )
+
+        try:
+            for broker in (in_mem, redis_broker):
+                with pytest.raises(EventAuthorizationError):
+                    await broker.subscribe(self_only_ctx, self_topic)
+                with pytest.raises(EventAuthorizationError):
+                    await broker.subscribe(tenant_admin_ctx, "orders.created")
+                with pytest.raises(EventAuthorizationError):
+                    await broker.subscribe(wildcard_ctx, other_topic)
+                with pytest.raises(EventAuthorizationError):
+                    await broker.subscribe(wildcard_ctx, "notifications.r.*")
+                with pytest.raises(EventAuthorizationError):
+                    await broker.subscribe(wildcard_ctx, "notifications.*")
+
+            # Standalone notifications:subscribe:tenant succeeds on InMemoryEventBroker
+            sub = await in_mem.subscribe(tenant_admin_ctx, "notifications.r.*")
+            assert sub.topic_pattern == "notifications.r.*"
+        finally:
+            await in_mem.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_frame_size_serialization_parity_with_starlette_send_json() -> None:
+    import json
+
+    from kaiwen_gateway.transports.events.protocol import (
+        EVENTS_MAX_FRAME_BYTES,
+        build_delivery_frame,
+    )
+
+    notif = _make_notification(
+        tenant_id="tenant-alpha",
+        recipient_id="user-a",
+        payload={"unicode": "こんにちは🚀", "padding": "a" * 40_000},
+    )
+    evt = EventEnvelope(
+        protocol_version=EVENTS_PROTOCOL_VERSION,
+        event_id=notif.notification_id,
+        event_type=NOTIFICATIONS_SCHEMA_VERSION,
+        topic=notif.recipient_topic(),
+        timestamp=notif.created_at,
+        tenant_id=notif.tenant_id,
+        principal_id=notif.recipient_id,
+        payload=notif.to_dict(),
+        correlation_id=notif.correlation_id,
+    )
+    frame = build_delivery_frame(evt)
+    # Match Starlette WebSocket.send_json() exact formatting:
+    starlette_wire = json.dumps(frame, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    dispatcher_wire = json.dumps(
+        {
+            "protocol_version": EVENTS_PROTOCOL_VERSION,
+            "type": "events.delivery",
+            "event": evt.to_dict(),
+        },
+        allow_nan=False,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    assert starlette_wire == dispatcher_wire
+    assert len(starlette_wire) <= EVENTS_MAX_FRAME_BYTES
