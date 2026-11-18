@@ -16,6 +16,7 @@ class EventsErrorCategory(StrEnum):
     AUTHORIZATION = "authorization"
     RATE_LIMIT = "rate_limit"
     BACKPRESSURE = "backpressure"
+    BACKEND_UNAVAILABLE = "backend_unavailable"
     CLOSED = "closed"
     INTERNAL = "internal"
 

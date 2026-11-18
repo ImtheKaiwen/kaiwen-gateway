@@ -1,6 +1,6 @@
 # Kaiwen Gateway — Events Module Design Specification (`D0` Accepted Baseline)
 
-> **Status:** `Accepted` (`D0` Architectural Baseline; **`E1` Complete** on `main` `3c8e490`; **`E2` In review** on `feat/e2-websocket-events`; **`E3`–`E4` `Not started`**)
+> **Status:** `Accepted` (`D0` Architectural Baseline; **`E1` & `E2` Complete** on `main` `141c243`; **`E3` In review** on `feat/e3-events-redis-pubsub`; **`E4` `Not started`**)
 > **Baseline Reference:** `kaiwen-gateway v0.1.0b1` (`main` `91ee612fdfc179b94945ec9cde332748de57ea56`; **Voice** is the only implemented communication module)
 > **Related ADR:** [ADR-0006 — Events Module Architecture (`Accepted`)](decisions/0006-events-module-architecture.md)
 > **Related Docs:** [Architecture](ARCHITECTURE.md) · [Requirements](REQUIREMENTS.md) · [Roadmap](../ROADMAP.md) · [Public API Policy](PUBLIC_API_AND_COMPATIBILITY.md)
@@ -274,9 +274,11 @@ Counting events alone is unsafe: `32` subscriptions × `128` events × `64 KiB` 
    - **Intended vs. Actually Guaranteed Behavior (R3):**
      - *Intended:* **At-least-once** delivery within the retention window.
      - *Actually Guaranteed:* **At-least-once only while entries remain within `MAXLEN` and Redis persists the stream**; crashes between downstream side-effect execution and `XACK` cause **redelivery** (requiring idempotent consumers keyed by `event_id`), and Redis failover without `WAIT`/AOF `always` can lose recently acknowledged or un-replicated writes. Redis Streams **never** provides exactly-once processing and **never** replaces per-WebSocket bounded memory queues.
-3. **Unavailability & Degraded Mode:**
-   - Core and in-memory Events work with zero Redis dependency.
-   - When Redis is configured and becomes unreachable: `publish()` / `append()` raise `EventsBackendUnavailableError` (fail closed for durable writes; live WebSocket clients receive sanitized `BACKEND_UNAVAILABLE` and `1011` close if unrecoverable).
+3. **Unavailability, Scope & Security Assumptions:**
+   - Core and in-memory Events work with zero Redis dependency (`pip install kaiwen-gateway`). Optional Redis requires `kaiwen-gateway[redis]` (`redis>=5.0,<7`).
+   - `RedisPubSubEventBroker`, `RedisDistributedRateLimiter`, and `RedisTicketReplayCache` fail closed (`EventsBackendUnavailableError`) on Redis outage—never silently downgrading distributed guarantees to process-local behavior. Live WebSocket clients receive `BACKEND_UNAVAILABLE` (`1011`) and `/ready` returns `503` (`events_backend_unavailable`).
+   - **Distributed vs. Local Limits:** Publish/subscribe rate limits (`RedisDistributedRateLimiter`) and ticket replay (`RedisTicketReplayCache` via atomic `SET NX PX`) become distributed across Gateway instances when wired, whereas `AdmissionController` concurrent connection ceilings and per-WebSocket control-message rate limits remain **process-local** per Gateway worker.
+   - **TLS & Network Security:** Multi-instance deployments must use `rediss://` (TLS with `tls_ca_certs` / ACL auth) on a private network; Events is **not** production-certified without Gate D operational review.
 
 ---
 

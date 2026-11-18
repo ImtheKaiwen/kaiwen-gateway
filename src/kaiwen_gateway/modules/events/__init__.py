@@ -11,6 +11,7 @@ from kaiwen_gateway.modules.events.auth import (
     EventsAuthorizerPort,
     EventsTicketClaims,
     EventsTicketVerifierPort,
+    TicketReplayCachePort,
     verify_and_consume_ticket,
 )
 from kaiwen_gateway.modules.events.broker import (
@@ -47,6 +48,8 @@ from kaiwen_gateway.modules.events.domain import (
     EventDeliveryOutcome,
     EventEnvelope,
     EventRateLimitError,
+    EventsBackendUnavailableError,
+    EventsDependencyError,
     EventsError,
     EventsModuleClosedError,
     InvalidEventError,
@@ -74,6 +77,7 @@ from kaiwen_gateway.modules.events.ports import (
 from kaiwen_gateway.modules.events.ratelimit import (
     RateLimitConfig,
     RateLimitDecision,
+    RateLimiterPort,
     TokenBucketRateLimiter,
 )
 from kaiwen_gateway.modules.events.telemetry import (
@@ -122,6 +126,8 @@ __all__ = [
     "EventSubscriptionPort",
     "EventsAuthenticatorPort",
     "EventsAuthorizerPort",
+    "EventsBackendUnavailableError",
+    "EventsDependencyError",
     "EventsError",
     "EventsErrorCategory",
     "EventsMetricsSnapshot",
@@ -139,9 +145,11 @@ __all__ = [
     "PublishResult",
     "RateLimitConfig",
     "RateLimitDecision",
+    "RateLimiterPort",
     "SlowConsumerPolicy",
     "TOPIC_PATTERN",
     "TOPIC_WILDCARD_PREFIX_PATTERN",
+    "TicketReplayCachePort",
     "TokenBucketRateLimiter",
     "UnsupportedEventVersionError",
     "topic_matches_pattern",

@@ -136,7 +136,8 @@ def test_pyproject_extras_and_entrypoints_match_implementation() -> None:
         "kaiwen-gateway": "kaiwen_gateway.server.__main__:main"
     }
     extras = pyproject["project"]["optional-dependencies"]
-    assert set(extras.keys()) == {"openai", "server"}
+    assert set(extras.keys()) == {"openai", "redis", "server"}
+    assert "redis" in " ".join(extras["redis"])
     assert "websockets" in " ".join(extras["openai"])
     server_deps = " ".join(extras["server"])
     for dep in ("starlette", "uvicorn", "websockets"):

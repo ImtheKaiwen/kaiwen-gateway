@@ -103,6 +103,15 @@ class EventsTicketVerifierPort(Protocol):
         ...
 
 
+@runtime_checkable
+class TicketReplayCachePort(Protocol):
+    """Port for atomic single-use WebSocket ticket `jti` replay protection."""
+
+    async def consume(self, jti: str, *, expires_at: float) -> bool:
+        """Atomically consume `jti` if unused and unexpired; return False on replay."""
+        ...
+
+
 class BoundedTicketReplayCache:
     """Bounded, process-local single-instance single-use ticket `jti` replay cache.
 
@@ -167,7 +176,7 @@ async def verify_and_consume_ticket(
     allowed_origins: Collection[str],
     connection_id: str,
     verifier: EventsTicketVerifierPort,
-    replay_cache: BoundedTicketReplayCache,
+    replay_cache: TicketReplayCachePort,
     max_ttl_seconds: float = DEFAULT_MAX_TICKET_TTL_SECONDS,
     clock: Callable[[], float] | None = None,
 ) -> VerifiedPrincipalContext:
@@ -188,7 +197,7 @@ async def verify_and_consume_ticket(
     if claims.origin != request_origin:
         raise EventAuthorizationError("Ticket origin mismatch")
 
-    now = float(clock()) if clock is not None else float(replay_cache._clock())
+    now = float(clock()) if clock is not None else time.time()
     if claims.expires_at <= now:
         raise EventAuthorizationError("Ticket expired")
     if (claims.expires_at - now) > max_ttl_seconds:
@@ -216,5 +225,6 @@ __all__ = [
     "EventsAuthorizerPort",
     "EventsTicketClaims",
     "EventsTicketVerifierPort",
+    "TicketReplayCachePort",
     "verify_and_consume_ticket",
 ]

@@ -26,7 +26,12 @@ from kaiwen_gateway.modules.events.domain import (
     topic_matches_pattern,
     validate_topic_pattern,
 )
-from kaiwen_gateway.modules.events.ratelimit import RateLimitConfig, TokenBucketRateLimiter
+from kaiwen_gateway.modules.events.ports import EventBrokerStats
+from kaiwen_gateway.modules.events.ratelimit import (
+    RateLimitConfig,
+    RateLimiterPort,
+    TokenBucketRateLimiter,
+)
 from kaiwen_gateway.modules.events.telemetry import (
     EventsErrorCategory,
     EventsTelemetrySink,
@@ -107,17 +112,6 @@ class EventBrokerConfig:
             raise InvalidEventError(
                 "max_queued_bytes_per_connection cannot exceed global_queued_bytes_budget"
             )
-
-
-@dataclass(frozen=True, slots=True)
-class EventBrokerStats:
-    """Bounded operational counters for InMemoryEventBroker."""
-
-    active_connections: int
-    active_subscriptions: int
-    queued_events: int
-    queued_bytes: int
-    global_queued_bytes_budget: int
 
 
 class _ConnectionQueueState:
@@ -286,15 +280,15 @@ class InMemoryEventBroker:
         config: EventBrokerConfig | None = None,
         *,
         telemetry: EventsTelemetrySink | None = None,
-        publish_rate_limiter: TokenBucketRateLimiter | None = None,
-        subscribe_rate_limiter: TokenBucketRateLimiter | None = None,
+        publish_rate_limiter: RateLimiterPort | None = None,
+        subscribe_rate_limiter: RateLimiterPort | None = None,
     ) -> None:
         self._config: EventBrokerConfig = config if config is not None else EventBrokerConfig()
         self._telemetry: EventsTelemetrySink = (
             telemetry if telemetry is not None else InMemoryEventsTelemetrySink()
         )
         if publish_rate_limiter is not None:
-            self._publish_rate_limiter: TokenBucketRateLimiter | None = publish_rate_limiter
+            self._publish_rate_limiter: RateLimiterPort | None = publish_rate_limiter
         elif self._config.enable_rate_limiting:
             pub_cfg = self._config.publish_rate_limit or RateLimitConfig(
                 rate_per_second=DEFAULT_PUBLISH_RATE_PER_SECOND,
@@ -305,7 +299,7 @@ class InMemoryEventBroker:
             self._publish_rate_limiter = None
 
         if subscribe_rate_limiter is not None:
-            self._subscribe_rate_limiter: TokenBucketRateLimiter | None = subscribe_rate_limiter
+            self._subscribe_rate_limiter: RateLimiterPort | None = subscribe_rate_limiter
         elif self._config.enable_rate_limiting:
             sub_cfg = self._config.subscribe_rate_limit or RateLimitConfig(
                 rate_per_second=DEFAULT_SUBSCRIBE_RATE_PER_SECOND,

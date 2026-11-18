@@ -44,7 +44,7 @@ jobs:
         run: uv audit --locked --preview-features audit-command
 
       - name: Sync development environment for Python ${{ matrix.python-version }}
-        run: uv sync --python "${{ matrix.python-version }}" --locked --group dev --extra server
+        run: uv sync --python "${{ matrix.python-version }}" --locked --group dev --extra server --extra redis
 
       - name: Verify active Python interpreter matches matrix
         run: |
@@ -122,13 +122,14 @@ jobs:
               assert len(meta_files) == 1
               metadata_text = zf.read(meta_files[0]).decode("utf-8")
               assert "Provides-Extra: server" in metadata_text
+              assert "Provides-Extra: redis" in metadata_text
               req_lines = [line for line in metadata_text.splitlines() if line.startswith("Requires-Dist:")]
               mandatory = [line for line in req_lines if "extra ==" not in line]
               assert mandatory == [], f"Unexpected mandatory runtime dependencies in wheel: {mandatory}"
               optional = [line for line in req_lines if "extra ==" in line]
-              assert len(optional) == 4, f"Expected 4 optional dependencies, got: {optional}"
+              assert len(optional) == 5, f"Expected 5 optional dependencies, got: {optional}"
               for line in optional:
-                  assert 'extra ==' in line and ('server' in line or 'openai' in line)
+                  assert 'extra ==' in line and ('server' in line or 'openai' in line or 'redis' in line)
 
           with tarfile.open(sdists[0], "r:gz") as tf:
               sdist_names = tf.getnames()

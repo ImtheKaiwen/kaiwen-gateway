@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from kaiwen_gateway.core.identity import VerifiedPrincipalContext
@@ -104,9 +105,29 @@ class EventSubscriptionPort(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class EventBrokerStats:
+    """Bounded operational counters for an EventBrokerPort implementation."""
+
+    active_connections: int
+    active_subscriptions: int
+    queued_events: int
+    queued_bytes: int
+    global_queued_bytes_budget: int
+
+
 @runtime_checkable
 class EventBrokerPort(EventPublisherPort, EventSubscriptionPort, Protocol):
-    """Unified live broker port for E1 in-memory and future E3 distributed adapters."""
+    """Unified live broker port for E1 in-memory and E3 Redis Pub/Sub adapters."""
+
+    @property
+    def is_closed(self) -> bool:
+        """Return True if the broker has been shut down."""
+        ...
+
+    def stats(self) -> EventBrokerStats:
+        """Return current bounded connection, subscription, and queued byte counters."""
+        ...
 
     async def startup(self) -> None:
         """Initialize broker state for accepting subscriptions and publishes."""
@@ -172,6 +193,7 @@ class DurableEventStorePort(Protocol):
 __all__ = [
     "DurableEventStorePort",
     "EventBrokerPort",
+    "EventBrokerStats",
     "EventConnectionConsumer",
     "EventPublisherPort",
     "EventSubscription",
