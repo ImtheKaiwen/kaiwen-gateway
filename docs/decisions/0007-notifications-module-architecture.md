@@ -7,19 +7,19 @@
 - **Related decisions:** [ADR-0001 — Modular Monolith](0001-modular-monolith.md) · [ADR-0002 — Hexagonal Architecture](0002-hexagonal-architecture.md) · [ADR-0003 — Library and Server](0003-library-and-server.md) · [ADR-0006 — Events Module Architecture](0006-events-module-architecture.md)
 - **Related documents:** [Notifications Module Design](../NOTIFICATIONS_MODULE_DESIGN.md) · [Events Module Design](../EVENTS_MODULE_DESIGN.md) · [Architecture](../ARCHITECTURE.md) · [Roadmap](../../ROADMAP.md)
 
-> **Decision status note:** This ADR is **`Proposed`** (`N0` Architecture & Documentation Baseline). Acceptance applies to the architectural design only; implementation milestones **N1–N4 remain `Not started`** until separately authorized.
+> **Decision status note:** This ADR is **`Proposed`** (`N0-R1` Architecture & Documentation Baseline). Acceptance applies to the architectural design only; implementation milestones **N1–N4 remain `Not started`** until separately authorized.
 
 ---
 
 ## 1. Context
 
-With Events milestones `D0`–`E4` completed on `main` (`9e9af79b953b1b10ed4b977ebb3a35cf27a334c0`), Kaiwen Gateway now provides:
+With Events milestones `D0`–`E4` completed on `main` (`9e9af79b953b1b10ed4b977ebb3a35cf27a334c0`), Kaiwen Gateway provides:
 - Additive principal/tenant identity (`VerifiedPrincipalContext`, `TenantPrincipalBinding`, `PrincipalAdmissionLease`).
 - Bounded live fan-out (`EventBrokerPort`, `InMemoryEventBroker`, `RedisPubSubEventBroker`).
 - Authenticated `/ws/events/v1` WebSocket ingress (`Bearer` + single-use `Origin`-checked `?ticket=`).
 - Optional Redis Streams durability (`DurableEventStorePort`, `RedisStreamsDurableStore`, `StreamRecoveryWorker`).
 
-Building **Notifications** directly on top of these verified primitives avoids duplicating Redis clients, WebSocket servers, rate limiters, or connection admission logic, while preserving Voice's isolated audio hot path and the base package's `dependencies = []` invariant.
+Building **Notifications** on top of these verified primitives avoids duplicating Redis clients, WebSocket servers, rate limiters, or connection admission logic, while preserving Voice's isolated audio hot path and the base package's `dependencies = []` invariant.
 
 ---
 
@@ -30,19 +30,22 @@ Adopt a bounded **Notifications** module under `src/kaiwen_gateway/modules/notif
 1. **Reuse Events & Core Ports (Zero Infrastructure Duplication):**
    - `NotificationsModule` implements Core's `GatewayModule` and consumes `EventBrokerPort`, `DurableEventStorePort`, `RateLimiterPort`, and `VerifiedPrincipalContext` without importing `redis.asyncio` or creating a second WebSocket server.
 2. **Reuse `/ws/events/v1` for Real-Time In-App Delivery (`N2`); Defer REST Endpoints:**
-   - Deliver real-time `notifications.v1` envelopes over `/ws/events/v1` (`events.delivery`) using server-derived, recipient-scoped topics (`notifications.r.<token>`, 24-hex SHA-256 prefix) and an additive, backward-compatible per-subscription topic-authorization hook in `/ws/events/v1` (`N2`) so `"events:subscribe"` cannot subscribe to another recipient's `notifications.r.*` topic.
-   - Bound `NotificationEnvelope` serialized size to `<= 48 KiB` so the outer `EventEnvelope` + `events.delivery` frame fits within `64 KiB` (`65_536` bytes).
-   - Defer dedicated Gateway REST endpoints (`POST /notifications`, `GET /notifications`, `POST .../ack`) so Gateway remains a modular library/transport host rather than owning product database/pagination state.
-3. **Strict 5-Stage Acknowledgment Separation:**
-   - Explicitly distinguish: (1) Event publication, (2) Notification processing, (3) Transport delivery, (4) Client acknowledgment, and (5) Durable processing acknowledgment (`XACK`).
-   - `XACK` (`DurableEventStorePort.ack()`) is issued **only** after downstream notification processing/dispatch completes—never on `XREADGROUP` or WebSocket queue enqueue.
-4. **Honest Delivery Semantics:**
-   - Live in-app delivery over `EventBrokerPort` (`N2`) is **at-most-once** for online recipients.
-   - Durable processing over `RedisStreamsDurableStore` (`N3`) is **at-least-once** within `MAXLEN` retention and Redis persistence guarantees, requiring idempotent consumers keyed by `notification_id` / `idempotency_key`.
-5. **Minimal Preference & Channel Contracts:**
-   - Include a lightweight `NotificationPreferencePort` (muted categories, minimum priority, channel opt-outs) and reserve an interface-only `NotificationChannelPort` for future Email/SMS/Push/Webhook adapters without implementing external providers in `N1`–`N4`.
-6. **Fail-Closed Security & Bounded Observability:**
-   - Derive `tenant_id` and `recipient_id` authorization strictly from `VerifiedPrincipalContext`; deny cross-tenant and unauthorized cross-recipient subscriptions; enforce `expires_at` before delivery; use bounded-cardinality telemetry (`NotificationsTelemetrySink`) without logging raw payloads, tokens, or tickets.
+   - Deliver real-time `notifications.v1` envelopes over `/ws/events/v1` (`events.delivery`).
+   - Defer dedicated Gateway REST endpoints (`POST /notifications`, `GET /notifications`, `POST .../ack`) so Gateway remains a modular library/transport host rather than owning product database/inbox state.
+3. **Deterministic Recipient Topics (Naming Only) & Mandatory Recipient Authorization:**
+   - Map `(tenant_id, recipient_id)` canonically (`len(tenant_id):tenant_id:len(recipient_id):recipient_id`) to `notifications.r.<24-hex-sha256>` for `TOPIC_PATTERN` compatibility. **Never treat these hashes as secrets or authentication.**
+   - Require an additive, fail-closed per-subscription topic-authorization hook in `/ws/events/v1` / `create_gateway_app()` (`N2`) whenever Notifications is enabled: general `events:subscribe` and `events:subscribe:wildcard` **must never** grant access to `notifications.r.*`, cross-recipient and unauthorized wildcard subscriptions are denied, and missing authorization hooks fail closed at startup (`CoreConfigurationError`).
+4. **Explicit Producer Authorization Trust Boundary:**
+   - Verified producers do **not** automatically gain permission to target arbitrary recipients; host applications authorize recipient targeting via `NotificationProducerAuthorizerPort` without introducing `kaiwen-agent` dependencies.
+5. **Final-Frame Byte Safety:**
+   - Enforce `NotificationEnvelope` inner bound (`<= 48 KiB`) **and** validate the final serialized `events.delivery` WebSocket frame (`<= EVENTS_MAX_FRAME_BYTES` = `65_536` bytes) at publish/dispatch time.
+6. **6-Stage Acknowledgment Separation & Honest Offline Semantics:**
+   - Distinguish (1) Durable acceptance (`XADD`), (2) Notification processing, (3) Transport dispatch, (4) Actual client receipt (unobserved), (5) Application acknowledgment (app-owned), and (6) Redis Streams acknowledgment (`XACK`).
+   - `XACK` is issued **only** after Stage 2 + Stage 3 dispatch completes—never on `XREADGROUP` or WebSocket queue enqueue.
+   - Do **not** promise offline per-user inbox persistence without an explicit application owner outside Gateway MVP (`N3` provides durable worker processing & crash recovery within `MAXLEN`, not a per-user unread inbox).
+7. **Preference Policy & Deferred External Channels:**
+   - Missing preferences (`None`) default to **allow only for non-promotional (`is_promotional=False`) in-app notifications**; promotional notifications require explicit opt-in, and preference-store errors fail closed (never coerced to `None`).
+   - Reserve interface-only `NotificationChannelPort` and defer Email/SMS/Push/Webhook implementations until after `N4`.
 
 ---
 
@@ -50,7 +53,7 @@ Adopt a bounded **Notifications** module under `src/kaiwen_gateway/modules/notif
 
 | Alternative | Pros | Cons | Verdict |
 |---|---|---|---|
-| **A. Bounded `modules/notifications/` reusing Events & `/ws/events/v1` (Proposed)** | Zero Redis/WS duplication; clean `GatewayModule` lifecycle; preserves `dependencies = []` and Voice isolation | Requires deterministic mapping from `PrincipalId` (which allows `:`) to `TOPIC_PATTERN` | **Proposed** |
+| **A. Bounded `modules/notifications/` reusing Events & `/ws/events/v1` (Proposed)** | Zero Redis/WS duplication; clean `GatewayModule` lifecycle; preserves `dependencies = []` and Voice isolation | Requires an additive `N2` per-subscription topic-authorization hook in `/ws/events/v1` | **Proposed** |
 | **B. Separate `/ws/notifications/v1` WebSocket server** | Custom notification-only wire frames | Duplicates auth, `?ticket=` replay cache, `Origin` checks, `1008`/`1009` framing, and drain logic | **Rejected** |
 | **C. Mandatory Gateway REST + SQL notification inbox** | Built-in REST inbox for apps | Forces database/ORM dependencies into Gateway Core and blurs app vs. gateway ownership | **Rejected for MVP** |
 
@@ -58,6 +61,7 @@ Adopt a bounded **Notifications** module under `src/kaiwen_gateway/modules/notif
 
 ## 4. Consequences & Conditions for Acceptance
 
-- **Positive:** Fast, low-risk `N1`–`N4` delivery with zero new runtime dependencies and full reuse of `E1`–`E4` hardening.
-- **Tradeoffs:** Offline catch-up relies on `N3` durable replay within `MAXLEN` or consuming-application state; external Email/SMS/Push/Webhook adapters remain future work beyond `N4`.
-- **Acceptance Conditions:** Maintainer approval of `docs/NOTIFICATIONS_MODULE_DESIGN.md`, recipient-topic derivation rules, preference-miss default (`allow` vs. `deny`), and the `N1`–`N4` milestone plan in `ROADMAP.md`.
+- **Positive:** Fast, low-risk `N1`–`N4` delivery with zero new runtime dependencies, fail-closed producer/recipient authorization, and full reuse of `E1`–`E4` hardening.
+- **Tradeoffs:** Offline per-user inbox history remains outside Gateway MVP; external Email/SMS/Push/Webhook adapters remain post-`N4` work.
+- **Compatibility Note:** `N2` requires an additive, backward-compatible per-subscription topic-authorization hook in `/ws/events/v1` / `create_gateway_app()` (existing Events-only callers without Notifications remain unaffected).
+- **Acceptance Conditions:** Maintainer approval of `docs/NOTIFICATIONS_MODULE_DESIGN.md`, the `N2` topic-authorization hook, preference defaults, and the `N1`–`N4` milestone plan in `ROADMAP.md`.
