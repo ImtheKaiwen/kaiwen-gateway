@@ -66,6 +66,7 @@ DEFAULT_DURABLE_MAX_BATCH_SIZE: Final[int] = 256
 DEFAULT_DURABLE_BLOCK_MS: Final[int] = 200
 DEFAULT_DURABLE_MAX_BLOCK_MS: Final[int] = 1000
 DEFAULT_DURABLE_DEDUP_MAX_ENTRIES: Final[int] = 10_000
+DEFAULT_OUTAGE_RETRY_BACKOFF_SECONDS: Final[float] = 0.05
 _STREAM_IDENT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 
 
@@ -114,7 +115,7 @@ class DeadLetterCapableStore(Protocol):
         record_id: str,
         reason: str,
         envelope: EventEnvelope | None = None,
-        delivery_attempts: int = 1,
+        delivery_attempts: int | None = None,
     ) -> Any: ...
 
 
@@ -622,7 +623,7 @@ class NotificationsDurableWorker:
         *,
         record: DurableEventRecord,
         reason: str,
-        delivery_attempts: int = 1,
+        delivery_attempts: int | None = None,
     ) -> bool:
         record_id = record.sequence_id
         if not record_id:
@@ -654,22 +655,41 @@ class NotificationsDurableWorker:
         self,
         record: DurableEventRecord,
         *,
-        delivery_attempts: int = 1,
+        delivery_attempts: int | None = None,
     ) -> bool:
         """Process one stream record and XACK only after terminal outcome or DLQ write."""
         record_id = record.sequence_id
         if not record_id:
             return False
 
+        effective_attempts = (
+            delivery_attempts if delivery_attempts is not None else record.delivery_attempts
+        )
         self._durable_telemetry.record_processed()
 
-        # 1. Tenant boundary check against configured worker tenant.
+        # 1. Outer EventEnvelope integrity & tenant boundary checks.
         if record.envelope.tenant_id != self._config.tenant_id:
             self._telemetry.record_error(NotificationsErrorCategory.AUTHORIZATION)
             return await self._quarantine_poison(
                 record=record,
                 reason="tenant_mismatch",
-                delivery_attempts=delivery_attempts,
+                delivery_attempts=effective_attempts,
+            )
+
+        if record.envelope.topic != self._config.topic:
+            self._telemetry.record_error(NotificationsErrorCategory.VALIDATION)
+            return await self._quarantine_poison(
+                record=record,
+                reason="ingestion_topic_mismatch",
+                delivery_attempts=effective_attempts,
+            )
+
+        if record.envelope.event_type != NOTIFICATIONS_SCHEMA_VERSION:
+            self._telemetry.record_error(NotificationsErrorCategory.VALIDATION)
+            return await self._quarantine_poison(
+                record=record,
+                reason="invalid_notification_event_type",
+                delivery_attempts=effective_attempts,
             )
 
         # 2. Parse & validate inner NotificationEnvelope (poison payloads go to DLQ).
@@ -688,7 +708,7 @@ class NotificationsDurableWorker:
             return await self._quarantine_poison(
                 record=record,
                 reason="invalid_notification_envelope",
-                delivery_attempts=delivery_attempts,
+                delivery_attempts=effective_attempts,
             )
 
         if notif.tenant_id != self._config.tenant_id:
@@ -696,7 +716,23 @@ class NotificationsDurableWorker:
             return await self._quarantine_poison(
                 record=record,
                 reason="notification_tenant_mismatch",
-                delivery_attempts=delivery_attempts,
+                delivery_attempts=effective_attempts,
+            )
+
+        if record.envelope.event_id != notif.notification_id:
+            self._telemetry.record_error(NotificationsErrorCategory.VALIDATION)
+            return await self._quarantine_poison(
+                record=record,
+                reason="event_id_notification_id_mismatch",
+                delivery_attempts=effective_attempts,
+            )
+
+        if record.envelope.principal_id != notif.recipient_id:
+            self._telemetry.record_error(NotificationsErrorCategory.AUTHORIZATION)
+            return await self._quarantine_poison(
+                record=record,
+                reason="principal_recipient_mismatch",
+                delivery_attempts=effective_attempts,
             )
 
         dedup_key = (notif.tenant_id, notif.recipient_id, notif.notification_id)
@@ -752,7 +788,7 @@ class NotificationsDurableWorker:
             return await self._quarantine_poison(
                 record=record,
                 reason="oversized_or_invalid_delivery_frame",
-                delivery_attempts=delivery_attempts,
+                delivery_attempts=effective_attempts,
             )
 
         # 7. Dispatch via N2 live broker (0 active connections is a valid terminal outcome).
@@ -833,20 +869,26 @@ class NotificationsDurableWorker:
 
         acked = 0
         for rec in reclaimed_records:
-            if await self.process_record(rec):
+            if await self.process_record(rec, delivery_attempts=rec.delivery_attempts):
                 acked += 1
         return acked
 
     async def _consume_loop(self) -> None:
         while not self._closed:
+            had_error = False
             try:
                 await self.run_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                pass
-            if self._config.poll_interval_seconds > 0.0:
-                await asyncio.sleep(self._config.poll_interval_seconds)
+                had_error = True
+            delay = (
+                max(self._config.poll_interval_seconds, DEFAULT_OUTAGE_RETRY_BACKOFF_SECONDS)
+                if had_error
+                else self._config.poll_interval_seconds
+            )
+            if delay > 0.0:
+                await asyncio.sleep(delay)
 
     async def _recovery_loop(self) -> None:
         while not self._closed:

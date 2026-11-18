@@ -57,6 +57,8 @@ class _FakeDurableStore:
         self.pending: dict[str, tuple[EventEnvelope, str, int]] = {}
         self.acked: list[str] = []
         self.dead_letters: list[tuple[str, str, EventEnvelope | None]] = []
+        self.dead_letter_attempts: list[int | None] = []
+        self.read_calls: int = 0
         self.fail_append: bool = False
         self.return_empty_id: bool = False
         self.fail_ack: bool = False
@@ -84,6 +86,7 @@ class _FakeDurableStore:
         count: int,
         block_ms: int,
     ) -> list[DurableEventRecord]:
+        self.read_calls += 1
         if self.fail_read:
             raise EventsBackendUnavailableError("Redis unavailable")
         out: list[DurableEventRecord] = []
@@ -138,18 +141,19 @@ class _FakeDurableStore:
         record_id: str,
         reason: str,
         envelope: EventEnvelope | None = None,
-        delivery_attempts: int = 1,
+        delivery_attempts: int | None = None,
     ) -> StreamDeadLetterRecord:
         if self.fail_dead_letter:
             raise EventsBackendUnavailableError("Redis DLQ XADD failed")
         self.pending.pop(record_id, None)
         self.dead_letters.append((record_id, reason, envelope))
+        self.dead_letter_attempts.append(delivery_attempts)
         return StreamDeadLetterRecord(
             dlq_entry_id=f"dlq-{record_id}",
             original_entry_id=record_id,
             event_id=envelope.event_id if envelope is not None else None,
             group=group,
-            delivery_attempts=delivery_attempts,
+            delivery_attempts=delivery_attempts if delivery_attempts is not None else 0,
             reason=reason,
         )
 
@@ -167,8 +171,15 @@ class _FakeDurableStore:
         reclaimed: list[DurableEventRecord] = []
         for eid, (env, _owner, attempts) in list(self.pending.items()):
             if env.tenant_id == tenant_id and env.topic == topic:
-                self.pending[eid] = (env, consumer, attempts + 1)
-                reclaimed.append(DurableEventRecord(envelope=env, sequence_id=eid))
+                next_attempts = attempts + 1
+                self.pending[eid] = (env, consumer, next_attempts)
+                reclaimed.append(
+                    DurableEventRecord(
+                        envelope=env,
+                        sequence_id=eid,
+                        delivery_attempts=next_attempts,
+                    )
+                )
                 if count is not None and len(reclaimed) >= count:
                     break
         return StreamRecoveryResult(
@@ -538,6 +549,171 @@ def test_worker_cancellation_and_clean_shutdown() -> None:
         assert len(asyncio.all_tasks()) == baseline_tasks
         with pytest.raises(NotificationsModuleClosedError):
             worker.start()
+        await broker.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_outage_retry_backoff_prevents_hot_loop_with_zero_poll_interval() -> None:
+    async def _run() -> None:
+        store = _FakeDurableStore()
+        store.fail_read = True
+        broker = InMemoryEventBroker(topic_authorizer=NotificationsTopicAuthorizer())
+        await broker.startup()
+        worker = NotificationsDurableWorker(
+            config=NotificationsDurableConfig(
+                tenant_id="tenant-alpha",
+                poll_interval_seconds=0.0,
+                recovery_interval_seconds=10.0,
+            ),
+            durable_store=store,
+            broker=broker,
+            preference_port=InMemoryNotificationPreferenceStore(),
+        )
+        baseline_tasks = len(asyncio.all_tasks())
+        worker.start()
+        await asyncio.sleep(0.12)
+        await worker.stop()
+        assert len(asyncio.all_tasks()) == baseline_tasks
+        # With 50 ms outage backoff, ~2-4 calls occur in 120 ms instead of a tight hot spin
+        assert 1 <= store.read_calls <= 6
+        await broker.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_recovery_preserves_actual_delivery_attempts_without_inventing_unknown() -> None:
+    async def _run() -> None:
+        store = _FakeDurableStore()
+        broker = InMemoryEventBroker(topic_authorizer=NotificationsTopicAuthorizer())
+        await broker.startup()
+        worker = NotificationsDurableWorker(
+            config=NotificationsDurableConfig(tenant_id="tenant-alpha"),
+            durable_store=store,
+            broker=broker,
+            preference_port=InMemoryNotificationPreferenceStore(),
+        )
+
+        # 1. Poison record with unknown delivery_attempts (None) -> None passed to DLQ
+        poison_unknown = EventEnvelope(
+            protocol_version=EVENTS_PROTOCOL_VERSION,
+            event_id="evt_unknown_attempts",
+            event_type=NOTIFICATIONS_SCHEMA_VERSION,
+            topic="notifications.ingest",
+            timestamp="2026-11-18T12:00:00Z",
+            tenant_id="tenant-alpha",
+            principal_id="user-a",
+            payload={"bad": True},
+        )
+        await store.append(poison_unknown)
+        assert await worker.run_once() == 1
+        assert store.dead_letter_attempts == [None]
+
+        # 2. Reclaimed poison record carries actual delivery_attempts (e.g. 2) to DLQ
+        store.pending["2-0"] = (poison_unknown, "crashed-worker", 1)
+        assert await worker.recover_once() == 1
+        assert store.dead_letter_attempts == [None, 2]
+        await broker.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_outer_event_envelope_integrity_mismatches_quarantined_before_dispatch() -> None:
+    async def _run() -> None:
+        store = _FakeDurableStore()
+        broker = InMemoryEventBroker(topic_authorizer=NotificationsTopicAuthorizer())
+        await broker.startup()
+        telemetry = InMemoryNotificationsTelemetrySink()
+        durable_tel = InMemoryNotificationsDurableTelemetrySink()
+        worker = NotificationsDurableWorker(
+            config=NotificationsDurableConfig(tenant_id="tenant-alpha"),
+            durable_store=store,
+            broker=broker,
+            preference_port=InMemoryNotificationPreferenceStore(),
+            telemetry=telemetry,
+            durable_telemetry=durable_tel,
+        )
+
+        notif = _make_notif()
+        cases = [
+            (
+                "event_id_notification_id_mismatch",
+                EventEnvelope(
+                    protocol_version=EVENTS_PROTOCOL_VERSION,
+                    event_id="evt_different_id",
+                    event_type=NOTIFICATIONS_SCHEMA_VERSION,
+                    topic="notifications.ingest",
+                    timestamp=notif.created_at,
+                    tenant_id="tenant-alpha",
+                    principal_id=notif.recipient_id,
+                    payload=notif.to_dict(),
+                ),
+            ),
+            (
+                "invalid_notification_event_type",
+                EventEnvelope(
+                    protocol_version=EVENTS_PROTOCOL_VERSION,
+                    event_id=notif.notification_id,
+                    event_type="orders.created",
+                    topic="notifications.ingest",
+                    timestamp=notif.created_at,
+                    tenant_id="tenant-alpha",
+                    principal_id=notif.recipient_id,
+                    payload=notif.to_dict(),
+                ),
+            ),
+            (
+                "ingestion_topic_mismatch",
+                EventEnvelope(
+                    protocol_version=EVENTS_PROTOCOL_VERSION,
+                    event_id=notif.notification_id,
+                    event_type=NOTIFICATIONS_SCHEMA_VERSION,
+                    topic="orders.events",
+                    timestamp=notif.created_at,
+                    tenant_id="tenant-alpha",
+                    principal_id=notif.recipient_id,
+                    payload=notif.to_dict(),
+                ),
+            ),
+            (
+                "principal_recipient_mismatch",
+                EventEnvelope(
+                    protocol_version=EVENTS_PROTOCOL_VERSION,
+                    event_id=notif.notification_id,
+                    event_type=NOTIFICATIONS_SCHEMA_VERSION,
+                    topic="notifications.ingest",
+                    timestamp=notif.created_at,
+                    tenant_id="tenant-alpha",
+                    principal_id="user-other",
+                    payload=notif.to_dict(),
+                ),
+            ),
+        ]
+
+        # Direct process_record with DLQ failure must NOT ack
+        store.fail_dead_letter = True
+        store.pending["pending-1"] = (cases[0][1], "worker-1", 1)
+        assert (
+            await worker.process_record(
+                DurableEventRecord(envelope=cases[0][1], sequence_id="pending-1")
+            )
+            is False
+        )
+        assert "pending-1" in store.pending
+        store.fail_dead_letter = False
+        store.pending.clear()
+
+        for idx, (_expected_reason, env) in enumerate(cases, start=1):
+            seq = f"mismatch-{idx}"
+            store.pending[seq] = (env, "worker-1", 1)
+            ok = await worker.process_record(DurableEventRecord(envelope=env, sequence_id=seq))
+            assert ok is True
+            assert seq not in store.pending
+
+        assert telemetry.snapshot().notifications_published == 0
+        assert [reason for _rid, reason, _env in store.dead_letters] == [
+            expected for expected, _env in cases
+        ]
         await broker.shutdown()
 
     asyncio.run(_run())

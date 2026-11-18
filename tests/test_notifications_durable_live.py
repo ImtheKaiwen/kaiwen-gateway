@@ -307,6 +307,35 @@ def test_live_redis_poison_payload_dlq_quarantine() -> None:
             assert len(dlq) == 1
             assert dlq[0].reason == "invalid_notification_envelope"
 
+            # Also verify reclaimed poison record records actual XPENDING delivery_attempts (>= 2)
+            poison_reclaim = EventEnvelope(
+                protocol_version=EVENTS_PROTOCOL_VERSION,
+                event_id="evt_live_poison_reclaim",
+                event_type=NOTIFICATIONS_SCHEMA_VERSION,
+                topic="notifications.ingest",
+                timestamp="2026-11-18T12:00:00Z",
+                tenant_id="tenant-alpha",
+                principal_id="user-a",
+                payload={"invalid": True},
+            )
+            await store.append(poison_reclaim)
+            await store.read_group(
+                tenant_id="tenant-alpha",
+                topic="notifications.ingest",
+                group="notifications-workers",
+                consumer="worker-crashed",
+                count=5,
+                block_ms=50,
+            )
+            await asyncio.sleep(0.03)
+            assert await worker.recover_once(min_idle_ms=10) == 1
+            dlq_after = await store.dead_letter_entries(
+                tenant_id="tenant-alpha",
+                topic="notifications.ingest",
+            )
+            assert len(dlq_after) == 2
+            assert dlq_after[1].delivery_attempts >= 2
+
             pending = await store.pending_summary(
                 tenant_id="tenant-alpha",
                 topic="notifications.ingest",

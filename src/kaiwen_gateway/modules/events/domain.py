@@ -393,6 +393,7 @@ class DurableEventRecord:
 
     envelope: EventEnvelope
     sequence_id: str | None = None
+    delivery_attempts: int | None = None
 
 
 __all__ = [
