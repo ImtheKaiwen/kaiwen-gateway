@@ -11,6 +11,7 @@ from kaiwen_gateway.modules.events.auth import (
     EventsAuthorizerPort,
     EventsTicketClaims,
     EventsTicketVerifierPort,
+    EventTopicAuthorizerPort,
     TicketReplayCachePort,
     verify_and_consume_ticket,
 )
@@ -129,6 +130,7 @@ __all__ = [
     "EventRateLimitError",
     "EventSubscription",
     "EventSubscriptionPort",
+    "EventTopicAuthorizerPort",
     "EventsAuthenticatorPort",
     "EventsAuthorizerPort",
     "EventsBackendUnavailableError",

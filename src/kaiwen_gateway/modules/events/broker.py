@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from kaiwen_gateway.core.identity import VerifiedPrincipalContext, validate_tenant_id
+from kaiwen_gateway.modules.events.auth import EventTopicAuthorizerPort
 from kaiwen_gateway.modules.events.domain import (
     DEFAULT_GLOBAL_QUEUED_BYTES_BUDGET,
     DEFAULT_MAX_QUEUED_BYTES_PER_CONNECTION,
@@ -60,6 +61,11 @@ def _is_subscription_authorized(
     """
     scopes = context.allowed_scopes
     if "events:admin" in scopes:
+        return True
+
+    if "notifications:subscribe:tenant" in scopes and (
+        canonical_pattern == "notifications.r.*" or canonical_pattern.startswith("notifications.r.")
+    ):
         return True
 
     if canonical_pattern.endswith(".*"):
@@ -265,6 +271,7 @@ class InMemoryEventBroker:
         "_telemetry",
         "_publish_rate_limiter",
         "_subscribe_rate_limiter",
+        "_topic_authorizer",
         "_lock",
         "_connections",
         "_subscriptions",
@@ -282,8 +289,14 @@ class InMemoryEventBroker:
         telemetry: EventsTelemetrySink | None = None,
         publish_rate_limiter: RateLimiterPort | None = None,
         subscribe_rate_limiter: RateLimiterPort | None = None,
+        topic_authorizer: EventTopicAuthorizerPort | None = None,
     ) -> None:
         self._config: EventBrokerConfig = config if config is not None else EventBrokerConfig()
+        if topic_authorizer is not None and not isinstance(
+            topic_authorizer, EventTopicAuthorizerPort
+        ):
+            raise TypeError("topic_authorizer must implement EventTopicAuthorizerPort")
+        self._topic_authorizer: EventTopicAuthorizerPort | None = topic_authorizer
         self._telemetry: EventsTelemetrySink = (
             telemetry if telemetry is not None else InMemoryEventsTelemetrySink()
         )
@@ -322,6 +335,11 @@ class InMemoryEventBroker:
     def config(self) -> EventBrokerConfig:
         """Return immutable broker configuration."""
         return self._config
+
+    @property
+    def topic_authorizer(self) -> EventTopicAuthorizerPort | None:
+        """Return optional per-subscription topic authorizer hook."""
+        return self._topic_authorizer
 
     @property
     def telemetry(self) -> EventsTelemetrySink:
@@ -450,6 +468,19 @@ class InMemoryEventBroker:
             raise EventAuthorizationError(
                 "Principal lacks required scope for requested topic pattern"
             )
+
+        if self._topic_authorizer is not None:
+            try:
+                await self._topic_authorizer.authorize_subscribe(
+                    context=context,
+                    topic_pattern=canonical_pattern,
+                )
+            except EventAuthorizationError:
+                self._telemetry.record_error(EventsErrorCategory.AUTHORIZATION)
+                raise
+            except Exception as exc:
+                self._telemetry.record_error(EventsErrorCategory.AUTHORIZATION)
+                raise EventAuthorizationError("Topic authorization failed") from exc
 
         if self._subscribe_rate_limiter is not None:
             decision = await self._subscribe_rate_limiter.check(

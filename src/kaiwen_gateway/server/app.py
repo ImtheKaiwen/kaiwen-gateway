@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from typing import Any
 
 from kaiwen_gateway.core.admission import AdmissionController
@@ -30,7 +30,15 @@ from kaiwen_gateway.modules.events import (
     EventsAuthorizerPort,
     EventsModule,
     EventsTicketVerifierPort,
+    EventTopicAuthorizerPort,
     TicketReplayCachePort,
+)
+from kaiwen_gateway.modules.notifications import (
+    ChainedNotificationsTopicAuthorizer,
+    NotificationPublisherPort,
+    NotificationsDispatcher,
+    NotificationsModule,
+    enforces_mandatory_recipient_isolation,
 )
 from kaiwen_gateway.modules.voice.ports import AIRealtimeMediaPort
 from kaiwen_gateway.server.exceptions import ServerDependencyError
@@ -183,6 +191,19 @@ async def readiness_endpoint(request: Request) -> JSONResponse:
                 status_code=503,
             )
 
+    if getattr(app_state, "enable_notifications", False):
+        notif_mod: NotificationsModule | None = getattr(app_state, "notifications_module", None)
+        if notif_mod is None or not notif_mod.is_started or notif_mod.is_closed:
+            return JSONResponse(
+                {"status": "unavailable", "reason": "notifications_not_started"},
+                status_code=503,
+            )
+        if getattr(app_state, "events_topic_authorizer", None) is None:
+            return JSONResponse(
+                {"status": "unavailable", "reason": "notifications_misconfigured"},
+                status_code=503,
+            )
+
     if voice_enabled and not events_enabled:
         return JSONResponse(
             {
@@ -260,6 +281,11 @@ def create_gateway_app(
     events_module: EventsModule | None = None,
     events_replay_cache: TicketReplayCachePort | None = None,
     events_send_timeout_seconds: float = 5.0,
+    events_topic_authorizer: EventTopicAuthorizerPort | None = None,
+    enable_notifications: bool = False,
+    notifications_module: NotificationsModule | None = None,
+    notifications_dispatcher: NotificationPublisherPort | None = None,
+    notifications_authoritative_promotional_categories: Collection[str] = (),
 ) -> Starlette:
     """Construct a fresh, instance-scoped ASGI application for Kaiwen Gateway.
 
@@ -307,6 +333,14 @@ def create_gateway_app(
         )
     if not isinstance(enable_events, bool):
         raise TypeError(f"enable_events must be a bool, got {type(enable_events).__name__}")
+    if not isinstance(enable_notifications, bool):
+        raise TypeError(
+            f"enable_notifications must be a bool, got {type(enable_notifications).__name__}"
+        )
+    if events_topic_authorizer is not None and not isinstance(
+        events_topic_authorizer, EventTopicAuthorizerPort
+    ):
+        raise TypeError("events_topic_authorizer must satisfy EventTopicAuthorizerPort")
     if (
         isinstance(events_send_timeout_seconds, bool)
         or not isinstance(events_send_timeout_seconds, (int, float))
@@ -478,6 +512,23 @@ def create_gateway_app(
             field_name="events_ingress_mode",
         )
 
+    effective_topic_authorizer: EventTopicAuthorizerPort | None = events_topic_authorizer
+    if enable_notifications:
+        if not enable_events:
+            raise CoreConfigurationError(
+                "enable_notifications=True requires enable_events=True",
+                field_name="enable_notifications",
+            )
+        if events_topic_authorizer is None:
+            raise CoreConfigurationError(
+                "enable_notifications=True requires events_topic_authorizer to be configured fail-closed",
+                field_name="events_topic_authorizer",
+            )
+        if not enforces_mandatory_recipient_isolation(events_topic_authorizer):
+            effective_topic_authorizer = ChainedNotificationsTopicAuthorizer(
+                additional=events_topic_authorizer
+            )
+
     if enable_events:
         if (events_authenticator is None) != (events_authorizer is None):
             raise CoreConfigurationError(
@@ -521,13 +572,70 @@ def create_gateway_app(
             effective_events_module = existing_events
         else:
             if effective_events_module is None:
-                effective_events_module = EventsModule(broker_config=events_broker_config)
+                effective_events_module = EventsModule(
+                    broker_config=events_broker_config,
+                    topic_authorizer=effective_topic_authorizer,
+                )
             elif not isinstance(effective_events_module, EventsModule):
                 raise TypeError("events_module must be an EventsModule instance")
             core = compose_gateway_core(
                 config=effective_config,
                 modules=[*core.modules(), effective_events_module],
             )
+
+    effective_notifications_module: NotificationsModule | None = notifications_module
+    effective_notifications_dispatcher: NotificationPublisherPort | None = notifications_dispatcher
+    if enable_notifications:
+        assert events_topic_authorizer is not None
+        assert effective_topic_authorizer is not None
+        existing_notifications = core.find_module("notifications")
+        if existing_notifications is not None:
+            if not isinstance(existing_notifications, NotificationsModule):
+                raise CoreConfigurationError(
+                    "Registered 'notifications' module is not a NotificationsModule instance"
+                )
+            if (
+                effective_notifications_module is not None
+                and effective_notifications_module is not existing_notifications
+            ):
+                raise CoreConfigurationError(
+                    "Explicit notifications_module conflicts with module already registered on core"
+                )
+            effective_notifications_module = existing_notifications
+        else:
+            if effective_notifications_module is None:
+                effective_notifications_module = NotificationsModule()
+            elif not isinstance(effective_notifications_module, NotificationsModule):
+                raise TypeError("notifications_module must be a NotificationsModule instance")
+            core = compose_gateway_core(
+                config=effective_config,
+                modules=[*core.modules(), effective_notifications_module],
+            )
+
+        assert effective_events_module is not None
+        broker_topic_auth = getattr(effective_events_module.broker, "topic_authorizer", None)
+        if not enforces_mandatory_recipient_isolation(broker_topic_auth) or (
+            broker_topic_auth is not effective_topic_authorizer
+            and getattr(broker_topic_auth, "additional", None) is not events_topic_authorizer
+        ):
+            raise CoreConfigurationError(
+                "enable_notifications=True requires events_module.broker.topic_authorizer "
+                "to enforce mandatory recipient isolation and match events_topic_authorizer",
+                field_name="events_topic_authorizer",
+            )
+        effective_topic_authorizer = broker_topic_auth
+        if effective_notifications_dispatcher is None:
+            effective_notifications_dispatcher = NotificationsDispatcher(
+                broker=effective_events_module.broker,
+                preference_port=effective_notifications_module.preference_port,
+                producer_authorizer=effective_notifications_module.producer_authorizer,
+                telemetry=effective_notifications_module.telemetry,
+                authoritative_promotional_categories=(
+                    notifications_authoritative_promotional_categories
+                ),
+            )
+        elif not isinstance(effective_notifications_dispatcher, NotificationPublisherPort):
+            raise TypeError("notifications_dispatcher must implement NotificationPublisherPort")
 
     if events_replay_cache is not None and not isinstance(
         events_replay_cache, TicketReplayCachePort
@@ -587,6 +695,10 @@ def create_gateway_app(
     app.state.events_module = effective_events_module
     app.state.events_replay_cache = effective_replay_cache
     app.state.events_send_timeout_seconds = float(events_send_timeout_seconds)
+    app.state.events_topic_authorizer = effective_topic_authorizer
+    app.state.enable_notifications = enable_notifications
+    app.state.notifications_module = effective_notifications_module
+    app.state.notifications_dispatcher = effective_notifications_dispatcher
     app.state.module_lifecycle = ModuleLifecycleManager(core, policy=module_lifecycle_policy)
     app.state.started = False
     app.state.shutting_down = False

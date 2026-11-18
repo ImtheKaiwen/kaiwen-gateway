@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from kaiwen_gateway.core.identity import VerifiedPrincipalContext, validate_tenant_id
+from kaiwen_gateway.modules.events.auth import EventTopicAuthorizerPort
 from kaiwen_gateway.modules.events.broker import (
     DEFAULT_PUBLISH_BURST,
     DEFAULT_PUBLISH_RATE_PER_SECOND,
@@ -213,6 +214,7 @@ class RedisPubSubEventBroker:
         "_pubsub",
         "_publish_rate_limiter",
         "_subscribe_rate_limiter",
+        "_topic_authorizer",
         "_lock",
         "_pubsub_op_lock",
         "_connections",
@@ -237,10 +239,16 @@ class RedisPubSubEventBroker:
         telemetry: EventsTelemetrySink | None = None,
         publish_rate_limiter: RateLimiterPort | None = None,
         subscribe_rate_limiter: RateLimiterPort | None = None,
+        topic_authorizer: EventTopicAuthorizerPort | None = None,
     ) -> None:
         self._config: RedisPubSubBrokerConfig = (
             config if config is not None else RedisPubSubBrokerConfig()
         )
+        if topic_authorizer is not None and not isinstance(
+            topic_authorizer, EventTopicAuthorizerPort
+        ):
+            raise TypeError("topic_authorizer must implement EventTopicAuthorizerPort")
+        self._topic_authorizer: EventTopicAuthorizerPort | None = topic_authorizer
         self._telemetry: EventsTelemetrySink = (
             telemetry if telemetry is not None else InMemoryEventsTelemetrySink()
         )
@@ -316,6 +324,11 @@ class RedisPubSubEventBroker:
     @property
     def is_started(self) -> bool:
         return self._started and not self._closed
+
+    @property
+    def topic_authorizer(self) -> EventTopicAuthorizerPort | None:
+        """Return optional per-subscription topic authorizer hook."""
+        return self._topic_authorizer
 
     def stats(self) -> EventBrokerStats:
         return EventBrokerStats(
@@ -724,6 +737,19 @@ class RedisPubSubEventBroker:
             raise EventAuthorizationError(
                 "Principal lacks required scope for requested topic pattern"
             )
+
+        if self._topic_authorizer is not None:
+            try:
+                await self._topic_authorizer.authorize_subscribe(
+                    context=context,
+                    topic_pattern=canonical_pattern,
+                )
+            except EventAuthorizationError:
+                self._telemetry.record_error(EventsErrorCategory.AUTHORIZATION)
+                raise
+            except Exception as exc:
+                self._telemetry.record_error(EventsErrorCategory.AUTHORIZATION)
+                raise EventAuthorizationError("Topic authorization failed") from exc
 
         if self._subscribe_rate_limiter is not None:
             try:
