@@ -15,12 +15,17 @@ from kaiwen_gateway.modules.notifications.domain import (
 
 @dataclass(frozen=True, slots=True)
 class NotificationPublishResult:
-    """Bounded outcome summary for a notification publish operation."""
+    """Bounded outcome summary for a notification publish operation.
+
+    `dispatched_connections` reflects active transport connections matched by the
+    live broker at dispatch time (0 if recipient is offline) and never implies
+    confirmed WebSocket frame transmission or client receipt.
+    """
 
     notification_id: str
     status: NotificationStatus
     recipient_topic: str
-    delivered_count: int = 0
+    dispatched_connections: int = 0
     sequence_id: str | None = None
 
 

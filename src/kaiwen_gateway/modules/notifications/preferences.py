@@ -87,17 +87,21 @@ def evaluate_notification_preference(
     notification: NotificationEnvelope,
     preference: NotificationPreference | None,
     *,
+    authoritative_promotional_categories: Collection[str],
     channel_id: str = "in_app",
-    authoritative_promotional_categories: Collection[str] = (),
 ) -> PreferenceEvaluationResult:
     """Evaluate delivery eligibility preserving ADR-0007 preference policy.
 
-    - `authoritative_promotional_categories` allows the host application to enforce
-      promotional classification regardless of an untrusted producer's `is_promotional` flag.
+    - `authoritative_promotional_categories` is a required host-configured collection
+      so N2 callers cannot silently omit authoritative promotional classification
+      and trust an unverified producer's `is_promotional=False` flag.
     - Missing preferences (`None`) allow only non-promotional `in_app` notifications.
     """
+    canonical_promo_cats = frozenset(
+        validate_category(cat) for cat in authoritative_promotional_categories
+    )
     effective_promotional = notification.is_promotional or (
-        notification.category in authoritative_promotional_categories
+        notification.category in canonical_promo_cats
     )
 
     if preference is None:

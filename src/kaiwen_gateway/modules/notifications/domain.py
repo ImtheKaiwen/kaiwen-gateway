@@ -101,7 +101,7 @@ class NotificationStatus(StrEnum):
     CREATED = "created"
     DURABLE_ACCEPTED = "durable_accepted"
     PUBLISHED_LIVE = "published_live"
-    DELIVERED_TO_TRANSPORT = "delivered_to_transport"
+    DISPATCHED_TO_BROKER = "dispatched_to_broker"
     CLIENT_ACKNOWLEDGED = "client_acknowledged"
     EXPIRED = "expired"
     FILTERED_BY_PREFERENCE = "filtered_by_preference"

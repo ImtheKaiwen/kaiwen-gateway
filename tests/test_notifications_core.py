@@ -235,16 +235,28 @@ def test_preferences_policy_authoritative_promo_and_failure() -> None:
             evaluate_notification_preference(
                 non_promo,
                 await store.get_preferences(tenant_id="tenant:acme", recipient_id="user:alice"),
+                authoritative_promotional_categories=(),
             ).allowed
             is True
         )
         assert (
-            evaluate_notification_preference(non_promo, None, channel_id="email").allowed is False
+            evaluate_notification_preference(
+                non_promo,
+                None,
+                authoritative_promotional_categories=(),
+                channel_id="email",
+            ).allowed
+            is False
         )
         promo = _make_notification(
             category="marketing", is_promotional=True, priority=NotificationPriority.HIGH
         )
-        assert evaluate_notification_preference(promo, None).allowed is False
+        assert (
+            evaluate_notification_preference(
+                promo, None, authoritative_promotional_categories=()
+            ).allowed
+            is False
+        )
 
         # Host authoritative promotional category blocks untrusted producer setting is_promotional=False
         spoofed_promo = _make_notification(category="marketing", is_promotional=False)
@@ -268,22 +280,34 @@ def test_preferences_policy_authoritative_promo_and_failure() -> None:
         store.set_preference(pref)
         loaded = await store.get_preferences(tenant_id="tenant:acme", recipient_id="user:alice")
         assert loaded == pref
-        assert evaluate_notification_preference(promo, loaded).allowed is True
         assert (
             evaluate_notification_preference(
-                _make_notification(category="noisy", priority=NotificationPriority.HIGH), loaded
+                promo, loaded, authoritative_promotional_categories=("marketing",)
+            ).allowed
+            is True
+        )
+        assert (
+            evaluate_notification_preference(
+                _make_notification(category="noisy", priority=NotificationPriority.HIGH),
+                loaded,
+                authoritative_promotional_categories=(),
             ).allowed
             is False
         )
         assert (
             evaluate_notification_preference(
-                _make_notification(priority=NotificationPriority.NORMAL), loaded
+                _make_notification(priority=NotificationPriority.NORMAL),
+                loaded,
+                authoritative_promotional_categories=(),
             ).allowed
             is False
         )
         assert (
             evaluate_notification_preference(
-                _make_notification(priority=NotificationPriority.HIGH), loaded, channel_id="sms"
+                _make_notification(priority=NotificationPriority.HIGH),
+                loaded,
+                authoritative_promotional_categories=(),
+                channel_id="sms",
             ).allowed
             is False
         )
@@ -340,16 +364,17 @@ def test_producer_authorizer_channel_port_lifecycle_and_telemetry() -> None:
 
         # Bounded-cardinality telemetry
         sink.record_published()
-        sink.record_delivered(count=1)
+        sink.record_dispatched(matched_connections=1)
         sink.record_expired()
         sink.record_filtered_by_preference()
         sink.record_channel_failure()
         sink.record_error(NotificationsErrorCategory.AUTHORIZATION)
         snap = sink.snapshot()
         assert snap.notifications_published == 1
+        assert snap.notifications_dispatched == 1
         assert snap.errors_by_category[NotificationsErrorCategory.AUTHORIZATION] == 1
         assert set(snap.errors_by_category.keys()) == set(NotificationsErrorCategory)
-        assert NotificationStatus.CREATED.value == "created"
+        assert NotificationStatus.DISPATCHED_TO_BROKER.value == "dispatched_to_broker"
 
     asyncio.run(scenario())
 
