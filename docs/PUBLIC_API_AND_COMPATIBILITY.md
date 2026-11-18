@@ -77,7 +77,9 @@ Framework-independent Events foundation (zero mandatory third-party dependencies
 
 ### 3.9 Optional Redis Events Backend (`kaiwen_gateway.modules.events.redis`, requires `kaiwen-gateway[redis]`)
 - **Config & Client Factory:** `RedisClientConfig`, `create_async_redis_client`, `DEFAULT_REDIS_CONNECT_TIMEOUT_SECONDS`, `DEFAULT_REDIS_SOCKET_TIMEOUT_SECONDS`, `DEFAULT_INITIAL_RECONNECT_BACKOFF_SECONDS`, `DEFAULT_MAX_RECONNECT_BACKOFF_SECONDS`, `KEY_PREFIX_PATTERN`
-- **Cross-Instance Broker, Rate Limiter & Replay Cache:** `RedisPubSubBrokerConfig`, `RedisPubSubEventBroker`, `RedisEventConsumer`, `RedisEventSubscription`, `RedisDistributedRateLimiter`, `RedisTicketReplayCache`
+- **Cross-Instance Broker, Rate Limiter & Replay Cache (`E3`):** `RedisPubSubBrokerConfig`, `RedisPubSubEventBroker`, `RedisEventConsumer`, `RedisEventSubscription`, `RedisDistributedRateLimiter`, `RedisTicketReplayCache`
+- **Redis Streams Durable Store & Recovery (`E4`):** `RedisStreamsConfig`, `RedisStreamsDurableStore`, `StreamPendingSummary`, `StreamDeadLetterRecord`, `StreamRecoveryResult`, `StreamRecoveryWorker`, `StreamStats`, `DEFAULT_STREAM_MAXLEN`, `DEFAULT_DEAD_LETTER_MAXLEN`, `DEFAULT_CLAIM_MIN_IDLE_MS`, `DEFAULT_MAX_DELIVERY_ATTEMPTS`, `DEFAULT_RECOVERY_INTERVAL_SECONDS`, `DEFAULT_RECOVERY_BATCH_SIZE`, `DEFAULT_STREAM_MAX_READ_BATCH_SIZE`, `DEFAULT_STREAM_MAX_REPLAY_LIMIT`
+- **Durable Stream Telemetry (`kaiwen_gateway.modules.events`):** `DurableStreamMetricsSnapshot`, `DurableStreamTelemetrySink`, `InMemoryDurableStreamTelemetrySink`
 
 ---
 

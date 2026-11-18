@@ -70,8 +70,8 @@ Use only these milestone status values:
 | **D0** | Events Architecture & Documentation Baseline | `Complete` (`ADR-0006` `Accepted` 2026-11-17; `docs/EVENTS_MODULE_DESIGN.md`) | Maintainer architectural review |
 | **E1** | Events Foundation (`modules/events` core, ports, `InMemoryEventBroker`) | `Complete` (PR #59; `kaiwen_gateway.modules.events` + additive Core principal identity) | Maintainer acceptance of `D0` & `ADR-0006` |
 | **E2** | WebSocket Events & Security (`/ws/events/v1`, principal identity, rate limits) | `Complete` (PR #60 / `141c243`) | `E1` |
-| **E3** | Optional Redis Pub/Sub & Distributed Rate Limiting (`kaiwen-gateway[redis]`) | `In review — PR pending` (implemented on `feat/e3-events-redis-pubsub`) | `E2` |
-| **E4** | Redis Streams Durable Store, Recovery & Load Qualification | `Not started` | `E3` |
+| **E3** | Optional Redis Pub/Sub & Distributed Rate Limiting (`kaiwen-gateway[redis]`) | `Complete` (PR #61 / `e72b0fe`, verified on `main` run `44311771944`) | `E2` |
+| **E4** | Redis Streams Durable Store, Recovery & Load Qualification | `In progress` (branch `feat/e4-events-streams-recovery`, pending Draft PR review) | `E3` |
 
 Milestone IDs are stable; do not renumber completed milestones. Update the status table and evidence links after a reviewed change. If a stage is partially complete, keep it `In progress` or `Ready for review` rather than marking it `Complete`.
 
@@ -272,7 +272,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 ### Post-Beta Events Initiative (`D0`–`E4`, `ADR-0006 Accepted` — Does Not Alter V1 Voice Baseline)
 
-> **Status note:** `Voice` remains the **only implemented communication module** in `v0.1.0b1`. [`ADR-0006`](docs/decisions/0006-events-module-architecture.md) and [`docs/EVENTS_MODULE_DESIGN.md`](docs/EVENTS_MODULE_DESIGN.md) are **Accepted** (`D0 Complete`); `E1` (PR #59) and `E2` (PR #60) are **Complete**, `E3` is implemented on `feat/e3-events-redis-pubsub` pending PR review, and `E4` remains `Not started`.
+> **Status note:** `Voice` remains the **only implemented communication module** in `v0.1.0b1`. [`ADR-0006`](docs/decisions/0006-events-module-architecture.md) and [`docs/EVENTS_MODULE_DESIGN.md`](docs/EVENTS_MODULE_DESIGN.md) are **Accepted** (`D0 Complete`); `E1` (PR #59), `E2` (PR #60), and `E3` (PR #61 / `e72b0fe`) are **Complete**, and `E4` is `In progress` on `feat/e4-events-streams-recovery` pending Draft PR review.
 
 #### D0 — Events Architecture & Documentation (`Complete`)
 - **Scope:** Architecture, dependency boundaries, broker/durable-store ports, `/ws/events/v1` protocol, fail-closed security model, provisional rate limits, optional Redis Pub/Sub & Streams semantics, observability, and requirements.
@@ -295,14 +295,14 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - **Exit gate:** Security and WebSocket integration suite passes across Python 3.11–3.13; process-local replay scope explicitly documented as single-instance only.
 - **Explicit non-goals:** No Redis integration, no Notifications or Agent Streaming.
 
-#### E3 — Optional Redis Pub/Sub & Distributed Rate Limiting (`In review — PR pending`)
+#### E3 — Optional Redis Pub/Sub & Distributed Rate Limiting (`Complete` — PR #61)
 - **Scope:** Optional `kaiwen-gateway[redis]` extra (`pyproject.toml`), `RedisPubSubEventBroker` (at-most-once cross-instance live fan-out), atomic cross-instance ticket replay protection (`SET NX EX`), distributed Redis token-bucket rate limiting, and Redis connection lifecycle/reconnect backoff management.
 - **Prerequisites:** `E2` complete.
 - **Deliverables & Test evidence:** Mocked + opt-in local Redis integration tests covering cross-instance Pub/Sub fan-out, atomic cross-instance ticket replay rejection, reconnect backoff, distributed rate-limit counters, fail-closed unavailability handling, and core-only zero-Redis import checks.
 - **Exit gate:** All unit + Redis Pub/Sub tests pass without breaking `kaiwen-gateway` base wheel metadata.
 - **Explicit non-goals:** No Redis Streams durable store, no Notifications or Agent Streaming implementations, and no global cross-topic ordering claims.
 
-#### E4 — Redis Streams Durable Store, Recovery & Load Qualification (`Not started`)
+#### E4 — Redis Streams Durable Store, Recovery & Load Qualification (`In progress`)
 - **Scope:** `RedisStreamsDurableStore` (`XADD` / `XREADGROUP` / `XACK` / bounded replay), Pending Entries List (`XPENDING` / `XAUTOCLAIM`) crash recovery, `MAXLEN ~` retention/trimming policies, failure-injection testing, and multi-process paced load/memory-bound qualification harness.
 - **Prerequisites:** `E3` complete.
 - **Deliverables & Test evidence:** Failure-injection tests (consumer crash/redelivery, idempotent `event_id` handling, `MAXLEN` lag eviction) plus repeatable multi-trial synthetic Events benchmark report (p50/p95/p99 latency, `1 MiB` per-connection / `32 MiB` global byte-budget enforcement, slow-consumer isolation).
