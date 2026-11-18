@@ -72,7 +72,7 @@ Use only these milestone status values:
 | **E2** | WebSocket Events & Security (`/ws/events/v1`, principal identity, rate limits) | `Complete` (PR #60 / `141c243`) | `E1` |
 | **E3** | Optional Redis Pub/Sub & Distributed Rate Limiting (`kaiwen-gateway[redis]`) | `Complete` (PR #61 / `e72b0fe`, verified on `main` run `44311771944`) | `E2` |
 | **E4** | Redis Streams Durable Store, Recovery & Load Qualification | `Complete` (PR #62 / `3d407d6`, verified on `main` run `44320503671`) | `E3` |
-| **N0** | Notifications Architecture & Contracts (`ADR-0007` `Proposed`) | `Ready for review` (`docs/NOTIFICATIONS_MODULE_DESIGN.md`) | `E4` |
+| **N0** | Notifications Architecture & Contracts (`ADR-0007` `Accepted`) | `Complete` (`ADR-0007` `Accepted` 2026-11-18; `docs/NOTIFICATIONS_MODULE_DESIGN.md`) | `E4` |
 | **N1** | Notification Core (`modules/notifications` domain, ports, preferences, telemetry) | `Not started` | Maintainer acceptance of `N0` & `ADR-0007` |
 | **N2** | Real-Time Notification Delivery (`/ws/events/v1` & recipient-scoped routing) | `Not started` | `N1` |
 | **N3** | Durable Notification Delivery & Recovery (`RedisStreamsDurableStore` worker) | `Not started` | `N2` |
@@ -314,14 +314,14 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - **Exit gate:** Empirical limits documented; readiness review before any Notifications or Agent Streaming integration.
 - **Explicit non-goals:** No exactly-once guarantees; no production SLA certification without deployment-specific Gate D review.
 
-### Post-Beta Notifications Initiative (`N0`–`N4`, `ADR-0007 Proposed` — Does Not Alter V1 Voice Baseline)
+### Post-Beta Notifications Initiative (`N0`–`N4`, `ADR-0007 Accepted` — Does Not Alter V1 Voice Baseline)
 
-> **Status note:** [`ADR-0007`](docs/decisions/0007-notifications-module-architecture.md) and [`docs/NOTIFICATIONS_MODULE_DESIGN.md`](docs/NOTIFICATIONS_MODULE_DESIGN.md) are **`Proposed`** (`N0` in review). Milestones `N1`–`N4` remain `Not started` until separately authorized.
+> **Status note:** [`ADR-0007`](docs/decisions/0007-notifications-module-architecture.md) and [`docs/NOTIFICATIONS_MODULE_DESIGN.md`](docs/NOTIFICATIONS_MODULE_DESIGN.md) are **Accepted** (`N0 Complete` 2026-11-18). Milestones `N1`–`N4` remain `Not started` until separately authorized.
 
-#### N0 — Notifications Architecture & Contracts (`Ready for review`)
+#### N0 — Notifications Architecture & Contracts (`Complete`)
 - **Scope:** Architecture, domain contracts (`NotificationEnvelope`, `NotificationPreferencePort`, `NotificationChannelPort`), 6-stage ACK separation, `/ws/events/v1` transport reuse evaluation, security threat model, Core/Voice/Events compatibility assessment, and `N1`–`N4` roadmap.
 - **Prerequisites:** `E1`–`E4` complete (`9e9af79`).
-- **Deliverables:** `docs/NOTIFICATIONS_MODULE_DESIGN.md`, `docs/decisions/0007-notifications-module-architecture.md` (`Proposed`), and `ROADMAP.md` updates.
+- **Deliverables:** `docs/NOTIFICATIONS_MODULE_DESIGN.md`, `docs/decisions/0007-notifications-module-architecture.md` (`Accepted`), and `ROADMAP.md` updates.
 - **Exit gate:** Documentation consistency, zero code/dependency changes, maintainer review and acceptance of `ADR-0007`.
 - **Explicit non-goals:** No Python implementation, no external Email/SMS/Push/Webhook providers, no REST API endpoints.
 

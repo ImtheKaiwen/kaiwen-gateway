@@ -1,8 +1,8 @@
 # Kaiwen Gateway — Notifications Module Design (`N0` Architecture & Contracts)
 
-> **Status:** `Proposed` (`N0-R1` Architecture & Documentation Baseline — **not yet implemented**)
+> **Status:** `Accepted` (`N0` Complete — `ADR-0007` Accepted 2026-11-18; implementation milestones `N1`–`N4` remain `Not started`)
 > **Date:** 2026-11-18
-> **Related ADR:** [`ADR-0007 — Notifications Module Architecture`](decisions/0007-notifications-module-architecture.md) (`Proposed`)
+> **Related ADR:** [`ADR-0007 — Notifications Module Architecture`](decisions/0007-notifications-module-architecture.md) (`Accepted`)
 > **Related Baseline:** [`ADR-0006`](decisions/0006-events-module-architecture.md) (`Accepted`) · [`docs/EVENTS_MODULE_DESIGN.md`](EVENTS_MODULE_DESIGN.md) (`D0`–`E4 Complete` on `main` `9e9af79`)
 > **Scope:** Modular `src/kaiwen_gateway/modules/notifications/` design reusing Core (`GatewayModule`, `VerifiedPrincipalContext`) and Events (`EventBrokerPort`, `DurableEventStorePort`, `/ws/events/v1`, `[redis]`) without altering Voice or adding mandatory runtime dependencies.
 
@@ -77,10 +77,10 @@ Notifications **must never** promise guaranteed client delivery merely because R
 |---|---|---|---|
 | **1. Durable Acceptance** | `N3` Producer / Store | `DurableEventStorePort.append()` (`XADD`) confirmed by Redis | Confirmed only when Redis returns an entry ID; timeouts fail closed as ambiguous (`EventsBackendUnavailableError`) |
 | **2. Notification Processing** | `NotificationsDispatcher` / `N3` Worker | Validates `NotificationEnvelope`, checks `expires_at`, evaluates `NotificationPreferencePort`, verifies final frame size | Drops expired/muted notifications cleanly; preference-store errors fail closed (never silently treated as missing) |
-| **3. Transport Dispatch** | `/ws/events/v1` + `EventBrokerPort` | Enqueues onto active WebSocket connection's bounded queue and writes `events.delivery` | Best-effort `at-most-once` for currently connected clients; slow consumers disconnect with `1008` |
+| **3. Transport Dispatch** | `/ws/events/v1` + `EventBrokerPort` | `EventBrokerPort.publish()` accepts the event and routes it to matching active connection queues (`PublishResult`). Distinguishes **broker dispatch acceptance** (`matched_connections >= 1`), **zero-active-recipient outcome** (`matched_connections == 0`, valid terminal outcome), and **actual WebSocket frame transmission** (per-connection pump write—never proven by `publish()` returning!) | Best-effort `at-most-once`; `EventBrokerPort.publish()` success **never** claims confirmed socket transmission or client receipt; slow consumers disconnect with `1008` |
 | **4. Actual Client Receipt** | Recipient Client | Client socket receives and parses `events.delivery` | **Unobserved by Gateway** without Stage 5 |
 | **5. Application Acknowledgment** | Consuming Application / Client | App-level "read/dismissed" signal | Owned by consuming application (outside Gateway MVP); **never** implied by Stage 3 |
-| **6. Redis Streams Acknowledgment** | `N3` Consumer Worker | `DurableEventStorePort.ack()` (`XACK`) | Issued **only** after Stage 2 + Stage 3 dispatch completes; **never** issued on `XREADGROUP` or WebSocket queue enqueue |
+| **6. Redis Streams Acknowledgment** | `N3` Consumer Worker | `DurableEventStorePort.ack()` (`XACK`) | Issued **only** after Stage 2 processing and a documented terminal Stage 3 broker dispatch outcome (including zero active recipients); **never** issued on `XREADGROUP` or WebSocket queue enqueue |
 
 ### 3.1 Failure & Edge-Case Behavior (`R2`)
 
@@ -108,7 +108,7 @@ Notifications **must never** promise guaranteed client delivery merely because R
 - **Mandatory Fail-Closed Namespace Guard:** Whenever Notifications is enabled (`enable_notifications=True`):
   1. **No implicit `events:subscribe` inheritance:** General `events:subscribe` and `events:subscribe:wildcard` **must never** grant access to `notifications.r.*`.
   2. **Exact-topic subscriptions (`notifications.r.<token>`):** Allowed **only** if `<token>` equals the canonical token derived from `(verified_context.tenant_id, verified_context.principal_id)` (self-subscription) OR the principal holds an explicit administrative scope (`notifications:subscribe:tenant` / `events:admin`).
-  3. **Wildcard subscriptions (`notifications.*`, `notifications.r.*`):** Denied fail-closed unless an explicit administrative scope (`notifications:subscribe:tenant` / `events:admin`) is held.
+  3. **Broad & Prefix Wildcard Subscriptions (`*`, `notifications.*`, `notifications.r.*`, or any pattern capable of matching `notifications.r.*`):** Any subscription pattern `P` capable of matching the reserved `notifications.r.*` namespace (e.g., `topic_matches_pattern("notifications.r.probe", P)` is `True`) **must** be rejected fail-closed for `events:subscribe` and `events:subscribe:wildcard` unless an explicit administrative scope (`notifications:subscribe:tenant` / `events:admin`) is held.
   4. **Cross-recipient & Cross-tenant access:** Cross-recipient subscriptions are denied without admin scope; cross-tenant access is always denied (`VerifiedPrincipalContext.tenant_id` + tenant-isolated Redis keys).
   5. **Missing authorization hooks:** `create_gateway_app()` / `NotificationsModule` **must fail closed at startup** (`CoreConfigurationError`) if `enable_notifications=True` is configured without the recipient topic-authorization hook wired into `/ws/events/v1` / `EventBrokerPort`.
 
