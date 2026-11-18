@@ -323,10 +323,12 @@ async def run_benchmark(
         )
 
         # Wait up to 3s for all measured notifications to arrive at broker consumer
+        # and finish their XACK before stopping background workers.
         deadline = time.perf_counter() + 3.0
-        while len(tracker.delivered_ids) < len(tracker.measured_ids) and (
-            time.perf_counter() < deadline
-        ):
+        while (
+            len(tracker.delivered_ids) < len(tracker.measured_ids)
+            or durable_tel.snapshot().worker_acked < durable_tel.snapshot().durable_accepted
+        ) and time.perf_counter() < deadline:
             await asyncio.sleep(0.02)
         bench_elapsed = max(0.001, time.perf_counter() - bench_start)
 
@@ -359,6 +361,7 @@ async def run_benchmark(
                 count=1,
                 block_ms=50,
             )
+            unacked_event_id = unacked[0].envelope.event_id if unacked else None
             await asyncio.sleep(0.08)
             recovered_acked = await worker_instances[0].recover_once(min_idle_ms=50)
             rec_deadline = time.perf_counter() + 2.0
@@ -366,6 +369,9 @@ async def run_benchmark(
                 await asyncio.sleep(0.01)
             failure_injection_report = {
                 "enabled": True,
+                "expected_crash_event_id": crash_nid,
+                "unacked_event_id": unacked_event_id,
+                "matches_expected_crash_id": unacked_event_id == crash_nid,
                 "unacked_read_count": len(unacked),
                 "recovered_and_acked": recovered_acked,
                 "recovered_delivered_to_broker_consumer": crash_nid in injected_delivered,
@@ -376,7 +382,11 @@ async def run_benchmark(
 
         server_info = await info_client.info("server")
         redis_version = str(server_info.get("redis_version", "unknown"))
-        stream_stats = await store.stream_stats(tenant_id=tenant_id, topic="notifications.ingest")
+        stream_stats = await store.stream_stats(
+            tenant_id=tenant_id,
+            topic="notifications.ingest",
+            group="notifications-workers",
+        )
         broker_stats = broker_sub.stats()
         dt_snap = durable_tel.snapshot()
         t_snap = telemetry.snapshot()
@@ -436,6 +446,7 @@ async def run_benchmark(
                 "stream_stats": {
                     "length": stream_stats.length,
                     "group_pending": stream_stats.group_pending,
+                    "group_lag": stream_stats.group_lag,
                 },
                 "broker_stats": {
                     "active_connections": broker_stats.active_connections,

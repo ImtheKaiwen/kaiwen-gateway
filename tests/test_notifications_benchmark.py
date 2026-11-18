@@ -182,7 +182,9 @@ def test_run_benchmark_non_divisible_and_failure_injection_deterministic(
                 next_start_id="0-0",
             )
 
-        async def stream_stats(self, *, tenant_id: str, topic: str) -> StreamStats:
+        async def stream_stats(
+            self, *, tenant_id: str, topic: str, group: str | None = None
+        ) -> StreamStats:
             return StreamStats(
                 length=self._seq,
                 first_entry_id="1-0" if self._seq else None,
@@ -221,12 +223,17 @@ def test_run_benchmark_non_divisible_and_failure_injection_deterministic(
     assert res["total_delivery_attempts_observed"] == 10
     assert res["redelivery_count"] == 0
     assert res["publisher_acceptance_failures"] == 0
-    assert res["failure_injection"] == {
-        "enabled": True,
-        "unacked_read_count": 1,
-        "recovered_and_acked": 1,
-        "recovered_delivered_to_broker_consumer": True,
-    }
+    assert res["failure_injection"]["enabled"] is True
+    assert res["failure_injection"]["matches_expected_crash_id"] is True
+    assert (
+        res["failure_injection"]["unacked_event_id"]
+        == res["failure_injection"]["expected_crash_event_id"]
+    )
+    assert res["failure_injection"]["unacked_read_count"] == 1
+    assert res["failure_injection"]["recovered_and_acked"] == 1
+    assert res["failure_injection"]["recovered_delivered_to_broker_consumer"] is True
+    assert res["stream_stats"]["group_pending"] == 0
+    assert res["stream_stats"]["group_lag"] == 0
     assert res["durable_telemetry"]["durable_accepted"] == 13  # 2 warmup + 10 measured + 1 crash
     assert res["durable_telemetry"]["worker_acked"] == 13
     assert res["durable_telemetry"]["worker_reclaimed"] == 1

@@ -55,14 +55,15 @@ uv run --all-extras python tools/benchmark_notifications.py \
 | Metric | Measured Value |
 | :--- | :--- |
 | **Unique Notifications Published / Delivered** | `600` / `600` (`delivery_success_rate = 1.0`, `publisher_acceptance_failures = 0`) |
-| **Total Delivery Attempts Observed** | `600` (`redelivery_count = 0`) |
-| **Unique Delivery Throughput** | `198.97` notifications/s |
-| **First-Delivery Latency (p50 / p95 / p99 / max)** | `15.568 ms` / `40.64 ms` / `56.804 ms` / `84.356 ms` (`count=600`) |
-| **Redelivery Latency** | `count=0` (`0.0 ms`) |
-| **Event-Loop Lag (p50 / p95 / p99 / max)** | `0.0 ms` / `6.0 ms` / `6.0 ms` / `22.0 ms` (`count=1800`) |
-| **Traced Python Allocations (`tracemalloc` current / peak)** | `725.68 KiB` / `814.11 KiB` |
-| **Failure Injection (`unacked` read + `recover_once`)** | `unacked_read_count=1`, `recovered_and_acked=1`, `recovered_delivered_to_broker_consumer=true` |
-| **Durable Telemetry Reconciliation** | `durable_accepted=651` (`50` warmup + `600` measured + `1` failure-injection), `worker_processed=651`, `worker_acked=650`, `worker_reclaimed=1`, `worker_dead_lettered=0`, `worker_retryable_failures=0`, `redis_failures=0` |
+| **Total Delivery Attempts Observed** | `666` (`redelivery_count = 66` under `claim_min_idle_ms = 50`) |
+| **Unique Delivery Throughput** | `157.89` notifications/s |
+| **First-Delivery Latency (p50 / p95 / p99 / max)** | `26.223 ms` / `791.729 ms` / `825.726 ms` / `842.408 ms` (`count=600`) |
+| **Redelivery Latency (p50 / p95 / p99 / max)** | `625.039 ms` / `838.39 ms` / `877.794 ms` / `1009.318 ms` (`count=66`) |
+| **Event-Loop Lag (p50 / p95 / p99 / max)** | `0.0 ms` / `6.0 ms` / `6.0 ms` / `84.0 ms` (`count=1548`) |
+| **Traced Python Allocations (`tracemalloc` current / peak)** | `898.43 KiB` / `1391.59 KiB` |
+| **Failure Injection (`unacked` read + `recover_once`)** | `unacked_read_count=1`, `matches_expected_crash_id=true`, `recovered_and_acked=1`, `recovered_delivered_to_broker_consumer=true` |
+| **Durable Telemetry Reconciliation** | `durable_accepted=651` (`50` warmup + `600` measured + `1` failure-injection), `worker_processed=726`, `worker_acked=651`, `worker_reclaimed=76`, `worker_dead_lettered=0`, `worker_retryable_failures=0`, `redis_failures=0` |
+| **Stream End State (`notifications-workers`)** | `length=651`, `group_pending=0`, `group_lag=0` |
 | **Broker End State** | `active_connections=1`, `queued_events=0` |
 
 > **Note:** These figures reflect a single-host loopback qualification run and are **not** a production SLA guarantee.
