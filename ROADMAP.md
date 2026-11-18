@@ -76,7 +76,7 @@ Use only these milestone status values:
 | **N1** | Notification Core (`modules/notifications` domain, ports, preferences, telemetry) | `Complete` (PR #65 / `533e02b`) | Maintainer acceptance of `N0` & `ADR-0007` |
 | **N2** | Real-Time Notification Delivery (`/ws/events/v1` & recipient-scoped routing) | `Complete` (PR #67 / `6567cb7`) | `N1` |
 | **N3** | Durable Notification Delivery & Recovery (`RedisStreamsDurableStore` worker) | `Complete` (PR #70 / `a26dfa1`) | `N2` |
-| **N4** | Notifications Integration, Performance & Acceptance | `Ready for review` (implemented on `feat/n4-notifications-acceptance`, pending Draft PR review) | `N3` |
+| **N4** | Notifications Integration, Performance & Acceptance | `Complete` (PR #72 / `3a33413`) | `N3` |
 
 Milestone IDs are stable; do not renumber completed milestones. Update the status table and evidence links after a reviewed change. If a stage is partially complete, keep it `In progress` or `Ready for review` rather than marking it `Complete`.
 
@@ -343,11 +343,11 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - **Deliverables & Test evidence:** Real-Redis failure-injection tests covering crash before `XACK`, `XPENDING`/`XAUTOCLAIM` recovery, poison DLQ quarantine, `expires_at` drop, and Redis outage fail-closed behavior.
 - **Explicit non-goals:** No external Email/SMS/Push/Webhook concrete adapters.
 
-#### N4 — Integration, Performance & Acceptance (`Ready for review`)
-- **Scope:** Paced multi-instance Notifications load qualification harness, failure-injection verification, compatibility closeout, and `PUBLIC_API_AND_COMPATIBILITY.md` updates.
+#### N4 — Integration, Performance & Acceptance (`Complete` — PR #72 / `3a33413`)
+- **Scope:** Paced multi-instance Notifications load qualification harness (`tools/benchmark_notifications.py`), failure-injection verification, compatibility closeout, and `docs/NOTIFICATIONS_N4_ACCEPTANCE_REPORT.md`.
 - **Prerequisites:** `N3` complete.
-- **Deliverables & Test evidence:** Empirical p50/p95/p99 latency & memory report, Python 3.11–3.13 CI green, `0` P0/P1 findings.
-- **Explicit non-goals:** No production SLA certification without deployment-specific Gate D review.
+- **Deliverables & Test evidence:** Live Redis benchmark (`651` durable accepted / `651` worker acked, `group_pending=0`, `group_lag=0`, `600` unique delivered at `157.89` notif/s, `p95=791.729 ms`, `66` redeliveries under `claim_min_idle_ms=50`), Python 3.11–3.13 CI green, `0` P0/P1 findings.
+- **Explicit non-goals & Limitations:** At-least-once delivery (crash recovery can produce duplicate deliveries), bounded Redis stream/dedup retention, benchmark measures single-process multi-instance simulation and traced Python allocations (`tracemalloc`) rather than multi-host RSS, and no production SLA or exactly-once delivery guarantee without deployment-specific Gate D review.
 
 ## 5. Milestone dependencies and review rhythm
 
