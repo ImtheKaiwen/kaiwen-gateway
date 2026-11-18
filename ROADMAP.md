@@ -73,7 +73,7 @@ Use only these milestone status values:
 | **E3** | Optional Redis Pub/Sub & Distributed Rate Limiting (`kaiwen-gateway[redis]`) | `Complete` (PR #61 / `e72b0fe`, verified on `main` run `44311771944`) | `E2` |
 | **E4** | Redis Streams Durable Store, Recovery & Load Qualification | `Complete` (PR #62 / `3d407d6`, verified on `main` run `44320503671`) | `E3` |
 | **N0** | Notifications Architecture & Contracts (`ADR-0007` `Accepted`) | `Complete` (`ADR-0007` `Accepted` 2026-11-18; `docs/NOTIFICATIONS_MODULE_DESIGN.md`) | `E4` |
-| **N1** | Notification Core (`modules/notifications` domain, ports, preferences, telemetry) | `Not started` | Maintainer acceptance of `N0` & `ADR-0007` |
+| **N1** | Notification Core (`modules/notifications` domain, ports, preferences, telemetry) | `Ready for review` (implemented on `feat/n1-notifications-core`, pending Draft PR review) | Maintainer acceptance of `N0` & `ADR-0007` |
 | **N2** | Real-Time Notification Delivery (`/ws/events/v1` & recipient-scoped routing) | `Not started` | `N1` |
 | **N3** | Durable Notification Delivery & Recovery (`RedisStreamsDurableStore` worker) | `Not started` | `N2` |
 | **N4** | Notifications Integration, Performance & Acceptance | `Not started` | `N3` |
@@ -325,7 +325,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - **Exit gate:** Documentation consistency, zero code/dependency changes, maintainer review and acceptance of `ADR-0007`.
 - **Explicit non-goals:** No Python implementation, no external Email/SMS/Push/Webhook providers, no REST API endpoints.
 
-#### N1 — Notification Core (`Not started`)
+#### N1 — Notification Core (`Ready for review`)
 - **Scope:** `src/kaiwen_gateway/modules/notifications/` (`domain.py`, `ports.py`, `telemetry.py`, `module.py` implementing `GatewayModule`).
 - **Prerequisites:** Maintainer acceptance of `N0` and `ADR-0007`.
 - **Deliverables & Test evidence:** Unit tests covering schema/TTL validation, recipient-topic derivation, preference filtering, zero-Redis import isolation, `mypy --strict`, and `ruff`.
