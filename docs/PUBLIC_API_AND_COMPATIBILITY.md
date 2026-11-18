@@ -81,6 +81,12 @@ Framework-independent Events foundation (zero mandatory third-party dependencies
 - **Redis Streams Durable Store & Recovery (`E4`):** `RedisStreamsConfig`, `RedisStreamsDurableStore`, `StreamPendingSummary`, `StreamDeadLetterRecord`, `StreamRecoveryResult`, `StreamRecoveryWorker`, `StreamStats`, `DEFAULT_STREAM_MAXLEN`, `DEFAULT_DEAD_LETTER_MAXLEN`, `DEFAULT_CLAIM_MIN_IDLE_MS`, `DEFAULT_MAX_DELIVERY_ATTEMPTS`, `DEFAULT_RECOVERY_INTERVAL_SECONDS`, `DEFAULT_RECOVERY_BATCH_SIZE`, `DEFAULT_STREAM_MAX_READ_BATCH_SIZE`, `DEFAULT_STREAM_MAX_REPLAY_LIMIT`
 - **Durable Stream Telemetry (`kaiwen_gateway.modules.events`):** `DurableStreamMetricsSnapshot`, `DurableStreamTelemetrySink`, `InMemoryDurableStreamTelemetrySink`
 
+### 3.10 Notifications Core (`kaiwen_gateway.modules.notifications`, `N1`)
+- **Domain & Topic Derivation:** `NOTIFICATIONS_SCHEMA_VERSION`, `DEFAULT_MAX_NOTIFICATION_BYTES` (`49_152`), `DEFAULT_MAX_JSON_DEPTH` (`15`), `RECIPIENT_TOPIC_PREFIX`, `RECIPIENT_TOPIC_HASH_HEX_LENGTH`, `NotificationPriority`, `NotificationStatus`, `NotificationEnvelope`, `derive_recipient_topic`, `generate_notification_id`, `priority_rank`, `parse_utc_timestamp`, `validate_*`, `NotificationsError` hierarchy
+- **Ports & Authorization:** `NotificationPublishResult`, `ChannelDeliveryResult`, `NotificationProducerAuthorizerPort`, `NotificationPublisherPort`, `NotificationChannelPort`, `DenyAllProducerAuthorizer`
+- **Preferences:** `NotificationPreference`, `PreferenceEvaluationResult`, `NotificationPreferencePort`, `evaluate_notification_preference`, `InMemoryNotificationPreferenceStore`
+- **Telemetry & Lifecycle:** `NotificationsErrorCategory`, `NotificationsMetricsSnapshot`, `NotificationsTelemetrySink`, `InMemoryNotificationsTelemetrySink`, `NotificationsModule`
+
 ---
 
 ## 4. Explicit Internal / Private APIs
