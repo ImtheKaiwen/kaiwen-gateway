@@ -81,9 +81,12 @@ from kaiwen_gateway.modules.events.ratelimit import (
     TokenBucketRateLimiter,
 )
 from kaiwen_gateway.modules.events.telemetry import (
+    DurableStreamMetricsSnapshot,
+    DurableStreamTelemetrySink,
     EventsErrorCategory,
     EventsMetricsSnapshot,
     EventsTelemetrySink,
+    InMemoryDurableStreamTelemetrySink,
     InMemoryEventsTelemetrySink,
 )
 
@@ -108,6 +111,8 @@ __all__ = [
     "DEFAULT_SUBSCRIBE_RATE_PER_SECOND",
     "DurableEventRecord",
     "DurableEventStorePort",
+    "DurableStreamMetricsSnapshot",
+    "DurableStreamTelemetrySink",
     "EVENTS_PROTOCOL_VERSION",
     "EVENTS_TICKET_AUDIENCE",
     "EVENT_ID_PATTERN",
@@ -139,6 +144,7 @@ __all__ = [
     "InMemoryEventBroker",
     "InMemoryEventConsumer",
     "InMemoryEventSubscription",
+    "InMemoryDurableStreamTelemetrySink",
     "InMemoryEventsTelemetrySink",
     "InvalidEventError",
     "OversizedEventError",

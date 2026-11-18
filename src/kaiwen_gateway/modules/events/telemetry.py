@@ -154,9 +154,209 @@ class InMemoryEventsTelemetrySink:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class DurableStreamMetricsSnapshot:
+    """Immutable bounded-cardinality telemetry snapshot for E4 Redis Streams durability."""
+
+    append_succeeded: int
+    append_failed: int
+    append_ambiguous: int
+    read_succeeded: int
+    read_failed: int
+    records_read: int
+    ack_succeeded: int
+    ack_failed: int
+    records_acked: int
+    recovery_attempts: int
+    records_reclaimed: int
+    recovery_failed: int
+    retry_exhausted: int
+    dead_lettered: int
+    dead_letter_failed: int
+    retention_trimmed_losses: int
+    malformed_records: int
+    redis_errors: int
+    consumer_lag: int
+    delivery_latency_ms_sum: float
+    delivery_latency_count: int
+    delivery_latency_max_ms: float
+
+
+@runtime_checkable
+class DurableStreamTelemetrySink(Protocol):
+    """Telemetry sink protocol for E4 Redis Streams operations.
+
+    Implementations must never record unbounded event IDs, raw payloads,
+    authentication tokens, WebSocket tickets, or Redis credentials.
+    """
+
+    def record_append(self, *, succeeded: bool, ambiguous: bool = False) -> None: ...
+
+    def record_read(self, *, succeeded: bool, record_count: int = 0) -> None: ...
+
+    def record_ack(self, *, succeeded: bool, acked_count: int = 0) -> None: ...
+
+    def record_recovery(self, *, succeeded: bool, reclaimed_count: int = 0) -> None: ...
+
+    def record_retry_exhausted(self) -> None: ...
+
+    def record_dead_letter(self, *, succeeded: bool) -> None: ...
+
+    def record_retention_loss(self, *, count: int = 1) -> None: ...
+
+    def record_malformed_record(self) -> None: ...
+
+    def record_redis_error(self) -> None: ...
+
+    def update_consumer_lag(self, lag: int) -> None: ...
+
+    def record_delivery_latency_ms(self, latency_ms: float) -> None: ...
+
+    def snapshot(self) -> DurableStreamMetricsSnapshot: ...
+
+
+class InMemoryDurableStreamTelemetrySink:
+    """In-memory bounded-cardinality telemetry sink for E4 Redis Streams."""
+
+    __slots__ = (
+        "_append_succeeded",
+        "_append_failed",
+        "_append_ambiguous",
+        "_read_succeeded",
+        "_read_failed",
+        "_records_read",
+        "_ack_succeeded",
+        "_ack_failed",
+        "_records_acked",
+        "_recovery_attempts",
+        "_records_reclaimed",
+        "_recovery_failed",
+        "_retry_exhausted",
+        "_dead_lettered",
+        "_dead_letter_failed",
+        "_retention_trimmed_losses",
+        "_malformed_records",
+        "_redis_errors",
+        "_consumer_lag",
+        "_delivery_latency_ms_sum",
+        "_delivery_latency_count",
+        "_delivery_latency_max_ms",
+    )
+
+    def __init__(self) -> None:
+        self._append_succeeded: int = 0
+        self._append_failed: int = 0
+        self._append_ambiguous: int = 0
+        self._read_succeeded: int = 0
+        self._read_failed: int = 0
+        self._records_read: int = 0
+        self._ack_succeeded: int = 0
+        self._ack_failed: int = 0
+        self._records_acked: int = 0
+        self._recovery_attempts: int = 0
+        self._records_reclaimed: int = 0
+        self._recovery_failed: int = 0
+        self._retry_exhausted: int = 0
+        self._dead_lettered: int = 0
+        self._dead_letter_failed: int = 0
+        self._retention_trimmed_losses: int = 0
+        self._malformed_records: int = 0
+        self._redis_errors: int = 0
+        self._consumer_lag: int = 0
+        self._delivery_latency_ms_sum: float = 0.0
+        self._delivery_latency_count: int = 0
+        self._delivery_latency_max_ms: float = 0.0
+
+    def record_append(self, *, succeeded: bool, ambiguous: bool = False) -> None:
+        if succeeded:
+            self._append_succeeded += 1
+        elif ambiguous:
+            self._append_ambiguous += 1
+        else:
+            self._append_failed += 1
+
+    def record_read(self, *, succeeded: bool, record_count: int = 0) -> None:
+        if succeeded:
+            self._read_succeeded += 1
+            self._records_read += max(0, record_count)
+        else:
+            self._read_failed += 1
+
+    def record_ack(self, *, succeeded: bool, acked_count: int = 0) -> None:
+        if succeeded:
+            self._ack_succeeded += 1
+            self._records_acked += max(0, acked_count)
+        else:
+            self._ack_failed += 1
+
+    def record_recovery(self, *, succeeded: bool, reclaimed_count: int = 0) -> None:
+        self._recovery_attempts += 1
+        if succeeded:
+            self._records_reclaimed += max(0, reclaimed_count)
+        else:
+            self._recovery_failed += 1
+
+    def record_retry_exhausted(self) -> None:
+        self._retry_exhausted += 1
+
+    def record_dead_letter(self, *, succeeded: bool) -> None:
+        if succeeded:
+            self._dead_lettered += 1
+        else:
+            self._dead_letter_failed += 1
+
+    def record_retention_loss(self, *, count: int = 1) -> None:
+        self._retention_trimmed_losses += max(0, count)
+
+    def record_malformed_record(self) -> None:
+        self._malformed_records += 1
+
+    def record_redis_error(self) -> None:
+        self._redis_errors += 1
+
+    def update_consumer_lag(self, lag: int) -> None:
+        self._consumer_lag = max(0, lag)
+
+    def record_delivery_latency_ms(self, latency_ms: float) -> None:
+        clamped = max(0.0, float(latency_ms))
+        self._delivery_latency_ms_sum += clamped
+        self._delivery_latency_count += 1
+        if clamped > self._delivery_latency_max_ms:
+            self._delivery_latency_max_ms = clamped
+
+    def snapshot(self) -> DurableStreamMetricsSnapshot:
+        return DurableStreamMetricsSnapshot(
+            append_succeeded=self._append_succeeded,
+            append_failed=self._append_failed,
+            append_ambiguous=self._append_ambiguous,
+            read_succeeded=self._read_succeeded,
+            read_failed=self._read_failed,
+            records_read=self._records_read,
+            ack_succeeded=self._ack_succeeded,
+            ack_failed=self._ack_failed,
+            records_acked=self._records_acked,
+            recovery_attempts=self._recovery_attempts,
+            records_reclaimed=self._records_reclaimed,
+            recovery_failed=self._recovery_failed,
+            retry_exhausted=self._retry_exhausted,
+            dead_lettered=self._dead_lettered,
+            dead_letter_failed=self._dead_letter_failed,
+            retention_trimmed_losses=self._retention_trimmed_losses,
+            malformed_records=self._malformed_records,
+            redis_errors=self._redis_errors,
+            consumer_lag=self._consumer_lag,
+            delivery_latency_ms_sum=self._delivery_latency_ms_sum,
+            delivery_latency_count=self._delivery_latency_count,
+            delivery_latency_max_ms=self._delivery_latency_max_ms,
+        )
+
+
 __all__ = [
+    "DurableStreamMetricsSnapshot",
+    "DurableStreamTelemetrySink",
     "EventsErrorCategory",
     "EventsMetricsSnapshot",
     "EventsTelemetrySink",
+    "InMemoryDurableStreamTelemetrySink",
     "InMemoryEventsTelemetrySink",
 ]
