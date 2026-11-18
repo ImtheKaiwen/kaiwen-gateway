@@ -72,6 +72,11 @@ Use only these milestone status values:
 | **E2** | WebSocket Events & Security (`/ws/events/v1`, principal identity, rate limits) | `Complete` (PR #60 / `141c243`) | `E1` |
 | **E3** | Optional Redis Pub/Sub & Distributed Rate Limiting (`kaiwen-gateway[redis]`) | `Complete` (PR #61 / `e72b0fe`, verified on `main` run `44311771944`) | `E2` |
 | **E4** | Redis Streams Durable Store, Recovery & Load Qualification | `Complete` (PR #62 / `3d407d6`, verified on `main` run `44320503671`) | `E3` |
+| **N0** | Notifications Architecture & Contracts (`ADR-0007` `Accepted`) | `Complete` (`ADR-0007` `Accepted` 2026-11-18; `docs/NOTIFICATIONS_MODULE_DESIGN.md`) | `E4` |
+| **N1** | Notification Core (`modules/notifications` domain, ports, preferences, telemetry) | `Not started` | Maintainer acceptance of `N0` & `ADR-0007` |
+| **N2** | Real-Time Notification Delivery (`/ws/events/v1` & recipient-scoped routing) | `Not started` | `N1` |
+| **N3** | Durable Notification Delivery & Recovery (`RedisStreamsDurableStore` worker) | `Not started` | `N2` |
+| **N4** | Notifications Integration, Performance & Acceptance | `Not started` | `N3` |
 
 Milestone IDs are stable; do not renumber completed milestones. Update the status table and evidence links after a reviewed change. If a stage is partially complete, keep it `In progress` or `Ready for review` rather than marking it `Complete`.
 
@@ -308,6 +313,41 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - **Deliverables & Test evidence:** Failure-injection tests (consumer crash/redelivery, idempotent `event_id` handling, `MAXLEN` lag eviction) plus repeatable multi-trial synthetic Events benchmark report (p50/p95/p99 latency, `1 MiB` per-connection / `32 MiB` global byte-budget enforcement, slow-consumer isolation).
 - **Exit gate:** Empirical limits documented; readiness review before any Notifications or Agent Streaming integration.
 - **Explicit non-goals:** No exactly-once guarantees; no production SLA certification without deployment-specific Gate D review.
+
+### Post-Beta Notifications Initiative (`N0`–`N4`, `ADR-0007 Accepted` — Does Not Alter V1 Voice Baseline)
+
+> **Status note:** [`ADR-0007`](docs/decisions/0007-notifications-module-architecture.md) and [`docs/NOTIFICATIONS_MODULE_DESIGN.md`](docs/NOTIFICATIONS_MODULE_DESIGN.md) are **Accepted** (`N0 Complete` 2026-11-18). Milestones `N1`–`N4` remain `Not started` until separately authorized.
+
+#### N0 — Notifications Architecture & Contracts (`Complete`)
+- **Scope:** Architecture, domain contracts (`NotificationEnvelope`, `NotificationPreferencePort`, `NotificationChannelPort`), 6-stage ACK separation, `/ws/events/v1` transport reuse evaluation, security threat model, Core/Voice/Events compatibility assessment, and `N1`–`N4` roadmap.
+- **Prerequisites:** `E1`–`E4` complete (`9e9af79`).
+- **Deliverables:** `docs/NOTIFICATIONS_MODULE_DESIGN.md`, `docs/decisions/0007-notifications-module-architecture.md` (`Accepted`), and `ROADMAP.md` updates.
+- **Exit gate:** Documentation consistency, zero code/dependency changes, maintainer review and acceptance of `ADR-0007`.
+- **Explicit non-goals:** No Python implementation, no external Email/SMS/Push/Webhook providers, no REST API endpoints.
+
+#### N1 — Notification Core (`Not started`)
+- **Scope:** `src/kaiwen_gateway/modules/notifications/` (`domain.py`, `ports.py`, `telemetry.py`, `module.py` implementing `GatewayModule`).
+- **Prerequisites:** Maintainer acceptance of `N0` and `ADR-0007`.
+- **Deliverables & Test evidence:** Unit tests covering schema/TTL validation, recipient-topic derivation, preference filtering, zero-Redis import isolation, `mypy --strict`, and `ruff`.
+- **Explicit non-goals:** No WebSocket/Streams delivery wiring, no localization/template engine, no external providers.
+
+#### N2 — Real-Time Delivery (`Not started`)
+- **Scope:** `NotificationsDispatcher` publishing `notifications.v1` over `EventBrokerPort` (`InMemoryEventBroker` / `RedisPubSubEventBroker`) and recipient-scoped authorization on `/ws/events/v1`.
+- **Prerequisites:** `N1` complete.
+- **Deliverables & Test evidence:** Loopback `/ws/events/v1` tests verifying recipient-scoped delivery, cross-tenant/cross-recipient denial, expiration drop, and `1008` slow-consumer isolation.
+- **Explicit non-goals:** No offline catch-up over Pub/Sub alone, no external providers.
+
+#### N3 — Durable Delivery & Recovery (`Not started`)
+- **Scope:** Durable notification worker consuming `DurableEventStorePort` (`RedisStreamsDurableStore`, `StreamRecoveryWorker`), idempotent deduplication, and DLQ quarantine with `XACK` strictly after dispatch.
+- **Prerequisites:** `N2` complete + `kaiwen-gateway[redis]`.
+- **Deliverables & Test evidence:** Real-Redis failure-injection tests covering crash before `XACK`, `XPENDING`/`XAUTOCLAIM` recovery, poison DLQ quarantine, `expires_at` drop, and Redis outage fail-closed behavior.
+- **Explicit non-goals:** No external Email/SMS/Push/Webhook concrete adapters.
+
+#### N4 — Integration, Performance & Acceptance (`Not started`)
+- **Scope:** Paced multi-instance Notifications load qualification harness, failure-injection verification, compatibility closeout, and `PUBLIC_API_AND_COMPATIBILITY.md` updates.
+- **Prerequisites:** `N3` complete.
+- **Deliverables & Test evidence:** Empirical p50/p95/p99 latency & memory report, Python 3.11–3.13 CI green, `0` P0/P1 findings.
+- **Explicit non-goals:** No production SLA certification without deployment-specific Gate D review.
 
 ## 5. Milestone dependencies and review rhythm
 
