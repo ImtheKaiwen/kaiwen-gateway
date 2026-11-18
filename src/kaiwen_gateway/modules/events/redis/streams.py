@@ -547,6 +547,37 @@ class RedisStreamsDurableStore:
             self._telemetry.record_ack(succeeded=False)
             raise self._mark_redis_failure(exc, message="Redis Streams ack failed") from exc
 
+    async def dead_letter(
+        self,
+        *,
+        tenant_id: str,
+        topic: str,
+        group: str,
+        record_id: str,
+        reason: str,
+        envelope: EventEnvelope | None = None,
+        delivery_attempts: int = 1,
+    ) -> StreamDeadLetterRecord:
+        """Quarantine a poison record to the DLQ stream and XACK only after DLQ XADD succeeds."""
+        self._require_open()
+        stream = self.stream_key(tenant_id, topic)
+        dlq_stream = self.dead_letter_key(tenant_id, topic)
+        canonical_group = _validate_stream_ident(group, "group")
+        if not isinstance(record_id, str) or not record_id or any(ch.isspace() for ch in record_id):
+            raise InvalidEventError("record_id must be a non-empty non-whitespace string")
+        if not isinstance(reason, str) or not reason or len(reason) > 128:
+            raise InvalidEventError("reason must be a non-empty string (<= 128 chars)")
+        _validate_positive_int(delivery_attempts, "delivery_attempts")
+        return await self._quarantine_entry(
+            stream=stream,
+            dlq_stream=dlq_stream,
+            group=canonical_group,
+            entry_id=record_id,
+            delivery_attempts=delivery_attempts,
+            reason=reason,
+            envelope=envelope,
+        )
+
     async def replay(
         self,
         *,
