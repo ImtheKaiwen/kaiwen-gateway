@@ -74,7 +74,7 @@ Use only these milestone status values:
 | **E4** | Redis Streams Durable Store, Recovery & Load Qualification | `Complete` (PR #62 / `3d407d6`, verified on `main` run `44320503671`) | `E3` |
 | **N0** | Notifications Architecture & Contracts (`ADR-0007` `Accepted`) | `Complete` (`ADR-0007` `Accepted` 2026-11-18; `docs/NOTIFICATIONS_MODULE_DESIGN.md`) | `E4` |
 | **N1** | Notification Core (`modules/notifications` domain, ports, preferences, telemetry) | `Complete` (PR #65 / `533e02b`) | Maintainer acceptance of `N0` & `ADR-0007` |
-| **N2** | Real-Time Notification Delivery (`/ws/events/v1` & recipient-scoped routing) | `Ready for review` (implemented on `feat/n2-notifications-realtime-delivery`, pending Draft PR review) | `N1` |
+| **N2** | Real-Time Notification Delivery (`/ws/events/v1` & recipient-scoped routing) | `Complete` (PR #67 / `6567cb7`) | `N1` |
 | **N3** | Durable Notification Delivery & Recovery (`RedisStreamsDurableStore` worker) | `Not started` | `N2` |
 | **N4** | Notifications Integration, Performance & Acceptance | `Not started` | `N3` |
 
@@ -331,7 +331,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - **Deliverables & Test evidence:** Unit tests covering schema/TTL validation, recipient-topic derivation, preference filtering, zero-Redis import isolation, `mypy --strict`, and `ruff`.
 - **Explicit non-goals:** No WebSocket/Streams delivery wiring, no localization/template engine, no external providers.
 
-#### N2 — Real-Time Delivery (`Ready for review`)
+#### N2 — Real-Time Delivery (`Complete` — PR #67 / `6567cb7`)
 - **Scope:** `NotificationsDispatcher` publishing `notifications.v1` over `EventBrokerPort` (`InMemoryEventBroker` / `RedisPubSubEventBroker`) and recipient-scoped authorization on `/ws/events/v1`.
 - **Prerequisites:** `N1` complete.
 - **Deliverables & Test evidence:** Loopback `/ws/events/v1` tests verifying recipient-scoped delivery, cross-tenant/cross-recipient denial, expiration drop, and `1008` slow-consumer isolation.
