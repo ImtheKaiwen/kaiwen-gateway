@@ -344,7 +344,7 @@ class RedisStreamsDurableStore:
         dlq_stream: str,
         group: str,
         entry_id: str,
-        delivery_attempts: int,
+        delivery_attempts: int | None,
         reason: str,
         envelope: EventEnvelope | None,
         raw_fields: dict[Any, Any] | None = None,
@@ -361,9 +361,10 @@ class RedisStreamsDurableStore:
         dlq_fields: dict[str, str] = {
             "original_entry_id": entry_id,
             "group": group,
-            "delivery_attempts": str(delivery_attempts),
             "reason": reason,
         }
+        if delivery_attempts is not None:
+            dlq_fields["delivery_attempts"] = str(delivery_attempts)
         if event_id is not None:
             dlq_fields["event_id"] = event_id
         if correlation_id is not None:
@@ -388,7 +389,7 @@ class RedisStreamsDurableStore:
                 original_entry_id=entry_id,
                 event_id=event_id,
                 group=group,
-                delivery_attempts=delivery_attempts,
+                delivery_attempts=delivery_attempts if delivery_attempts is not None else 0,
                 reason=reason,
                 correlation_id=correlation_id,
             )
@@ -546,6 +547,38 @@ class RedisStreamsDurableStore:
         except Exception as exc:
             self._telemetry.record_ack(succeeded=False)
             raise self._mark_redis_failure(exc, message="Redis Streams ack failed") from exc
+
+    async def dead_letter(
+        self,
+        *,
+        tenant_id: str,
+        topic: str,
+        group: str,
+        record_id: str,
+        reason: str,
+        envelope: EventEnvelope | None = None,
+        delivery_attempts: int | None = None,
+    ) -> StreamDeadLetterRecord:
+        """Quarantine a poison record to the DLQ stream and XACK only after DLQ XADD succeeds."""
+        self._require_open()
+        stream = self.stream_key(tenant_id, topic)
+        dlq_stream = self.dead_letter_key(tenant_id, topic)
+        canonical_group = _validate_stream_ident(group, "group")
+        if not isinstance(record_id, str) or not record_id or any(ch.isspace() for ch in record_id):
+            raise InvalidEventError("record_id must be a non-empty non-whitespace string")
+        if not isinstance(reason, str) or not reason or len(reason) > 128:
+            raise InvalidEventError("reason must be a non-empty string (<= 128 chars)")
+        if delivery_attempts is not None:
+            _validate_positive_int(delivery_attempts, "delivery_attempts")
+        return await self._quarantine_entry(
+            stream=stream,
+            dlq_stream=dlq_stream,
+            group=canonical_group,
+            entry_id=record_id,
+            delivery_attempts=delivery_attempts,
+            reason=reason,
+            envelope=envelope,
+        )
 
     async def replay(
         self,
@@ -745,7 +778,13 @@ class RedisStreamsDurableStore:
                 dead_lettered.append(dlq_rec)
                 continue
 
-            reclaimed.append(DurableEventRecord(envelope=envelope, sequence_id=entry_id))
+            reclaimed.append(
+                DurableEventRecord(
+                    envelope=envelope,
+                    sequence_id=entry_id,
+                    delivery_attempts=delivery_counts.get(entry_id),
+                )
+            )
 
         self._telemetry.record_recovery(succeeded=True, reclaimed_count=len(reclaimed))
         return StreamRecoveryResult(
