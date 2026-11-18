@@ -19,6 +19,7 @@ from kaiwen_gateway.modules.events.auth import (
     EventsAuthenticatorPort,
     EventsAuthorizerPort,
     EventsTicketVerifierPort,
+    EventTopicAuthorizerPort,
     TicketReplayCachePort,
     verify_and_consume_ticket,
 )
@@ -322,6 +323,54 @@ async def events_websocket_endpoint(websocket: WebSocket) -> None:
 
                 if frame.command == CMD_EVENTS_SUBSCRIBE:
                     assert frame.topic_pattern is not None
+                    topic_authorizer: EventTopicAuthorizerPort | None = getattr(
+                        app_state, "events_topic_authorizer", None
+                    )
+                    if (
+                        getattr(app_state, "enable_notifications", False)
+                        and topic_authorizer is None
+                    ):
+                        await _send_json_safe(
+                            build_error_frame(
+                                code="FORBIDDEN_SUBSCRIPTION",
+                                message="Topic authorization hook is not configured",
+                                request_id=frame.request_id,
+                            )
+                        )
+                        continue
+                    if topic_authorizer is not None:
+                        try:
+                            await topic_authorizer.authorize_subscribe(
+                                context=verified_context,
+                                topic_pattern=frame.topic_pattern,
+                            )
+                        except EventAuthorizationError:
+                            await _send_json_safe(
+                                build_error_frame(
+                                    code="FORBIDDEN_SUBSCRIPTION",
+                                    message="Not authorized for requested topic pattern",
+                                    request_id=frame.request_id,
+                                )
+                            )
+                            continue
+                        except InvalidEventError:
+                            await _send_json_safe(
+                                build_error_frame(
+                                    code="INVALID_TOPIC",
+                                    message="Invalid topic_pattern",
+                                    request_id=frame.request_id,
+                                )
+                            )
+                            continue
+                        except Exception:
+                            await _send_json_safe(
+                                build_error_frame(
+                                    code="FORBIDDEN_SUBSCRIPTION",
+                                    message="Subscription authorization failed",
+                                    request_id=frame.request_id,
+                                )
+                            )
+                            continue
                     try:
                         sub = await broker.subscribe(verified_context, frame.topic_pattern)
                     except EventAuthorizationError:

@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from kaiwen_gateway.modules.notifications.auth import (
+    ADMIN_NOTIFICATION_SUBSCRIPTION_SCOPES,
+    NotificationsTopicAuthorizer,
+    is_protected_notification_pattern,
+)
+from kaiwen_gateway.modules.notifications.dispatcher import NotificationsDispatcher
 from kaiwen_gateway.modules.notifications.domain import (
     CATEGORY_PATTERN,
     CORRELATION_ID_PATTERN,
@@ -65,6 +71,7 @@ from kaiwen_gateway.modules.notifications.telemetry import (
 )
 
 __all__ = [
+    "ADMIN_NOTIFICATION_SUBSCRIPTION_SCOPES",
     "CATEGORY_PATTERN",
     "CORRELATION_ID_PATTERN",
     "ChannelDeliveryResult",
@@ -95,6 +102,7 @@ __all__ = [
     "NotificationPublisherPort",
     "NotificationStatus",
     "NotificationsBackendUnavailableError",
+    "NotificationsDispatcher",
     "NotificationsError",
     "NotificationsErrorCategory",
     "NotificationsMetricsSnapshot",
@@ -102,6 +110,7 @@ __all__ = [
     "NotificationsModuleClosedError",
     "NotificationsPreferenceError",
     "NotificationsTelemetrySink",
+    "NotificationsTopicAuthorizer",
     "OversizedNotificationError",
     "PreferenceEvaluationResult",
     "RECIPIENT_TOPIC_HASH_HEX_LENGTH",
@@ -110,6 +119,7 @@ __all__ = [
     "derive_recipient_topic",
     "evaluate_notification_preference",
     "generate_notification_id",
+    "is_protected_notification_pattern",
     "parse_utc_timestamp",
     "priority_rank",
     "validate_category",

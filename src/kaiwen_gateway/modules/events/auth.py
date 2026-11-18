@@ -112,6 +112,20 @@ class TicketReplayCachePort(Protocol):
         ...
 
 
+@runtime_checkable
+class EventTopicAuthorizerPort(Protocol):
+    """Additive per-subscription topic-authorization hook for `/ws/events/v1` (N2)."""
+
+    async def authorize_subscribe(
+        self,
+        *,
+        context: VerifiedPrincipalContext,
+        topic_pattern: str,
+    ) -> None:
+        """Raise `EventAuthorizationError` if the principal is not authorized for `topic_pattern`."""
+        ...
+
+
 class BoundedTicketReplayCache:
     """Bounded, process-local single-instance single-use ticket `jti` replay cache.
 
@@ -221,6 +235,7 @@ __all__ = [
     "DEFAULT_MAX_TICKET_TTL_SECONDS",
     "DEFAULT_REPLAY_CACHE_MAX_ENTRIES",
     "EVENTS_TICKET_AUDIENCE",
+    "EventTopicAuthorizerPort",
     "EventsAuthenticatorPort",
     "EventsAuthorizerPort",
     "EventsTicketClaims",

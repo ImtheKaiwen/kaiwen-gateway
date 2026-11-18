@@ -153,6 +153,13 @@ async def gateway_lifespan(app: Any) -> AsyncIterator[None]:
         )
 
         if modules is not None and drain_resolved:
+            notif_dispatcher = getattr(state, "notifications_dispatcher", None)
+            close_fn = getattr(notif_dispatcher, "close", None)
+            if callable(close_fn):
+                try:
+                    await close_fn()
+                except Exception as exc:
+                    module_failure = exc
             try:
                 await modules.shutdown()
             except asyncio.CancelledError as exc:

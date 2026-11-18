@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from kaiwen_gateway.core.contracts import CORE_CONTRACT_VERSION, ModuleDescriptor
+from kaiwen_gateway.modules.events.auth import EventTopicAuthorizerPort
 from kaiwen_gateway.modules.events.broker import EventBrokerConfig, InMemoryEventBroker
 from kaiwen_gateway.modules.events.domain import EventsModuleClosedError
 from kaiwen_gateway.modules.events.ports import EventBrokerPort
@@ -32,7 +33,12 @@ class EventsModule:
         telemetry: EventsTelemetrySink | None = None,
         publish_rate_limiter: RateLimiterPort | None = None,
         subscribe_rate_limiter: RateLimiterPort | None = None,
+        topic_authorizer: EventTopicAuthorizerPort | None = None,
     ) -> None:
+        if topic_authorizer is not None and not isinstance(
+            topic_authorizer, EventTopicAuthorizerPort
+        ):
+            raise TypeError("topic_authorizer must implement EventTopicAuthorizerPort")
         self._descriptor: ModuleDescriptor = ModuleDescriptor(
             module_id="events",
             contract_version=CORE_CONTRACT_VERSION,
@@ -46,6 +52,7 @@ class EventsModule:
                 telemetry=telemetry,
                 publish_rate_limiter=publish_rate_limiter,
                 subscribe_rate_limiter=subscribe_rate_limiter,
+                topic_authorizer=topic_authorizer,
             )
         )
         self._started: bool = False
