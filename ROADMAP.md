@@ -319,7 +319,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 > **Status note:** [`ADR-0007`](docs/decisions/0007-notifications-module-architecture.md) and [`docs/NOTIFICATIONS_MODULE_DESIGN.md`](docs/NOTIFICATIONS_MODULE_DESIGN.md) are **`Proposed`** (`N0` in review). Milestones `N1`–`N4` remain `Not started` until separately authorized.
 
 #### N0 — Notifications Architecture & Contracts (`Ready for review`)
-- **Scope:** Architecture, domain contracts (`NotificationEnvelope`, `NotificationPreferencePort`, `NotificationChannelPort`), 5-stage ACK separation, `/ws/events/v1` transport reuse evaluation, security threat model, Core/Voice/Events compatibility assessment, and `N1`–`N4` roadmap.
+- **Scope:** Architecture, domain contracts (`NotificationEnvelope`, `NotificationPreferencePort`, `NotificationChannelPort`), 6-stage ACK separation, `/ws/events/v1` transport reuse evaluation, security threat model, Core/Voice/Events compatibility assessment, and `N1`–`N4` roadmap.
 - **Prerequisites:** `E1`–`E4` complete (`9e9af79`).
 - **Deliverables:** `docs/NOTIFICATIONS_MODULE_DESIGN.md`, `docs/decisions/0007-notifications-module-architecture.md` (`Proposed`), and `ROADMAP.md` updates.
 - **Exit gate:** Documentation consistency, zero code/dependency changes, maintainer review and acceptance of `ADR-0007`.

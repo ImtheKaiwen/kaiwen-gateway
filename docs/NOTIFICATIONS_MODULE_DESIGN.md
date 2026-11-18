@@ -60,7 +60,7 @@ Relying solely on an inner `48 KiB` `NotificationEnvelope` limit is **insufficie
 - **Inner early check:** `NotificationEnvelope` enforces `serialized_bytes <= 49_152` (`48 KiB`) and `max_json_depth <= 16` for early rejection.
 - **Authoritative final-frame check:** Before accepting or dispatching a notification, `NotificationsDispatcher` / publisher **must** validate:
   1. The constructed outer `EventEnvelope.serialized_bytes <= DEFAULT_MAX_EVENT_BYTES` (`65_536`), and
-  2. The final serialized `events.delivery` WebSocket frame (via `build_events_delivery_frame(..., subscription_id=...)` with worst-case `subscription_id` length) is `<= EVENTS_MAX_FRAME_BYTES` (`65_536` bytes). Oversized notifications fail closed (`OversizedNotificationError`) at publish/dispatch time rather than failing mid-stream on WebSocket send.
+  2. The final serialized `events.delivery` WebSocket frame (via `build_delivery_frame(..., subscription_id=...)` with worst-case `subscription_id` length) is `<= EVENTS_MAX_FRAME_BYTES` (`65_536` bytes). Oversized notifications fail closed (`OversizedNotificationError`) at publish/dispatch time rather than failing mid-stream on WebSocket send.
 
 ### 2.2 Lifecycle, Deduplication & Schema Versioning
 
