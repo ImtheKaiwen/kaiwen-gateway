@@ -917,7 +917,7 @@ class StreamRecoveryWorker:
         first_exc: BaseException | None = None
         try:
             for record in result.reclaimed:
-                start = time.monotonic()
+                start_ns = time.perf_counter_ns()
                 try:
                     await self._handler(record)
                 except Exception as exc:
@@ -925,7 +925,7 @@ class StreamRecoveryWorker:
                         first_exc = exc
                     continue
                 self._store.telemetry.record_delivery_latency_ms(
-                    (time.monotonic() - start) * 1000.0
+                    (time.perf_counter_ns() - start_ns) / 1_000_000.0
                 )
                 if record.sequence_id is not None:
                     acked_ids.append(record.sequence_id)

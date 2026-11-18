@@ -52,6 +52,7 @@ async def run_benchmark(
     consumers: int,
     duration_seconds: float,
     maxlen: int,
+    inject_failure: bool = False,
 ) -> dict[str, Any]:
     """Execute a paced multi-producer/multi-consumer Redis Streams qualification run."""
     prefix = f"kwbench{uuid.uuid4().hex[:8]}"
@@ -79,8 +80,9 @@ async def run_benchmark(
     recovery_lat_ms: list[float] = []
     published_ids: set[str] = set()
     acked_ids: set[str] = set()
-    publish_timestamps: dict[str, float] = {}
+    publish_timestamps_ns: dict[str, int] = {}
     redelivery_count = 0
+    reclaimed_total = 0
 
     padding = "x" * max(1, event_bytes - 220)
     total_events_target = max(1, int(round(rate_per_sec * duration_seconds)))
@@ -89,12 +91,12 @@ async def run_benchmark(
     producers_done = asyncio.Event()
 
     async def producer_task(idx: int, store: RedisStreamsDurableStore) -> None:
-        start = time.monotonic()
+        start_ns = time.perf_counter_ns()
         for seq in range(per_producer):
-            target_t = start + (seq * interval)
-            now = time.monotonic()
-            if target_t > now:
-                await asyncio.sleep(target_t - now)
+            target_ns = start_ns + int(seq * interval * 1_000_000_000)
+            now_ns = time.perf_counter_ns()
+            if target_ns > now_ns:
+                await asyncio.sleep((target_ns - now_ns) / 1_000_000_000.0)
             eid = f"b-{idx}-{seq}"
             env = EventEnvelope(
                 protocol_version=EVENTS_PROTOCOL_VERSION,
@@ -106,17 +108,17 @@ async def run_benchmark(
                 principal_id=f"prod-{idx}",
                 payload={"pad": padding},
             )
-            publish_timestamps[eid] = time.monotonic()
-            t0 = time.monotonic()
+            t0_ns = time.perf_counter_ns()
+            publish_timestamps_ns[eid] = t0_ns
             await store.append(env)
-            append_lat_ms.append((time.monotonic() - t0) * 1000.0)
+            append_lat_ms.append((time.perf_counter_ns() - t0_ns) / 1_000_000.0)
             published_ids.add(eid)
 
     async def consumer_task(idx: int, store: RedisStreamsDurableStore) -> None:
         nonlocal redelivery_count
         cname = f"cons-{idx}"
         while not (producers_done.is_set() and len(acked_ids) >= len(published_ids)):
-            t0 = time.monotonic()
+            t0_ns = time.perf_counter_ns()
             recs = await store.read_group(
                 tenant_id=tenant_id,
                 topic=topic,
@@ -126,77 +128,132 @@ async def run_benchmark(
                 block_ms=50,
             )
             if recs:
-                read_lat_ms.append((time.monotonic() - t0) * 1000.0)
+                read_lat_ms.append((time.perf_counter_ns() - t0_ns) / 1_000_000.0)
                 to_ack: list[str] = []
                 for rec in recs:
                     eid = rec.envelope.event_id
                     if eid in acked_ids:
                         redelivery_count += 1
-                    t_pub = publish_timestamps.get(eid)
-                    if t_pub is not None:
-                        e2e_lat_ms.append((time.monotonic() - t_pub) * 1000.0)
+                    t_pub_ns = publish_timestamps_ns.get(eid)
+                    if t_pub_ns is not None:
+                        e2e_lat_ms.append((time.perf_counter_ns() - t_pub_ns) / 1_000_000.0)
                     if rec.sequence_id is not None:
                         to_ack.append(rec.sequence_id)
-                t_ack0 = time.monotonic()
+                t_ack0_ns = time.perf_counter_ns()
                 await store.ack(
                     tenant_id=tenant_id,
                     topic=topic,
                     group=group,
                     record_ids=to_ack,
                 )
-                ack_lat_ms.append((time.monotonic() - t_ack0) * 1000.0)
+                ack_lat_ms.append((time.perf_counter_ns() - t_ack0_ns) / 1_000_000.0)
                 for rec in recs:
                     acked_ids.add(rec.envelope.event_id)
             elif producers_done.is_set():
                 break
 
-    bench_start = time.monotonic()
+    async def fault_and_recovery_task() -> None:
+        nonlocal reclaimed_total, redelivery_count
+        # Mid-run simulated consumer crash: reads a batch without ACKing while producers run
+        await asyncio.sleep(min(0.5, duration_seconds * 0.35))
+        crashed_store = RedisStreamsDurableStore(cfg)
+        await crashed_store.startup()
+        try:
+            crashed_recs = await crashed_store.read_group(
+                tenant_id=tenant_id,
+                topic=topic,
+                group=group,
+                consumer="cons-crashed-midrun",
+                count=10,
+                block_ms=50,
+            )
+        finally:
+            await crashed_store.shutdown()
+
+        if crashed_recs:
+            await asyncio.sleep(0.08)
+            t_rec0_ns = time.perf_counter_ns()
+            rec_res = await consumer_stores[-1].reclaim_pending(
+                tenant_id=tenant_id,
+                topic=topic,
+                group=group,
+                consumer="cons-recover-midrun",
+                min_idle_ms=50,
+                count=25,
+            )
+            if rec_res.reclaimed:
+                to_ack = [r.sequence_id for r in rec_res.reclaimed if r.sequence_id is not None]
+                await consumer_stores[-1].ack(
+                    tenant_id=tenant_id,
+                    topic=topic,
+                    group=group,
+                    record_ids=to_ack,
+                )
+                recovery_lat_ms.append((time.perf_counter_ns() - t_rec0_ns) / 1_000_000.0)
+                reclaimed_total += len(rec_res.reclaimed)
+                for rec in rec_res.reclaimed:
+                    eid = rec.envelope.event_id
+                    if eid in acked_ids:
+                        redelivery_count += 1
+                    t_pub_ns = publish_timestamps_ns.get(eid)
+                    if t_pub_ns is not None:
+                        e2e_lat_ms.append((time.perf_counter_ns() - t_pub_ns) / 1_000_000.0)
+                    acked_ids.add(eid)
+
+    bench_start_ns = time.perf_counter_ns()
     try:
         prod_coros = [producer_task(i, producer_stores[i]) for i in range(producers)]
         cons_coros = [consumer_task(i, consumer_stores[i]) for i in range(consumers)]
         cons_tasks = [asyncio.create_task(c) for c in cons_coros]
-        await asyncio.gather(*prod_coros)
+        extra_tasks: list[asyncio.Task[None]] = []
+        if inject_failure:
+            extra_tasks.append(asyncio.create_task(fault_and_recovery_task()))
+        await asyncio.gather(*prod_coros, *extra_tasks)
         producers_done.set()
-        await asyncio.wait_for(asyncio.gather(*cons_tasks), timeout=15.0)
-        elapsed = max(0.001, time.monotonic() - bench_start)
+        await asyncio.wait_for(asyncio.gather(*cons_tasks), timeout=20.0)
+        elapsed = max(0.001, (time.perf_counter_ns() - bench_start_ns) / 1_000_000_000.0)
 
-        # Controlled crash-recovery latency probe
-        crash_env = EventEnvelope(
-            protocol_version=EVENTS_PROTOCOL_VERSION,
-            event_id="b-crash-probe",
-            event_type="bench.tick",
-            topic=topic,
-            timestamp="2026-11-18T14:00:00Z",
-            tenant_id=tenant_id,
-            principal_id="prod-0",
-            payload={"pad": padding},
-        )
-        await producer_stores[0].append(crash_env)
-        await consumer_stores[0].read_group(
-            tenant_id=tenant_id,
-            topic=topic,
-            group=group,
-            consumer="cons-crashed",
-            count=1,
-            block_ms=0,
-        )
-        await asyncio.sleep(0.06)
-        t_rec0 = time.monotonic()
-        rec_res = await consumer_stores[-1].reclaim_pending(
-            tenant_id=tenant_id,
-            topic=topic,
-            group=group,
-            consumer="cons-recover",
-            min_idle_ms=50,
-        )
-        if rec_res.reclaimed:
-            await consumer_stores[-1].ack(
+        # Controlled end-of-run crash-recovery probe if no mid-run failure was injected
+        if not inject_failure:
+            crash_env = EventEnvelope(
+                protocol_version=EVENTS_PROTOCOL_VERSION,
+                event_id="b-crash-probe",
+                event_type="bench.tick",
+                topic=topic,
+                timestamp="2026-11-18T14:00:00Z",
+                tenant_id=tenant_id,
+                principal_id="prod-0",
+                payload={"pad": padding},
+            )
+            await producer_stores[0].append(crash_env)
+            await consumer_stores[0].read_group(
                 tenant_id=tenant_id,
                 topic=topic,
                 group=group,
-                record_ids=[r.sequence_id for r in rec_res.reclaimed if r.sequence_id is not None],
+                consumer="cons-crashed",
+                count=1,
+                block_ms=0,
             )
-            recovery_lat_ms.append((time.monotonic() - t_rec0) * 1000.0)
+            await asyncio.sleep(0.06)
+            t_rec0_ns = time.perf_counter_ns()
+            rec_res = await consumer_stores[-1].reclaim_pending(
+                tenant_id=tenant_id,
+                topic=topic,
+                group=group,
+                consumer="cons-recover",
+                min_idle_ms=50,
+            )
+            if rec_res.reclaimed:
+                await consumer_stores[-1].ack(
+                    tenant_id=tenant_id,
+                    topic=topic,
+                    group=group,
+                    record_ids=[
+                        r.sequence_id for r in rec_res.reclaimed if r.sequence_id is not None
+                    ],
+                )
+                recovery_lat_ms.append((time.perf_counter_ns() - t_rec0_ns) / 1_000_000.0)
+                reclaimed_total += len(rec_res.reclaimed)
 
         stats = await producer_stores[0].stream_stats(tenant_id=tenant_id, topic=topic, group=group)
         mem_info = await info_client.info("memory")
@@ -216,6 +273,8 @@ async def run_benchmark(
             "consumers": consumers,
             "duration_seconds": duration_seconds,
             "maxlen": maxlen,
+            "inject_failure": inject_failure,
+            "clock": "time.perf_counter_ns",
             "provisional_defaults": {
                 "maxlen": DEFAULT_STREAM_MAXLEN,
                 "claim_min_idle_ms": DEFAULT_CLAIM_MIN_IDLE_MS,
@@ -233,6 +292,7 @@ async def run_benchmark(
             "published_total": len(published_ids),
             "acked_total": len(acked_ids),
             "event_loss_count": len(published_ids - acked_ids),
+            "reclaimed_total": reclaimed_total,
             "redelivery_count": redelivery_count,
             "throughput_events_per_sec": round(len(acked_ids) / elapsed, 2),
             "append_latency_ms": _summary(append_lat_ms),
@@ -263,6 +323,7 @@ def main() -> None:
     parser.add_argument("--consumers", type=int, default=2)
     parser.add_argument("--duration-seconds", type=float, default=2.0)
     parser.add_argument("--maxlen", type=int, default=DEFAULT_STREAM_MAXLEN)
+    parser.add_argument("--inject-failure", action="store_true")
     args = parser.parse_args()
 
     report = asyncio.run(
@@ -274,6 +335,7 @@ def main() -> None:
             consumers=args.consumers,
             duration_seconds=args.duration_seconds,
             maxlen=args.maxlen,
+            inject_failure=args.inject_failure,
         )
     )
     print(json.dumps(report, indent=2))
