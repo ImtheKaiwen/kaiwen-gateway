@@ -1,4 +1,4 @@
-"""Reproducible N4 multi-instance Notifications load & recovery qualification harness."""
+"""Reproducible N4 logical multi-instance Notifications load & recovery qualification harness."""
 
 from __future__ import annotations
 
@@ -6,12 +6,14 @@ import argparse
 import asyncio
 import contextlib
 import json
+import math
 import os
 import platform
 import sys
 import time
 import tracemalloc
 import uuid
+from dataclasses import dataclass, field
 from typing import Any
 
 from kaiwen_gateway.core.identity import VerifiedPrincipalContext
@@ -60,6 +62,81 @@ def _summary(values: list[float]) -> dict[str, float]:
     }
 
 
+def distribute_workload(total_target: int, concurrency: int) -> list[int]:
+    """Split `total_target` evenly across `concurrency` workers so sum == total_target."""
+    if total_target < 0:
+        raise ValueError("total_target must be >= 0")
+    if concurrency <= 0:
+        raise ValueError("concurrency must be >= 1")
+    base, rem = divmod(total_target, concurrency)
+    return [base + (1 if i < rem else 0) for i in range(concurrency)]
+
+
+def validate_benchmark_params(
+    *,
+    payload_bytes: int,
+    rate_per_sec: float,
+    concurrency: int,
+    workers: int,
+    warmup: int,
+    duration_seconds: float,
+    maxlen: int,
+) -> None:
+    """Validate N4 benchmark parameters fail-closed."""
+    if isinstance(payload_bytes, bool) or payload_bytes <= 0:
+        raise ValueError("payload_bytes must be a positive int")
+    if isinstance(rate_per_sec, bool) or not math.isfinite(rate_per_sec) or rate_per_sec <= 0.0:
+        raise ValueError("rate_per_sec must be a finite positive number")
+    if isinstance(concurrency, bool) or concurrency <= 0:
+        raise ValueError("concurrency must be a positive int")
+    if isinstance(workers, bool) or workers <= 0:
+        raise ValueError("workers must be a positive int")
+    if isinstance(warmup, bool) or warmup < 0:
+        raise ValueError("warmup must be a non-negative int")
+    if (
+        isinstance(duration_seconds, bool)
+        or not math.isfinite(duration_seconds)
+        or duration_seconds <= 0.0
+    ):
+        raise ValueError("duration_seconds must be a finite positive number")
+    if isinstance(maxlen, bool) or maxlen <= 0:
+        raise ValueError("maxlen must be a positive int")
+
+
+@dataclass(slots=True)
+class DeliveryMetricsTracker:
+    """Separates first-delivery latency, redelivery count/latency, and acceptance failures."""
+
+    measured_ids: set[str] = field(default_factory=set)
+    publish_ns: dict[str, int] = field(default_factory=dict)
+    delivered_ids: set[str] = field(default_factory=set)
+    total_delivery_attempts_observed: int = 0
+    redelivery_count: int = 0
+    publisher_acceptance_failures: int = 0
+    first_delivery_lat_ms: list[float] = field(default_factory=list)
+    redelivery_lat_ms: list[float] = field(default_factory=list)
+
+    def record_publish_start(self, nid: str, ts_ns: int) -> None:
+        self.measured_ids.add(nid)
+        self.publish_ns[nid] = ts_ns
+
+    def record_publish_failure(self) -> None:
+        self.publisher_acceptance_failures += 1
+
+    def record_delivery(self, nid: str, recv_ns: int) -> None:
+        if nid not in self.measured_ids:
+            return
+        self.total_delivery_attempts_observed += 1
+        t_start = self.publish_ns.get(nid)
+        lat_ms = ((recv_ns - t_start) / 1_000_000.0) if t_start is not None else 0.0
+        if nid not in self.delivered_ids:
+            self.delivered_ids.add(nid)
+            self.first_delivery_lat_ms.append(lat_ms)
+        else:
+            self.redelivery_count += 1
+            self.redelivery_lat_ms.append(lat_ms)
+
+
 class _BenchProducerAuthorizer:
     async def authorize_publish(
         self,
@@ -82,7 +159,17 @@ async def run_benchmark(
     maxlen: int,
     inject_failure: bool = False,
 ) -> dict[str, Any]:
-    """Run a paced multi-instance Notifications N4 benchmark over Redis Streams + Pub/Sub."""
+    """Run a paced logical multi-instance Notifications N4 benchmark over Redis Streams + Pub/Sub."""
+    validate_benchmark_params(
+        payload_bytes=payload_bytes,
+        rate_per_sec=rate_per_sec,
+        concurrency=concurrency,
+        workers=workers,
+        warmup=warmup,
+        duration_seconds=duration_seconds,
+        maxlen=maxlen,
+    )
+
     prefix = f"kwnbench{uuid.uuid4().hex[:8]}"
     tenant_id = "tenant:bench"
     recipient_id = "user-bench-1"
@@ -102,7 +189,7 @@ async def run_benchmark(
 
     info_client = create_async_redis_client(redis_cfg)
     store = RedisStreamsDurableStore(streams_cfg)
-    # Instance A (worker/publisher side) and Instance B (subscriber side) sharing Redis
+    # Logical multi-instance topology inside one Python process sharing Redis
     broker_pub = RedisPubSubEventBroker(pubsub_cfg, topic_authorizer=NotificationsTopicAuthorizer())
     broker_sub = RedisPubSubEventBroker(pubsub_cfg, topic_authorizer=NotificationsTopicAuthorizer())
     await store.startup()
@@ -150,12 +237,10 @@ async def run_benchmark(
     ]
 
     padding = "x" * max(1, payload_bytes)
-    e2e_lat_ms: list[float] = []
+    tracker = DeliveryMetricsTracker()
     loop_lag_ms: list[float] = []
-    publish_ns: dict[str, int] = {}
-    measured_ids: set[str] = set()
-    delivered_ids: set[str] = set()
-    errors = 0
+    injected_ids: set[str] = set()
+    injected_delivered: set[str] = set()
 
     for w in worker_instances:
         w.start()
@@ -175,17 +260,17 @@ async def run_benchmark(
             env = await consumer.receive()
             if env is None:
                 break
-            if env.event_id in measured_ids:
-                t_start = publish_ns.get(env.event_id)
-                if t_start is not None:
-                    e2e_lat_ms.append((time.perf_counter_ns() - t_start) / 1_000_000.0)
-                delivered_ids.add(env.event_id)
+            recv_ns = time.perf_counter_ns()
+            if env.event_id in tracker.measured_ids:
+                tracker.record_delivery(env.event_id, recv_ns)
+            elif env.event_id in injected_ids:
+                injected_delivered.add(env.event_id)
 
     lag_task = asyncio.create_task(lag_probe())
     recv_task = asyncio.create_task(recv_loop())
 
     try:
-        # Warm-up phase
+        # Warm-up phase (excluded from measured metrics)
         for _ in range(warmup):
             await publisher.publish(
                 NotificationEnvelope(
@@ -204,13 +289,12 @@ async def run_benchmark(
 
         tracemalloc.start()
         total_target = max(1, int(round(rate_per_sec * duration_seconds)))
-        per_prod = max(1, total_target // concurrency)
+        counts_per_prod = distribute_workload(total_target, concurrency)
         interval = (1.0 / (rate_per_sec / concurrency)) if rate_per_sec > 0 else 0.0
 
-        async def prod_task(idx: int) -> None:
-            nonlocal errors
+        async def prod_task(idx: int, count: int) -> None:
             t0 = time.perf_counter_ns()
-            for seq in range(per_prod):
+            for seq in range(count):
                 target_ns = t0 + int(seq * interval * 1_000_000_000)
                 now_ns = time.perf_counter_ns()
                 if target_ns > now_ns:
@@ -227,37 +311,65 @@ async def run_benchmark(
                     payload={"pad": padding},
                     created_at="2026-11-18T12:00:00Z",
                 )
-                measured_ids.add(nid)
-                publish_ns[nid] = time.perf_counter_ns()
+                tracker.record_publish_start(nid, time.perf_counter_ns())
                 try:
                     await publisher.publish(notif)
                 except Exception:
-                    errors += 1
+                    tracker.record_publish_failure()
 
         bench_start = time.perf_counter()
-        await asyncio.gather(*(prod_task(i) for i in range(concurrency)))
+        await asyncio.gather(
+            *(prod_task(i, cnt) for i, cnt in enumerate(counts_per_prod) if cnt > 0)
+        )
 
-        # Wait up to 3s for all measured notifications to arrive at subscriber
+        # Wait up to 3s for all measured notifications to arrive at broker consumer
         deadline = time.perf_counter() + 3.0
-        while len(delivered_ids) < len(measured_ids) and time.perf_counter() < deadline:
+        while len(tracker.delivered_ids) < len(tracker.measured_ids) and (
+            time.perf_counter() < deadline
+        ):
             await asyncio.sleep(0.02)
         bench_elapsed = max(0.001, time.perf_counter() - bench_start)
 
+        failure_injection_report: dict[str, Any] = {"enabled": inject_failure}
         if inject_failure:
-            # Simulate crash before XACK via raw XREADGROUP + recover_once()
-            crash_notif = NotificationEnvelope(
-                notification_id=generate_notification_id(),
-                schema_version=NOTIFICATIONS_SCHEMA_VERSION,
-                tenant_id=tenant_id,
-                recipient_id=recipient_id,
-                category="bench",
-                notification_type="bench.crash_test",
-                priority=NotificationPriority.NORMAL,
-                payload={"pad": "crash"},
-                created_at="2026-11-18T12:00:00Z",
+            # Stop background workers first so raw unacked XREADGROUP + recover_once() is deterministic
+            for w in worker_instances:
+                await w.stop()
+
+            crash_nid = generate_notification_id()
+            injected_ids.add(crash_nid)
+            await publisher.publish(
+                NotificationEnvelope(
+                    notification_id=crash_nid,
+                    schema_version=NOTIFICATIONS_SCHEMA_VERSION,
+                    tenant_id=tenant_id,
+                    recipient_id=recipient_id,
+                    category="bench",
+                    notification_type="bench.crash_test",
+                    priority=NotificationPriority.NORMAL,
+                    payload={"pad": "crash"},
+                    created_at="2026-11-18T12:00:00Z",
+                )
             )
-            await publisher.publish(crash_notif)
-            await asyncio.sleep(0.1)
+            unacked = await store.read_group(
+                tenant_id=tenant_id,
+                topic="notifications.ingest",
+                group="notifications-workers",
+                consumer="bench-crashed-consumer",
+                count=1,
+                block_ms=50,
+            )
+            await asyncio.sleep(0.08)
+            recovered_acked = await worker_instances[0].recover_once(min_idle_ms=50)
+            rec_deadline = time.perf_counter() + 2.0
+            while crash_nid not in injected_delivered and time.perf_counter() < rec_deadline:
+                await asyncio.sleep(0.01)
+            failure_injection_report = {
+                "enabled": True,
+                "unacked_read_count": len(unacked),
+                "recovered_and_acked": recovered_acked,
+                "recovered_delivered_to_broker_consumer": crash_nid in injected_delivered,
+            }
 
         current_mem, peak_mem = tracemalloc.get_traced_memory()
         tracemalloc.stop()
@@ -274,6 +386,8 @@ async def run_benchmark(
                 "python_version": sys.version.split()[0],
                 "platform": platform.platform(),
                 "redis_version": redis_version,
+                "topology": "logical_multi_instance_in_process",
+                "latency_boundary": "publisher_to_broker_consumer_receive_not_websocket_wire",
             },
             "configuration": {
                 "concurrency": concurrency,
@@ -281,22 +395,31 @@ async def run_benchmark(
                 "rate_per_sec": rate_per_sec,
                 "warmup": warmup,
                 "duration_seconds": duration_seconds,
+                "requested_measured_notifications": total_target,
                 "payload_bytes": payload_bytes,
                 "maxlen": maxlen,
                 "inject_failure": inject_failure,
             },
             "results": {
-                "published": len(measured_ids),
-                "delivered": len(delivered_ids),
-                "delivery_success_rate": round(len(delivered_ids) / max(1, len(measured_ids)), 4),
-                "throughput_delivered_per_sec": round(len(delivered_ids) / bench_elapsed, 2),
-                "errors": errors,
-                "e2e_latency_ms": _summary(e2e_lat_ms),
+                "unique_notifications_published": len(tracker.measured_ids),
+                "unique_notifications_delivered": len(tracker.delivered_ids),
+                "total_delivery_attempts_observed": tracker.total_delivery_attempts_observed,
+                "redelivery_count": tracker.redelivery_count,
+                "publisher_acceptance_failures": tracker.publisher_acceptance_failures,
+                "delivery_success_rate": round(
+                    len(tracker.delivered_ids) / max(1, len(tracker.measured_ids)), 4
+                ),
+                "throughput_unique_delivered_per_sec": round(
+                    len(tracker.delivered_ids) / bench_elapsed, 2
+                ),
+                "first_delivery_latency_ms": _summary(tracker.first_delivery_lat_ms),
+                "redelivery_latency_ms": _summary(tracker.redelivery_lat_ms),
                 "event_loop_lag_ms": _summary(loop_lag_ms),
-                "memory_kib": {
+                "traced_python_allocations_kib": {
                     "current": round(current_mem / 1024.0, 2),
                     "peak": round(peak_mem / 1024.0, 2),
                 },
+                "failure_injection": failure_injection_report,
                 "durable_telemetry": {
                     "durable_accepted": dt_snap.durable_accepted,
                     "worker_processed": dt_snap.worker_processed,
@@ -352,7 +475,6 @@ def main() -> None:
     parser.add_argument("--inject-failure", action="store_true")
     args = parser.parse_args()
 
-    # Validate InMemoryEventBroker import availability for base-package parity
     _ = InMemoryEventBroker
     report = asyncio.run(
         run_benchmark(
