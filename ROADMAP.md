@@ -71,7 +71,7 @@ Use only these milestone status values:
 | **E1** | Events Foundation (`modules/events` core, ports, `InMemoryEventBroker`) | `Complete` (PR #59; `kaiwen_gateway.modules.events` + additive Core principal identity) | Maintainer acceptance of `D0` & `ADR-0006` |
 | **E2** | WebSocket Events & Security (`/ws/events/v1`, principal identity, rate limits) | `Complete` (PR #60 / `141c243`) | `E1` |
 | **E3** | Optional Redis Pub/Sub & Distributed Rate Limiting (`kaiwen-gateway[redis]`) | `Complete` (PR #61 / `e72b0fe`, verified on `main` run `44311771944`) | `E2` |
-| **E4** | Redis Streams Durable Store, Recovery & Load Qualification | `In progress` (branch `feat/e4-events-streams-recovery`, pending Draft PR review) | `E3` |
+| **E4** | Redis Streams Durable Store, Recovery & Load Qualification | `Complete` (PR #62 / `3d407d6`, verified on `main` run `44320503671`) | `E3` |
 
 Milestone IDs are stable; do not renumber completed milestones. Update the status table and evidence links after a reviewed change. If a stage is partially complete, keep it `In progress` or `Ready for review` rather than marking it `Complete`.
 
@@ -272,7 +272,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 ### Post-Beta Events Initiative (`D0`–`E4`, `ADR-0006 Accepted` — Does Not Alter V1 Voice Baseline)
 
-> **Status note:** `Voice` remains the **only implemented communication module** in `v0.1.0b1`. [`ADR-0006`](docs/decisions/0006-events-module-architecture.md) and [`docs/EVENTS_MODULE_DESIGN.md`](docs/EVENTS_MODULE_DESIGN.md) are **Accepted** (`D0 Complete`); `E1` (PR #59), `E2` (PR #60), and `E3` (PR #61 / `e72b0fe`) are **Complete**, and `E4` is `In progress` on `feat/e4-events-streams-recovery` pending Draft PR review.
+> **Status note:** `Voice` remains the **only implemented communication module** in `v0.1.0b1`. [`ADR-0006`](docs/decisions/0006-events-module-architecture.md) and [`docs/EVENTS_MODULE_DESIGN.md`](docs/EVENTS_MODULE_DESIGN.md) are **Accepted** (`D0 Complete`); `E1` (PR #59), `E2` (PR #60), `E3` (PR #61 / `e72b0fe`), and `E4` (PR #62 / `3d407d6`) are **Complete**.
 
 #### D0 — Events Architecture & Documentation (`Complete`)
 - **Scope:** Architecture, dependency boundaries, broker/durable-store ports, `/ws/events/v1` protocol, fail-closed security model, provisional rate limits, optional Redis Pub/Sub & Streams semantics, observability, and requirements.
@@ -302,7 +302,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - **Exit gate:** All unit + Redis Pub/Sub tests pass without breaking `kaiwen-gateway` base wheel metadata.
 - **Explicit non-goals:** No Redis Streams durable store, no Notifications or Agent Streaming implementations, and no global cross-topic ordering claims.
 
-#### E4 — Redis Streams Durable Store, Recovery & Load Qualification (`In progress`)
+#### E4 — Redis Streams Durable Store, Recovery & Load Qualification (`Complete` — PR #62)
 - **Scope:** `RedisStreamsDurableStore` (`XADD` / `XREADGROUP` / `XACK` / bounded replay), Pending Entries List (`XPENDING` / `XAUTOCLAIM`) crash recovery, `MAXLEN ~` retention/trimming policies, failure-injection testing, and multi-process paced load/memory-bound qualification harness.
 - **Prerequisites:** `E3` complete.
 - **Deliverables & Test evidence:** Failure-injection tests (consumer crash/redelivery, idempotent `event_id` handling, `MAXLEN` lag eviction) plus repeatable multi-trial synthetic Events benchmark report (p50/p95/p99 latency, `1 MiB` per-connection / `32 MiB` global byte-budget enforcement, slow-consumer isolation).
