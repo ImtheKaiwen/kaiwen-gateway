@@ -75,7 +75,7 @@ Use only these milestone status values:
 | **N0** | Notifications Architecture & Contracts (`ADR-0007` `Accepted`) | `Complete` (`ADR-0007` `Accepted` 2026-11-18; `docs/NOTIFICATIONS_MODULE_DESIGN.md`) | `E4` |
 | **N1** | Notification Core (`modules/notifications` domain, ports, preferences, telemetry) | `Complete` (PR #65 / `533e02b`) | Maintainer acceptance of `N0` & `ADR-0007` |
 | **N2** | Real-Time Notification Delivery (`/ws/events/v1` & recipient-scoped routing) | `Complete` (PR #67 / `6567cb7`) | `N1` |
-| **N3** | Durable Notification Delivery & Recovery (`RedisStreamsDurableStore` worker) | `Ready for review` (implemented on `feat/n3-notifications-durable-delivery`, pending Draft PR review) | `N2` |
+| **N3** | Durable Notification Delivery & Recovery (`RedisStreamsDurableStore` worker) | `Complete` (PR #70 / `a26dfa1`) | `N2` |
 | **N4** | Notifications Integration, Performance & Acceptance | `Not started` | `N3` |
 
 Milestone IDs are stable; do not renumber completed milestones. Update the status table and evidence links after a reviewed change. If a stage is partially complete, keep it `In progress` or `Ready for review` rather than marking it `Complete`.
@@ -337,7 +337,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 - **Deliverables & Test evidence:** Loopback `/ws/events/v1` tests verifying recipient-scoped delivery, cross-tenant/cross-recipient denial, expiration drop, and `1008` slow-consumer isolation.
 - **Explicit non-goals:** No offline catch-up over Pub/Sub alone, no external providers.
 
-#### N3 — Durable Delivery & Recovery (`Ready for review`)
+#### N3 — Durable Delivery & Recovery (`Complete` — PR #70 / `a26dfa1`)
 - **Scope:** Durable notification worker consuming `DurableEventStorePort` (`RedisStreamsDurableStore`, `StreamRecoveryWorker`), idempotent deduplication, and DLQ quarantine with `XACK` strictly after dispatch.
 - **Prerequisites:** `N2` complete + `kaiwen-gateway[redis]`.
 - **Deliverables & Test evidence:** Real-Redis failure-injection tests covering crash before `XACK`, `XPENDING`/`XAUTOCLAIM` recovery, poison DLQ quarantine, `expires_at` drop, and Redis outage fail-closed behavior.
