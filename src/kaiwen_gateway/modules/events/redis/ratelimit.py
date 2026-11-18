@@ -9,6 +9,7 @@ from typing import Any, Final
 
 from kaiwen_gateway.modules.events.domain import EventsBackendUnavailableError, InvalidEventError
 from kaiwen_gateway.modules.events.ratelimit import RateLimitConfig, RateLimitDecision
+from kaiwen_gateway.modules.events.redis.config import KEY_PREFIX_PATTERN
 
 _LUA_TOKEN_BUCKET_SCRIPT: Final[str] = """
 local key = KEYS[1]
@@ -74,6 +75,8 @@ class RedisDistributedRateLimiter:
             raise TypeError(f"config must be a RateLimitConfig, got {type(config).__name__}")
         if not isinstance(scope, str) or not scope:
             raise InvalidEventError("scope must be a non-empty str")
+        if not isinstance(key_prefix, str) or not KEY_PREFIX_PATTERN.fullmatch(key_prefix):
+            raise InvalidEventError("key_prefix must match ^[a-z0-9][a-z0-9_-]{0,31}$")
         self._client: Any = redis_client
         self._config: RateLimitConfig = config
         self._scope: str = scope
@@ -93,7 +96,12 @@ class RedisDistributedRateLimiter:
         """Atomically evaluate and consume `cost` tokens in Redis via Lua `EVAL`."""
         if not isinstance(key, str) or not key:
             raise InvalidEventError("rate limit key must be a non-empty str")
-        if not math.isfinite(cost) or cost <= 0.0:
+        if (
+            isinstance(cost, bool)
+            or not isinstance(cost, (int, float))
+            or not math.isfinite(cost)
+            or cost <= 0.0
+        ):
             raise InvalidEventError("cost must be a finite positive number")
         if cost > self._config.burst:
             return RateLimitDecision(

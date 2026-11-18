@@ -529,6 +529,10 @@ def create_gateway_app(
                 modules=[*core.modules(), effective_events_module],
             )
 
+    if events_replay_cache is not None and not isinstance(
+        events_replay_cache, TicketReplayCachePort
+    ):
+        raise TypeError("events_replay_cache must implement TicketReplayCachePort")
     effective_replay_cache = (
         events_replay_cache if events_replay_cache is not None else BoundedTicketReplayCache()
     )

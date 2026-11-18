@@ -23,6 +23,7 @@ from kaiwen_gateway.modules.events import (
     EventEnvelope,
     EventsBackendUnavailableError,
     EventsModule,
+    SlowConsumerPolicy,
 )
 from kaiwen_gateway.modules.events.redis import (
     RedisClientConfig,
@@ -46,12 +47,15 @@ class _FakeRedisBus:
         for sub in list(self.subscribers):
             if sub.closed:
                 continue
-            matched = channel in sub.channels or any(
-                fnmatch.fnmatchcase(channel, pat) for pat in sub.patterns
-            )
-            if matched:
+            if channel in sub.channels:
                 await sub.incoming.put({"type": "message", "channel": channel, "data": data})
                 delivered += 1
+            for pat in list(sub.patterns):
+                if fnmatch.fnmatchcase(channel, pat):
+                    await sub.incoming.put(
+                        {"type": "pmessage", "pattern": pat, "channel": channel, "data": data}
+                    )
+                    delivered += 1
         return delivered
 
 
@@ -335,3 +339,62 @@ print("NO_REDIS_OK")
         check=True,
     )
     assert proc.stdout.strip() == "NO_REDIS_OK"
+
+
+def test_transient_publish_error_self_heals_health_and_slow_consumer_cleans_refcounts() -> None:
+    async def scenario() -> None:
+        bus = _FakeRedisBus()
+        client = _FakeRedisClient(bus)
+        broker = RedisPubSubEventBroker(
+            RedisPubSubBrokerConfig(
+                broker=EventBrokerConfig(
+                    enable_rate_limiting=False,
+                    max_queued_events_per_connection=1,
+                    slow_consumer_policy=SlowConsumerPolicy.DISCONNECT_SLOW_CONSUMER,
+                ),
+                initial_reconnect_backoff_seconds=0.01,
+                max_reconnect_backoff_seconds=0.05,
+            ),
+            redis_client=client,
+        )
+        await broker.startup()
+        try:
+            # 1. Transient publish failure while idle sets _healthy=False, then self-heals
+            bus.fail_publish = True
+            with pytest.raises(EventsBackendUnavailableError):
+                await broker.publish(_env(event_id="e-fail"))
+            unhealthy_now = broker.is_healthy
+            assert unhealthy_now is False
+            bus.fail_publish = False
+            for _ in range(40):
+                if broker.is_healthy:
+                    break
+                await asyncio.sleep(0.02)
+            assert broker.is_healthy is True
+
+            # 2. Slow-consumer disconnect cleans up refcounts and Redis pubsub subscriptions
+            await broker.subscribe(_ctx(connection_id="c-slow"), "call.status")
+            assert len(broker._exact_refcounts) == 1
+            await broker.publish(_env(event_id="e-1"))
+            await broker.publish(_env(event_id="e-2"))
+            for _ in range(40):
+                if not broker._exact_refcounts and not broker._connections:
+                    break
+                await asyncio.sleep(0.02)
+            assert broker._exact_refcounts == {}
+            assert broker._connections == {}
+            assert broker._pubsub is not None
+            assert broker._pubsub.channels == set()
+
+            # 3. Concurrent unsubscribe + subscribe preserves Redis subscription consistency
+            sub1 = await broker.subscribe(_ctx(connection_id="c-race-1"), "race.topic")
+            await asyncio.gather(
+                broker.unsubscribe(sub1.subscription_id),
+                broker.subscribe(_ctx(connection_id="c-race-2"), "race.topic"),
+            )
+            assert broker._exact_refcounts.get("kw:evt:v1:tenant-a:race.topic") == 1
+            assert "kw:evt:v1:tenant-a:race.topic" in broker._pubsub.channels
+        finally:
+            await broker.shutdown()
+
+    asyncio.run(scenario())

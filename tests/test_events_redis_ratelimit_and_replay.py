@@ -15,6 +15,7 @@ from kaiwen_gateway.modules.events import (
     EventAuthorizationError,
     EventsBackendUnavailableError,
     EventsTicketClaims,
+    InvalidEventError,
     RateLimitConfig,
 )
 from kaiwen_gateway.modules.events.redis import (
@@ -255,3 +256,40 @@ def test_opt_in_live_redis_cross_instance_integration() -> None:
         await broker.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_p2_direct_instantiation_validation_and_app_replay_cache_type_check() -> None:
+    store = _FakeRedisKV()
+    for bad_prefix in ("", "BAD", "bad:prefix", "a" * 33):
+        with pytest.raises(InvalidEventError):
+            RedisDistributedRateLimiter(
+                redis_client=store,
+                config=RateLimitConfig(rate_per_second=10.0, burst=5.0),
+                key_prefix=bad_prefix,
+            )
+        with pytest.raises(InvalidEventError):
+            RedisTicketReplayCache(redis_client=store, key_prefix=bad_prefix)
+
+    limiter = RedisDistributedRateLimiter(
+        redis_client=store,
+        config=RateLimitConfig(rate_per_second=10.0, burst=5.0),
+        key_prefix="kw_p2",
+    )
+    for bad_cost in (True, False, 0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(InvalidEventError):
+            asyncio.run(limiter.check("tenant-1:principal-1", cost=bad_cost))
+
+    class _P2Verifier:
+        async def verify_ticket(
+            self, *, ticket: str, origin: str, connection_id: str
+        ) -> EventsTicketClaims:
+            raise EventAuthorizationError("unused")
+
+    with pytest.raises(TypeError, match="events_replay_cache"):
+        create_gateway_app(
+            CoreConfig(ingress_mode="disabled", events_ingress_mode="authenticated"),
+            enable_events=True,
+            events_ticket_verifier=_P2Verifier(),
+            events_allowed_origins=("https://app.example.com",),
+            events_replay_cache="invalid-cache",  # type: ignore[arg-type]
+        )

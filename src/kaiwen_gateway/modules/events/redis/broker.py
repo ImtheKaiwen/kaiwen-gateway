@@ -214,11 +214,13 @@ class RedisPubSubEventBroker:
         "_publish_rate_limiter",
         "_subscribe_rate_limiter",
         "_lock",
+        "_pubsub_op_lock",
         "_connections",
         "_subscriptions",
         "_tenant_connections",
         "_exact_refcounts",
         "_pattern_refcounts",
+        "_pending_unsubs",
         "_global_queued_bytes",
         "_global_queued_events",
         "_listener_task",
@@ -286,11 +288,13 @@ class RedisPubSubEventBroker:
             self._subscribe_rate_limiter = None
 
         self._lock: asyncio.Lock = asyncio.Lock()
+        self._pubsub_op_lock: asyncio.Lock = asyncio.Lock()
         self._connections: dict[str, _RedisConnectionQueueState] = {}
         self._subscriptions: dict[str, RedisEventSubscription] = {}
         self._tenant_connections: dict[str, set[str]] = {}
         self._exact_refcounts: dict[str, int] = {}
         self._pattern_refcounts: dict[str, int] = {}
+        self._pending_unsubs: list[tuple[bool, str]] = []
         self._global_queued_bytes: int = 0
         self._global_queued_events: int = 0
         self._listener_task: asyncio.Task[None] | None = None
@@ -469,6 +473,29 @@ class RedisPubSubEventBroker:
                     backoff = min(max_backoff, backoff * 2.0)
                     continue
 
+            if not self._healthy:
+                try:
+                    await self._client.ping()
+                    self._healthy = True
+                    backoff = self._config.initial_reconnect_backoff_seconds
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._healthy = False
+                    self._telemetry.record_error(EventsErrorCategory.BACKEND_UNAVAILABLE)
+                    self._pubsub = None
+                    with contextlib.suppress(Exception):
+                        await pubsub.aclose() if hasattr(pubsub, "aclose") else await pubsub.close()
+                    await asyncio.sleep(backoff)
+                    backoff = min(max_backoff, backoff * 2.0)
+                    continue
+
+            async with self._lock:
+                has_subs = bool(self._exact_refcounts or self._pattern_refcounts)
+            if not has_subs:
+                await asyncio.sleep(0.05)
+                continue
+
             try:
                 msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
                 if msg is None:
@@ -510,6 +537,21 @@ class RedisPubSubEventBroker:
             return
         channel_tenant, channel_topic = parts
 
+        channel_pat_topic: str | None = None
+        if msg_type == "pmessage":
+            raw_pattern = msg.get("pattern")
+            if isinstance(raw_pattern, bytes):
+                raw_pattern = raw_pattern.decode("utf-8", errors="ignore")
+            if not isinstance(raw_pattern, str) or not raw_pattern.startswith(expected_prefix):
+                return
+            pat_parts = raw_pattern[len(expected_prefix) :].rsplit(":", 1)
+            if len(pat_parts) != 2:
+                return
+            pat_tenant, channel_pat_topic = pat_parts
+            if pat_tenant != channel_tenant:
+                self._telemetry.record_error(EventsErrorCategory.AUTHORIZATION)
+                return
+
         try:
             parsed = json.loads(raw_data)
             envelope = EventEnvelope(
@@ -540,12 +582,25 @@ class RedisPubSubEventBroker:
                 conn = self._connections.get(conn_id)
                 if conn is None or conn.closed:
                     continue
-                if any(
-                    topic_matches_pattern(envelope.topic, sub.topic_pattern)
+                has_exact = any(
+                    sub.topic_pattern == envelope.topic for sub in conn.subscriptions.values()
+                )
+                if msg_type == "message":
+                    if has_exact:
+                        self._enqueue_to_connection_unlocked(conn, envelope)
+                    continue
+                if has_exact:
+                    continue
+                matching_wilds = [
+                    sub.topic_pattern
                     for sub in conn.subscriptions.values()
-                ):
+                    if sub.topic_pattern.endswith(".*")
+                    and topic_matches_pattern(envelope.topic, sub.topic_pattern)
+                ]
+                if matching_wilds and channel_pat_topic == min(matching_wilds):
                     self._enqueue_to_connection_unlocked(conn, envelope)
             self._sync_gauges_unlocked()
+        await self._flush_pending_unsubs()
 
     def _enqueue_to_connection_unlocked(
         self,
@@ -598,6 +653,14 @@ class RedisPubSubEventBroker:
         for sub_id, sub in list(conn.subscriptions.items()):
             sub._closed = True
             self._subscriptions.pop(sub_id, None)
+            is_wild, redis_target = self._pattern_name(sub.tenant_id, sub.topic_pattern)
+            ref_map = self._pattern_refcounts if is_wild else self._exact_refcounts
+            count = ref_map.get(redis_target, 0)
+            if count <= 1:
+                ref_map.pop(redis_target, None)
+                self._pending_unsubs.append((is_wild, redis_target))
+            else:
+                ref_map[redis_target] = count - 1
         conn.subscriptions.clear()
 
         if conn.queue:
@@ -615,6 +678,31 @@ class RedisPubSubEventBroker:
         conn.cond.notify_all()
         self._sync_gauges_unlocked()
         return removed_subs
+
+    async def _flush_pending_unsubs(self) -> None:
+        async with self._pubsub_op_lock:
+            async with self._lock:
+                if not self._pending_unsubs:
+                    return
+                pending = list(self._pending_unsubs)
+                self._pending_unsubs.clear()
+                pubsub = self._pubsub
+                if pubsub is None:
+                    return
+                to_unsub = [
+                    (is_wild, target)
+                    for is_wild, target in pending
+                    if (self._pattern_refcounts if is_wild else self._exact_refcounts).get(
+                        target, 0
+                    )
+                    == 0
+                ]
+            for is_wild, target in to_unsub:
+                with contextlib.suppress(Exception):
+                    if is_wild:
+                        await pubsub.punsubscribe(target)
+                    else:
+                        await pubsub.unsubscribe(target)
 
     async def subscribe(
         self,
@@ -655,133 +743,139 @@ class RedisPubSubEventBroker:
 
         is_wild, redis_target = self._pattern_name(context.tenant_id, canonical_pattern)
 
-        async with self._lock:
-            if self._is_closed_state():
-                self._telemetry.record_error(EventsErrorCategory.CLOSED)
-                raise EventsModuleClosedError("Redis Event broker is closed")
-            if not self._healthy or self._pubsub is None:
-                self._telemetry.record_error(EventsErrorCategory.BACKEND_UNAVAILABLE)
-                raise EventsBackendUnavailableError("Redis Pub/Sub backend is unavailable")
+        async with self._pubsub_op_lock:
+            async with self._lock:
+                if self._is_closed_state():
+                    self._telemetry.record_error(EventsErrorCategory.CLOSED)
+                    raise EventsModuleClosedError("Redis Event broker is closed")
+                if not self._healthy or self._pubsub is None:
+                    self._telemetry.record_error(EventsErrorCategory.BACKEND_UNAVAILABLE)
+                    raise EventsBackendUnavailableError("Redis Pub/Sub backend is unavailable")
 
-            existing_conn = self._connections.get(context.connection_id)
-            if existing_conn is not None:
-                if (
-                    existing_conn.tenant_id != context.tenant_id
-                    or existing_conn.principal_id != context.principal_id
-                ):
-                    self._telemetry.record_error(EventsErrorCategory.AUTHORIZATION)
-                    raise EventAuthorizationError(
-                        "Connection is already bound to a different tenant or principal"
+                existing_conn = self._connections.get(context.connection_id)
+                if existing_conn is not None:
+                    if (
+                        existing_conn.tenant_id != context.tenant_id
+                        or existing_conn.principal_id != context.principal_id
+                    ):
+                        self._telemetry.record_error(EventsErrorCategory.AUTHORIZATION)
+                        raise EventAuthorizationError(
+                            "Connection is already bound to a different tenant or principal"
+                        )
+                    if (
+                        len(existing_conn.subscriptions)
+                        >= self._config.broker.max_subscriptions_per_connection
+                    ):
+                        self._telemetry.record_error(EventsErrorCategory.BACKPRESSURE)
+                        raise EventBackpressureError(
+                            "Connection exceeded max_subscriptions_per_connection"
+                        )
+
+                ref_map = self._pattern_refcounts if is_wild else self._exact_refcounts
+                need_redis_sub = ref_map.get(redis_target, 0) == 0
+                pubsub = self._pubsub
+
+            if need_redis_sub:
+                try:
+                    if is_wild:
+                        await pubsub.psubscribe(redis_target)
+                    else:
+                        await pubsub.subscribe(redis_target)
+                except Exception as exc:
+                    self._healthy = False
+                    self._telemetry.record_error(EventsErrorCategory.BACKEND_UNAVAILABLE)
+                    raise EventsBackendUnavailableError("Redis Pub/Sub subscribe failed") from exc
+
+            async with self._lock:
+                if self._is_closed_state():
+                    self._telemetry.record_error(EventsErrorCategory.CLOSED)
+                    raise EventsModuleClosedError("Redis Event broker is closed")
+                if not self._healthy or self._pubsub is None:
+                    self._telemetry.record_error(EventsErrorCategory.BACKEND_UNAVAILABLE)
+                    raise EventsBackendUnavailableError("Redis Pub/Sub backend is unavailable")
+
+                if need_redis_sub and self._pubsub is not pubsub:
+                    try:
+                        if is_wild:
+                            await self._pubsub.psubscribe(redis_target)
+                        else:
+                            await self._pubsub.subscribe(redis_target)
+                    except Exception as exc:
+                        self._healthy = False
+                        self._telemetry.record_error(EventsErrorCategory.BACKEND_UNAVAILABLE)
+                        raise EventsBackendUnavailableError(
+                            "Redis Pub/Sub subscribe failed after reconnect"
+                        ) from exc
+
+                conn = self._connections.get(context.connection_id)
+                if conn is None:
+                    conn = _RedisConnectionQueueState(
+                        connection_id=context.connection_id,
+                        tenant_id=context.tenant_id,
+                        principal_id=context.principal_id,
+                        lock=self._lock,
                     )
-                if (
-                    len(existing_conn.subscriptions)
-                    >= self._config.broker.max_subscriptions_per_connection
+                    self._connections[context.connection_id] = conn
+                    self._tenant_connections.setdefault(context.tenant_id, set()).add(
+                        context.connection_id
+                    )
+                elif (
+                    len(conn.subscriptions) >= self._config.broker.max_subscriptions_per_connection
                 ):
                     self._telemetry.record_error(EventsErrorCategory.BACKPRESSURE)
                     raise EventBackpressureError(
                         "Connection exceeded max_subscriptions_per_connection"
                     )
 
-            ref_map = self._pattern_refcounts if is_wild else self._exact_refcounts
-            need_redis_sub = ref_map.get(redis_target, 0) == 0
-            pubsub = self._pubsub
-
-        if need_redis_sub:
-            try:
-                if is_wild:
-                    await pubsub.psubscribe(redis_target)
-                else:
-                    await pubsub.subscribe(redis_target)
-            except Exception as exc:
-                self._healthy = False
-                self._telemetry.record_error(EventsErrorCategory.BACKEND_UNAVAILABLE)
-                raise EventsBackendUnavailableError("Redis Pub/Sub subscribe failed") from exc
-
-        async with self._lock:
-            if self._is_closed_state():
-                self._telemetry.record_error(EventsErrorCategory.CLOSED)
-                raise EventsModuleClosedError("Redis Event broker is closed")
-            if not self._healthy or self._pubsub is None:
-                self._telemetry.record_error(EventsErrorCategory.BACKEND_UNAVAILABLE)
-                raise EventsBackendUnavailableError("Redis Pub/Sub backend is unavailable")
-
-            if need_redis_sub and self._pubsub is not pubsub:
-                try:
-                    if is_wild:
-                        await self._pubsub.psubscribe(redis_target)
-                    else:
-                        await self._pubsub.subscribe(redis_target)
-                except Exception as exc:
-                    self._healthy = False
-                    self._telemetry.record_error(EventsErrorCategory.BACKEND_UNAVAILABLE)
-                    raise EventsBackendUnavailableError(
-                        "Redis Pub/Sub subscribe failed after reconnect"
-                    ) from exc
-
-            conn = self._connections.get(context.connection_id)
-            if conn is None:
-                conn = _RedisConnectionQueueState(
+                ref_map = self._pattern_refcounts if is_wild else self._exact_refcounts
+                ref_map[redis_target] = ref_map.get(redis_target, 0) + 1
+                sub_id = f"sub_{uuid.uuid4().hex[:16]}"
+                sub = RedisEventSubscription(
+                    broker=self,
+                    subscription_id=sub_id,
                     connection_id=context.connection_id,
                     tenant_id=context.tenant_id,
-                    principal_id=context.principal_id,
-                    lock=self._lock,
+                    topic_pattern=canonical_pattern,
                 )
-                self._connections[context.connection_id] = conn
-                self._tenant_connections.setdefault(context.tenant_id, set()).add(
-                    context.connection_id
-                )
-            elif len(conn.subscriptions) >= self._config.broker.max_subscriptions_per_connection:
-                self._telemetry.record_error(EventsErrorCategory.BACKPRESSURE)
-                raise EventBackpressureError("Connection exceeded max_subscriptions_per_connection")
-
-            ref_map = self._pattern_refcounts if is_wild else self._exact_refcounts
-            ref_map[redis_target] = ref_map.get(redis_target, 0) + 1
-            sub_id = f"sub_{uuid.uuid4().hex[:16]}"
-            sub = RedisEventSubscription(
-                broker=self,
-                subscription_id=sub_id,
-                connection_id=context.connection_id,
-                tenant_id=context.tenant_id,
-                topic_pattern=canonical_pattern,
-            )
-            conn.subscriptions[sub_id] = sub
-            self._subscriptions[sub_id] = sub
-            self._sync_gauges_unlocked()
-            return sub
+                conn.subscriptions[sub_id] = sub
+                self._subscriptions[sub_id] = sub
+                self._sync_gauges_unlocked()
+                return sub
 
     async def unsubscribe(self, subscription_id: str) -> bool:
-        need_redis_unsub: tuple[bool, str] | None = None
-        async with self._lock:
-            sub = self._subscriptions.pop(subscription_id, None)
-            if sub is None:
-                return False
-            sub._closed = True
-            is_wild, redis_target = self._pattern_name(sub.tenant_id, sub.topic_pattern)
-            ref_map = self._pattern_refcounts if is_wild else self._exact_refcounts
-            count = ref_map.get(redis_target, 0)
-            if count <= 1:
-                ref_map.pop(redis_target, None)
-                need_redis_unsub = (is_wild, redis_target)
-            else:
-                ref_map[redis_target] = count - 1
-
-            conn = self._connections.get(sub.connection_id)
-            if conn is not None:
-                conn.subscriptions.pop(subscription_id, None)
-                conn.cond.notify_all()
-                if not conn.subscriptions:
-                    self._close_connection_unlocked(sub.connection_id)
-            self._sync_gauges_unlocked()
-            pubsub = self._pubsub
-
-        if need_redis_unsub is not None and pubsub is not None:
-            is_wild, redis_target = need_redis_unsub
-            with contextlib.suppress(Exception):
-                if is_wild:
-                    await pubsub.punsubscribe(redis_target)
+        async with self._pubsub_op_lock:
+            need_redis_unsub: tuple[bool, str] | None = None
+            async with self._lock:
+                sub = self._subscriptions.pop(subscription_id, None)
+                if sub is None:
+                    return False
+                sub._closed = True
+                is_wild, redis_target = self._pattern_name(sub.tenant_id, sub.topic_pattern)
+                ref_map = self._pattern_refcounts if is_wild else self._exact_refcounts
+                count = ref_map.get(redis_target, 0)
+                if count <= 1:
+                    ref_map.pop(redis_target, None)
+                    need_redis_unsub = (is_wild, redis_target)
                 else:
-                    await pubsub.unsubscribe(redis_target)
-        return True
+                    ref_map[redis_target] = count - 1
+
+                conn = self._connections.get(sub.connection_id)
+                if conn is not None:
+                    conn.subscriptions.pop(subscription_id, None)
+                    conn.cond.notify_all()
+                    if not conn.subscriptions:
+                        self._close_connection_unlocked(sub.connection_id)
+                self._sync_gauges_unlocked()
+                pubsub = self._pubsub
+
+            if need_redis_unsub is not None and pubsub is not None:
+                is_wild, redis_target = need_redis_unsub
+                with contextlib.suppress(Exception):
+                    if is_wild:
+                        await pubsub.punsubscribe(redis_target)
+                    else:
+                        await pubsub.unsubscribe(redis_target)
+            return True
 
     async def close_connection(self, connection_id: str) -> int:
         sub_ids: list[str]

@@ -8,7 +8,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from kaiwen_gateway.modules.events.domain import EventsBackendUnavailableError
+from kaiwen_gateway.modules.events.domain import EventsBackendUnavailableError, InvalidEventError
+from kaiwen_gateway.modules.events.redis.config import KEY_PREFIX_PATTERN
 
 
 class RedisTicketReplayCache:
@@ -27,6 +28,8 @@ class RedisTicketReplayCache:
         key_prefix: str = "kw",
         clock: Callable[[], float] | None = None,
     ) -> None:
+        if not isinstance(key_prefix, str) or not KEY_PREFIX_PATTERN.fullmatch(key_prefix):
+            raise InvalidEventError("key_prefix must match ^[a-z0-9][a-z0-9_-]{0,31}$")
         self._client: Any = redis_client
         self._key_prefix: str = key_prefix
         self._clock: Callable[[], float] = clock if clock is not None else time.time
