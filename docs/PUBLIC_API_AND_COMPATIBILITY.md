@@ -1,7 +1,7 @@
 # Kaiwen Gateway — Public API Surface and Compatibility Policy
 
-> **Status:** Active Beta Reference (**Gateway Core + OpenAI Voice Adapters Beta**)
-> **Applies to:** `kaiwen-gateway` (`v0.1.0b1` published on PyPI & GitHub Releases)
+> **Status:** Active Beta Reference (Published: `v0.1.0b1` on PyPI & GitHub Releases; Candidate prepared in Draft PR #77: `v0.1.0b2` — **NOT YET PUBLISHED**)
+> **Applies to:** `kaiwen-gateway` (`0.1.0b2` candidate prepared in Draft PR #77, not yet merged to `main`, preserving `0.1.0b1` compatibility)
 
 This document defines the supported public API surface, versioning model, compatibility expectations, internal boundaries, and provider adapter ownership rules for Kaiwen Gateway.
 
@@ -23,7 +23,7 @@ Kaiwen Gateway separates three independent version identifiers so package releas
 
 | Dimension | Identifier | Current Value | Scope |
 |---|---|---|---|
-| **Python Package Version** | `kaiwen_gateway.__version__` | `0.1.0b1` | Distribution releases on PyPI / GitHub Releases (intends SemVer post-1.0). |
+| **Python Package Version** | `kaiwen_gateway.__version__` | `0.1.0b2` *(candidate, not yet published; latest PyPI: `0.1.0b1`)* | Distribution releases on PyPI / GitHub Releases (intends SemVer post-1.0). |
 | **Core Module Contract Version** | `kaiwen_gateway.core.CORE_CONTRACT_VERSION` | `"1.0"` | Compatibility of `GatewayModule` / `ModuleDescriptor` contracts enforced by `ModuleRegistry`. |
 | **Synthetic WebSocket Protocol Versions** | `SYNTHETIC_PROTOCOL_VERSION` / `SYNTHETIC_MEDIA_PROTOCOL_VERSION` | `"v1"` | Wire framing for `/ws/synthetic/v1` (control) and `/ws/synthetic-media/v1` (binary media). |
 

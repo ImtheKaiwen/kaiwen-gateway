@@ -7,6 +7,6 @@ background tasks.
 
 from typing import Final
 
-__version__: Final[str] = "0.1.0b1"
+__version__: Final[str] = "0.1.0b2"
 
 __all__ = ["__version__"]

@@ -110,7 +110,7 @@ new_modules = sorted(modules_after - modules_before)
 
 assert kaiwen_gateway.__file__ is not None
 assert str(pathlib.Path(kaiwen_gateway.__file__).resolve()) == sys.argv[1]
-assert kaiwen_gateway.__version__ == "0.1.0b1"
+assert kaiwen_gateway.__version__ == "0.1.0b2"
 assert cwd_before == cwd_after, f"Files created on import: {cwd_after - cwd_before}"
 assert threads_before == threads_after == 1, f"Threads changed: {threads_before} -> {threads_after}"
 assert new_modules == ["kaiwen_gateway"], f"Unexpected modules loaded: {new_modules}"

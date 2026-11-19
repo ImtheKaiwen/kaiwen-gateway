@@ -122,7 +122,9 @@ def test_key_public_symbols_remain_importable_from_documented_namespaces() -> No
 
 def test_version_dimensions_are_distinct_and_consistent() -> None:
     """Package version, Core contract version, and synthetic wire protocol versions are distinct."""
-    assert kaiwen_gateway.__version__ == "0.1.0b1"
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert kaiwen_gateway.__version__ == "0.1.0b2"
+    assert pyproject["project"]["version"] == kaiwen_gateway.__version__
     assert core_pkg.CORE_CONTRACT_VERSION == "1.0"
     assert SYNTHETIC_PROTOCOL_VERSION == "v1"
     assert SYNTHETIC_MEDIA_PROTOCOL_VERSION == "v1"

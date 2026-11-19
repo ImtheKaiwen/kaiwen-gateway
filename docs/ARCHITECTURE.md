@@ -3,7 +3,8 @@
 > **Status:** V1 Architecture Baseline (`ADR-0001`..`ADR-0005` accepted; public beta `v0.1.0b1` released; `main` in `MAINTENANCE — INTEGRATION PENDING`)
 > **Document version:** 1.0
 > **Latest published release:** `0.1.0b1` (Public Beta — Gateway Core + OpenAI Voice Adapters)
-> **Last updated:** 2026-11-16
+> **Prepared candidate:** `0.1.0b2` (**NOT YET PUBLISHED** — adds Events `ADR-0006` and Notifications `ADR-0007` modules; combined beta acceptance in `docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md`)
+> **Last updated:** 2026-11-19
 > **Scope:** Reusable Python library + deployable ASGI server; **Voice** is the only V1 communication module.
 
 ## 1. Purpose, authority, and implementation status
