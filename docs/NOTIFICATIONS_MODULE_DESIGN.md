@@ -1,6 +1,6 @@
 # Kaiwen Gateway — Notifications Module Design (`N0` Architecture & Contracts)
 
-> **Status:** `Accepted` (`N0` Complete — `ADR-0007` Accepted 2026-11-18; implementation milestones `N1`–`N4` remain `Not started`)
+> **Status:** `Accepted` (`N0`–`N4` **Complete** — `ADR-0007` Accepted 2026-11-18; **Current implementation note (2026-11-19):** `N1`–`N4` are **Complete** and included in published experimental beta **`v0.1.0b2`**)
 > **Date:** 2026-11-18
 > **Related ADR:** [`ADR-0007 — Notifications Module Architecture`](decisions/0007-notifications-module-architecture.md) (`Accepted`)
 > **Related Baseline:** [`ADR-0006`](decisions/0006-events-module-architecture.md) (`Accepted`) · [`docs/EVENTS_MODULE_DESIGN.md`](EVENTS_MODULE_DESIGN.md) (`D0`–`E4 Complete` on `main` `9e9af79`)

@@ -1,12 +1,17 @@
 # Kaiwen Gateway
 
+[![PyPI](https://img.shields.io/badge/PyPI-kaiwen--gateway%200.1.0b2-blue)](https://pypi.org/project/kaiwen-gateway/)
+[![Latest Experimental Beta](https://img.shields.io/badge/Latest%20Experimental%20Beta-v0.1.0b2-orange)](https://github.com/ImtheKaiwen/kaiwen-gateway/releases/tag/v0.1.0b2)
+
 **A modular, provider-agnostic communication gateway for real-time AI applications.**
 
 > [!IMPORTANT]
-> **Release & Maintenance Status: `v0.1.0b1` Public Beta Released (`Gateway Core + OpenAI Voice Adapters Beta`, 2026-11-16; `MAINTENANCE — INTEGRATION PENDING`).**
+> **Latest Experimental Beta: [`v0.1.0b2`](https://github.com/ImtheKaiwen/kaiwen-gateway/releases/tag/v0.1.0b2) (`Core + Voice + Events + Notifications Beta`, 2026-11-19; `MAINTENANCE — INTEGRATION PENDING`).**
+> *(Pre-release experimental beta — not GitHub's formal `Latest` stable release designation.)*
 >
-> - **Latest Published Beta Release (`v0.1.0b1`):** Installable public beta published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0b1/) and [GitHub Releases](https://github.com/ImtheKaiwen/kaiwen-gateway/releases/tag/v0.1.0b1) (superseding synthetic alphas `v0.1.0a2` and `v0.1.0a1`). Covers Gateway Core, ASGI server hosting, synthetic telephony/media transports, `VoiceBridgeSession`, `RealtimeAdapterConformanceSuite`, and both **`LIVE_VERIFIED`** OpenAI voice integrations — `kaiwen_gateway.adapters.openai_realtime` (`wss://api.openai.com/v1/realtime`, `gpt-realtime`) and `kaiwen_gateway.adapters.openai_gpt_live` (`wss://api.openai.com/v1/live/sessions`, `gpt-live-1`).
-> - **Prepared Beta Candidate (`v0.1.0b2` — NOT YET PUBLISHED):** Release candidate prepared in [Draft PR #77](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/77) (not yet merged to `main` or published to PyPI / GitHub Releases) covering Events (`E1`–`E4`, `/ws/events/v1`, optional `kaiwen-gateway[redis]` Pub/Sub & Streams), Notifications (`N0`–`N4`, mandatory recipient isolation, durable delivery & recovery), and Combined Beta Integration Acceptance ([`docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md`](docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md), PR #74).
+> - **Official PyPI Distribution:** [https://pypi.org/project/kaiwen-gateway/](https://pypi.org/project/kaiwen-gateway/) (`pip install kaiwen-gateway==0.1.0b2` or `pip install "kaiwen-gateway[server,redis]==0.1.0b2"`).
+> - **Latest Experimental Beta (`v0.1.0b2`):** Published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0b2/) and [GitHub Releases](https://github.com/ImtheKaiwen/kaiwen-gateway/releases/tag/v0.1.0b2) (superseding `v0.1.0b1`, `v0.1.0a2`, and `v0.1.0a1`). Covers Gateway Core, ASGI server hosting, synthetic telephony/media transports, `VoiceBridgeSession`, `RealtimeAdapterConformanceSuite`, both **`LIVE_VERIFIED`** OpenAI voice adapters (`openai_realtime` and `openai_gpt_live`), Events (`E1`–`E4`, `/ws/events/v1`, optional `[redis]` Pub/Sub & Streams), Notifications (`N0`–`N4`, mandatory recipient isolation, durable delivery & recovery), and Combined Beta Integration Acceptance ([`docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md`](docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md), PR #74).
+> - **Previous Published Beta (`v0.1.0b1`):** Historical Gateway Core + OpenAI Voice Adapters Beta ([PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0b1/) / [GitHub Releases](https://github.com/ImtheKaiwen/kaiwen-gateway/releases/tag/v0.1.0b1)).
 > - **Pending / Not Yet Supported:** **Experimental beta — production use is not supported.** Kaiwen Agent integration, Kaiwen Speech integration, live Verimor PSTN/WSS interoperability (`FR-INT-007`), and production-readiness assessment remain deferred. Tracked beta limitations: `#68` (Windows timer-flake), `#75` (Linux `SIGTERM` shutdown verification with active mixed workloads), and `#76` (passive idle Redis Pub/Sub readiness detection policy).
 
 Kaiwen Gateway is designed to be both a **reusable Python library** and a **deployable ASGI service**. It accepts connections from external systems, authenticates and isolates them, translates provider-specific protocols into well-defined internal contracts, and bridges live communication to application and AI backends.
@@ -44,20 +49,20 @@ pip install dist/kaiwen_gateway-0.1.0b2-py3-none-any.whl
 
 #### B. Installing from PyPI
 
-Kaiwen Gateway `v0.1.0b1` is published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0b1/):
+Kaiwen Gateway `v0.1.0b2` is published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0b2/):
 
 ```bash
-# Install core package + ASGI runtime + OpenAI voice adapters (Realtime & GPT-Live):
-pip install "kaiwen-gateway[server,openai]==0.1.0b1"
+# Install core package + ASGI runtime + Redis Events/Notifications + OpenAI voice adapters:
+pip install "kaiwen-gateway[server,redis,openai]==0.1.0b2"
 
-# Install core package + OpenAI voice adapters only:
-pip install "kaiwen-gateway[openai]==0.1.0b1"
+# Install core package + ASGI runtime + Redis Events/Notifications:
+pip install "kaiwen-gateway[server,redis]==0.1.0b2"
 
 # Install core package + ASGI runtime:
-pip install "kaiwen-gateway[server]==0.1.0b1"
+pip install "kaiwen-gateway[server]==0.1.0b2"
 
 # Install minimal core library only:
-pip install "kaiwen-gateway==0.1.0b1"
+pip install "kaiwen-gateway==0.1.0b2"
 ```
 
 ---
@@ -105,9 +110,9 @@ uv run python examples/openai_voice_adapters_quickstart.py
 
 ---
 
-## Capability Matrix (`v0.1.0b1`)
+## Capability Matrix (`v0.1.0b2`)
 
-The following matrix distinguishes verified capabilities in the latest published beta (`v0.1.0b1`, **Gateway Core + OpenAI Voice Adapters Beta**) from deferred or unsupported features:
+The following matrix distinguishes verified capabilities in the latest experimental beta (`v0.1.0b2`, **Core + Voice + Events + Notifications Beta**) from deferred or unsupported features:
 
 | Capability | Requirement Reference | Status | Notes / Limitations |
 | --- | --- | --- | --- |
@@ -132,8 +137,12 @@ The following matrix distinguishes verified capabilities in the latest published
 | **Live Verimor Telephony** | `FR-INT-007` (P1) | **Deferred (Pending Vendor Spec)** | `OPEN-001` / `OPEN-002`. Blocked pending official vendor WebSocket specification and authorized interoperability testing. Wire format is strictly not guessed. |
 | **OpenAI Live Contract Verification** | `FR-INT-005` | **`LIVE_VERIFIED` (`gpt-realtime` & `gpt-live-1`, `M4-R3` / `M4-R4`)** | `OPEN-003` closed for both `wss://api.openai.com/v1/realtime` (`gpt-realtime`) and `wss://api.openai.com/v1/live/sessions` (`gpt-live-1`) via authorized end-to-end Gateway live sessions on 2026-11-16. |
 | **Kaiwen Agent & Speech Integrations** | `FR-INT-004` | **Deferred (Pending Upstream APIs)** | `kaiwen-agent` and `kaiwen-speech` integrations remain outside the current maintenance baseline. |
-| **Tool Authorization Delegation** | `SEC-007` | **Deferred (Experimental Beta Scope)** | External agent tool authorization, approvals, and audit are owned by the consuming application/agent (`Gate B` exception accepted historically for synthetic alpha and retained for `v0.1.0b1`). |
-| **Distributed / Multi-Instance State** | `Gate C/D`, `M8` | **Deferred (Out of Beta Scope)** | Atomic replay store and distributed multi-worker coordination deferred to `Gate C/D` (`M8`). Current experimental beta (`v0.1.0b1`) is single-instance only. |
+| **Events Foundation & Authenticated `/ws/events/v1` (`E1`–`E2`)** | `ADR-0006`, `FR-EVT-001`–`004`, `SEC-EVT-001`–`003` | **Supported (`v0.1.0b2`, Verified)** | Additive Core principal identity (`VerifiedPrincipalContext`, `AdmissionController.admit_principal`), `EventsModule`, `InMemoryEventBroker` (zero external deps), bounded per-connection queues, token-bucket rate limiting, and authenticated `/ws/events/v1` transport. |
+| **Optional Redis Events Backend (`E3`–`E4`, `[redis]`)** | `ADR-0006`, `kaiwen-gateway[redis]` | **Supported (`v0.1.0b2`, Verified)** | `RedisPubSubEventBroker` (at-most-once cross-instance fan-out; broker acceptance does not imply durable WS client receipt), `RedisDistributedRateLimiter`, `RedisTicketReplayCache`, and `RedisStreamsDurableStore` / `StreamRecoveryWorker` (at-least-once durable log with explicit `XACK`, `XPENDING`/`XAUTOCLAIM` recovery, and DLQ quarantine). |
+| **Notifications Module (`N0`–`N4`)** | `ADR-0007`, `docs/NOTIFICATIONS_MODULE_DESIGN.md` | **Supported (`v0.1.0b2`, Verified)** | `NotificationEnvelope`, deterministic `derive_recipient_topic()`, fail-closed producer authorization, `NotificationsDispatcher`, mandatory recipient isolation (`NotificationsTopicAuthorizer`, `ChainedNotificationsTopicAuthorizer`), and `NotificationsDurablePublisher` / `NotificationsDurableWorker`. |
+| **Combined Beta Integration Acceptance** | `PR #74` | **Supported (`v0.1.0b2`, Verified)** | Combined Core + Voice + Events + Notifications lifecycle, real multi-process Uvicorn + live Redis 7 + real `websockets` verification, competing durable workers, 20 ms paced Voice + in-flight interruption, and Redis outage isolation ([`docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md`](docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md)). Experimental beta only; not production readiness or SLA. |
+| **Tool Authorization Delegation** | `SEC-007` | **Deferred (Experimental Beta Scope)** | External agent tool authorization, approvals, and audit are owned by the consuming application/agent (`Gate B` exception retained for `v0.1.0b2`). |
+| **Distributed / Multi-Instance Scope** | `ADR-0006`, `ADR-0007`, `Gate C/D` | **Partial (`v0.1.0b2`)** | Cross-instance Events and Notifications fan-out, distributed rate limiting, ticket replay protection, and competing Redis Streams workers are supported via `kaiwen-gateway[redis]`. **Admission/connection ceilings remain process-local per Gateway instance, and distributed Voice call migration is not implemented.** |
 | **Interactive Voice at $\ge 100$ Calls** | `NFR-PERF-006` (P1) | **Documented Limitation** | 100 concurrent calls achieve 100% media integrity (0% loss) and pass pacing criteria, but median p95 echo RTT reaches ~2,045 ms due to single-threaded event loop transit backlog. |
 
 ---
@@ -239,7 +248,7 @@ uv build
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Hexagonal architecture, ports, adapters, and data flow. |
 | [`docs/guides/OPENAI_REALTIME_ADAPTER.md`](docs/guides/OPENAI_REALTIME_ADAPTER.md) | OpenAI Realtime (`wss://api.openai.com/v1/realtime`, `gpt-realtime`) adapter guide and capability matrix. |
 | [`docs/guides/OPENAI_GPT_LIVE_ADAPTER.md`](docs/guides/OPENAI_GPT_LIVE_ADAPTER.md) | OpenAI GPT-Live (`wss://api.openai.com/v1/live/sessions`, `gpt-live-1`) adapter guide and capability matrix. |
-| [`docs/decisions/`](docs/decisions/) | Numbered Architecture Decision Records (`ADR-0001` through `ADR-0005`). |
+| [`docs/decisions/`](docs/decisions/) | Numbered Architecture Decision Records (`ADR-0001` through `ADR-0007`). |
 | [`SECURITY.md`](SECURITY.md) | Security policy and vulnerability disclosure instructions. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Development workflow and PR submission standards. |
 | [`AGENTS.md`](AGENTS.md) | Rules and verification protocols for autonomous coding agents. |
