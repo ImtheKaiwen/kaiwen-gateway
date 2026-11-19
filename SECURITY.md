@@ -1,9 +1,9 @@
 # Security Policy
 
 > **Project:** [Kaiwen Gateway](https://github.com/ImtheKaiwen/kaiwen-gateway)
-> **Status:** `MAINTENANCE — INTEGRATION PENDING` (Public Beta `v0.1.0b1` published — **Gateway Core + OpenAI Voice Adapters Beta**).
-> **Latest published release:** `0.1.0b1` (PyPI & GitHub Releases; superseding synthetic alphas `0.1.0a2` and `0.1.0a1`).
-> **Last reviewed:** 2026-11-16
+> **Status:** `MAINTENANCE — INTEGRATION PENDING` (Experimental Beta `v0.1.0b2` published — **Core + Voice + Events + Notifications Beta**).
+> **Latest published release:** `0.1.0b2` (PyPI & GitHub Releases; superseding `0.1.0b1`, `0.1.0a2`, and `0.1.0a1`).
+> **Last reviewed:** 2026-11-19
 
 Kaiwen Gateway is intended to handle authenticated, real-time communication between external providers and AI systems. Its initial use case is a bidirectional telephone-audio bridge over WebSockets. A failure at this boundary could expose sensitive conversations, mix different tenants' sessions, authorize unintended actions, or incur upstream service costs.
 
@@ -57,13 +57,14 @@ A model producing a poor answer **without a security boundary being crossed** is
 
 | Version / branch | Status | Security support |
 | --- | --- | --- |
-| `main` | Maintenance baseline (`v0.1.0b1` beta + `LIVE_VERIFIED` OpenAI Realtime & GPT-Live adapters) | Best-effort review; **no production support or service-level commitment**. |
-| `0.1.0b1` | Latest published experimental beta (PyPI & GitHub Releases) | Best-effort review only; **no production support or SLA**. |
-| `0.1.0a2` | Prior synthetic-environment alpha (superseded by `0.1.0b1`) | No ongoing support; upgrade to `0.1.0b1`. |
-| `0.1.0a1` | Prior synthetic-environment alpha (superseded by `0.1.0b1`) | No ongoing support; upgrade to `0.1.0b1`. |
+| `main` | Maintenance baseline (`v0.1.0b2` beta — Core + Voice + Events + Notifications) | Best-effort review; **no production support or service-level commitment**. |
+| `0.1.0b2` | Latest published experimental beta (PyPI & GitHub Releases) | Best-effort review only; **no production support or SLA**. |
+| `0.1.0b1` | Prior experimental beta (superseded by `0.1.0b2`) | No ongoing support; upgrade to `0.1.0b2`. |
+| `0.1.0a2` | Prior synthetic-environment alpha (superseded by `0.1.0b2`) | No ongoing support; upgrade to `0.1.0b2`. |
+| `0.1.0a1` | Prior synthetic-environment alpha (superseded by `0.1.0b2`) | No ongoing support; upgrade to `0.1.0b2`. |
 | Future releases | Not yet defined | Policy will be updated when versions are actually published and maintained. |
 
-There are currently **no production-supported Gateway releases**. `v0.1.0b1` is an experimental public beta release (**Gateway Core + OpenAI Voice Adapters Beta**); future releases will document supported version ranges, upgrade/patch expectations, and end-of-support policy in this table.
+There are currently **no production-supported Gateway releases**. `v0.1.0b2` is an experimental public beta release (**Core + Voice + Events + Notifications Beta**); future releases will document supported version ranges, upgrade/patch expectations, and end-of-support policy in this table.
 
 **Neither an alpha or beta release nor this policy constitutes a security certification, penetration-test result, availability guarantee, or permission to process real customer calls.**
 

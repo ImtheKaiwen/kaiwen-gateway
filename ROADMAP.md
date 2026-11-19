@@ -1,7 +1,7 @@
 # Kaiwen Gateway — Development Roadmap
 
-> **Status:** `MAINTENANCE — INTEGRATION PENDING` (2026-11-16) — M0–M3 Complete; Core Stabilization S1 (`PR #47`) & Drain Safety S1-R2 (`PR #48`) Complete; M4-R1 Adapter Conformance (`PR #42`, `PR #43`) Complete; M4-R2/R3 OpenAI Realtime Adapter (`PR #49`, `PR #53`, `LIVE_VERIFIED` & `MOCK_VERIFIED`) Complete; M4-R4 OpenAI GPT-Live Adapter (`PR #54`, `LIVE_VERIFIED` & `MOCK_VERIFIED`) Complete; M5 Synthetic Qualification Complete (`1/5/25/50/100` calls, `PR #35`/`#36`; full M5 depends on live external integrations); M6 Complete (`v0.1.0a1` & `v0.1.0a2` published alphas); **`v0.1.0b1` Public Beta** published to GitHub Releases & PyPI on 2026-11-16 (`PR #55`).
-> **Project phase:** `MAINTENANCE — INTEGRATION PENDING` (Public Beta `v0.1.0b1` released; Kaiwen Agent, Kaiwen Speech, and Verimor integrations deferred)
+> **Status:** `MAINTENANCE — INTEGRATION PENDING` (2026-11-19) — M0–M3, S1/S1-R2, M4-R1..R4 (`LIVE_VERIFIED` OpenAI Realtime & GPT-Live adapters), M5 Synthetic Qualification, M6 (`v0.1.0a1`, `v0.1.0a2`), `v0.1.0b1` Public Beta (`PR #55`), Events `D0`–`E4` (`PR #58`–`#62`), Notifications `N0`–`N4` (`PR #64`–`#72`), and Combined Beta Integration Acceptance (`PR #74`) Complete; **`v0.1.0b2` Experimental Beta** published to GitHub Releases & PyPI on 2026-11-19 (`6865d29`, `PR #77`).
+> **Project phase:** `MAINTENANCE — INTEGRATION PENDING` (Experimental Beta `v0.1.0b2` released; Kaiwen Agent, Kaiwen Speech, and Verimor integrations deferred)
 > **Latest published release:** `v0.1.0b2` (**Core + Voice + Events + Notifications Beta**, 2026-11-19, commit `6865d29`; superseding `v0.1.0b1`, `v0.1.0a2`, and `v0.1.0a1`; tracked beta limitations `#68`, `#75`, `#76`)
 > **Last reviewed:** 2026-11-19
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`

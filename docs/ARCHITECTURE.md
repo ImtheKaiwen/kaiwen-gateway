@@ -1,6 +1,6 @@
 # Kaiwen Gateway — V1 Architecture
 
-> **Status:** V1 Architecture Baseline (`ADR-0001`..`ADR-0005` accepted; public beta `v0.1.0b1` released; `main` in `MAINTENANCE — INTEGRATION PENDING`)
+> **Status:** V1 Architecture Baseline + Post-Beta Events (`ADR-0006`) & Notifications (`ADR-0007`) (`v0.1.0b2` experimental beta published; `main` in `MAINTENANCE — INTEGRATION PENDING`)
 > **Document version:** 1.0
 > **Latest published release:** `0.1.0b2` (Experimental Public Beta — Core + Voice + Events `ADR-0006` + Notifications `ADR-0007`; superseding `0.1.0b1`; combined beta acceptance in `docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md`)
 > **Last updated:** 2026-11-19
@@ -453,9 +453,9 @@ Future ADRs only when justified: audio bypasses general event bus; verified iden
 
 **Exit criteria for architecture review:** ownership boundaries are accepted, each trust boundary has an owner, no unverified provider wire format has entered Core, V1 non-goals remain excluded, and every P0 acceptance scenario can be mapped to a component and test. Record approval and relevant ADRs before expanding implementation scope.
 
-## 13. Post-Beta Events Architecture (`D0` Accepted Baseline — `E1`–`E4` Not Started)
+## 13. Post-Beta Events & Notifications Architecture (`E1`–`E4` & `N0`–`N4` Complete — Published in `v0.1.0b2`)
 
-> **Implementation status:** **Voice** remains the **only implemented communication module** in `v0.1.0b1`. The Events architecture summarized here is an **`Accepted`** `D0` design baseline ([`EVENTS_MODULE_DESIGN.md`](EVENTS_MODULE_DESIGN.md), [`ADR-0006`](decisions/0006-events-module-architecture.md)), while implementation milestones `E1`–`E4` remain **`Not started`**.
+> **Implementation status:** Historically in V1 (`v0.1.0b1`), **Voice** was the only implemented communication module. In **`v0.1.0b2`** (published 2026-11-19), both **Events (`E1`–`E4`)** ([`EVENTS_MODULE_DESIGN.md`](EVENTS_MODULE_DESIGN.md), [`ADR-0006`](decisions/0006-events-module-architecture.md)) and **Notifications (`N0`–`N4`)** ([`NOTIFICATIONS_MODULE_DESIGN.md`](NOTIFICATIONS_MODULE_DESIGN.md), [`ADR-0007`](decisions/0007-notifications-module-architecture.md)) are **Complete** and verified together with Core and Voice in [`GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md`](GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md) (PR #74).
 
 - **Module Boundary (`src/kaiwen_gateway/modules/events/`):** Registers with `GatewayCore` as a `GatewayModule` (`module_id="events"`), sharing `ModuleLifecycleManager`, `AdmissionController` (via additive `VerifiedPrincipalContext` / `PrincipalAdmissionLease`, leaving Voice `AdmissionLease.call_id: str` intact), and `gateway_lifespan` drain orchestration without placing a generic event bus inside `kaiwen_gateway.core`.
 - **Transport Boundary (`src/kaiwen_gateway/transports/events/`):** Exposes `/ws/events/v1` via explicit fail-closed `events_ingress_mode="authenticated"` + `enable_events=True` + injected `events_authenticator`/`events_authorizer` (independent of Voice ingress), supporting `Authorization: Bearer` and application-issued single-use browser WebSocket tickets.

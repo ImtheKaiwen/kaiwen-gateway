@@ -1,9 +1,9 @@
 # Kaiwen Gateway — V1 Requirements
 
-> **Status:** V1 Requirements Baseline (public beta `v0.1.0b1` released; `main` in `MAINTENANCE — INTEGRATION PENDING`)
+> **Status:** V1 Requirements Baseline + Post-Beta Events & Notifications (`v0.1.0b2` experimental beta published; `main` in `MAINTENANCE — INTEGRATION PENDING`)
 > **Document version:** 1.0
-> **Latest published release:** `0.1.0b1` (Public Beta — Gateway Core + OpenAI Voice Adapters)
-> **Last updated:** 2026-11-16
+> **Latest published release:** `0.1.0b2` (Experimental Public Beta — Core + Voice + Events + Notifications; superseding `0.1.0b1`)
+> **Last updated:** 2026-11-19
 > **Scope:** Reusable Python library + deployable ASGI service; Voice is the only implemented communication module in V1.
 
 ## 1. Purpose and document rules
@@ -318,9 +318,9 @@ Do not resolve any `OPEN-*` item by an unsupported assumption. For each closure,
 
 ---
 
-## 10. Post-Beta Events Module Requirements (`D0` Accepted Baseline)
+## 10. Post-Beta Events & Notifications Module Requirements (`E1`–`E4` & `N0`–`N4` Complete — Published in `v0.1.0b2`)
 
-> **Status:** `Accepted` design baseline (`D0`, `E1`, `E2` Complete; `E3` In review; `E4` **`Not started`**; **Voice** remains the only communication module released in `v0.1.0b1`). See [`EVENTS_MODULE_DESIGN.md`](EVENTS_MODULE_DESIGN.md) and [`ADR-0006`](decisions/0006-events-module-architecture.md).
+> **Status:** `Accepted` and **Complete** (`D0` & `E1`–`E4` Complete; Notifications `N0`–`N4` Complete; published in `v0.1.0b2`, superseding `v0.1.0b1` where Voice was the only released module). See [`EVENTS_MODULE_DESIGN.md`](EVENTS_MODULE_DESIGN.md), [`ADR-0006`](decisions/0006-events-module-architecture.md), [`NOTIFICATIONS_MODULE_DESIGN.md`](NOTIFICATIONS_MODULE_DESIGN.md), and [`ADR-0007`](decisions/0007-notifications-module-architecture.md).
 
 | ID | Category | Requirement | Verifiable Acceptance Criterion |
 | --- | --- | --- | --- |

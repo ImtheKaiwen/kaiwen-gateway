@@ -1,7 +1,7 @@
 # Kaiwen Gateway — Events Module Design Specification (`D0` Accepted Baseline)
 
-> **Status:** `Accepted` (`D0` Architectural Baseline; **`E1` & `E2` Complete** on `main` `141c243`; **`E3` In review** on `feat/e3-events-redis-pubsub`; **`E4` `Not started`**)
-> **Baseline Reference:** `kaiwen-gateway v0.1.0b1` (`main` `91ee612fdfc179b94945ec9cde332748de57ea56`; **Voice** is the only implemented communication module)
+> **Status:** `Accepted` — **Current implementation note (2026-11-19):** Events `E1`–`E4` are **Complete** and included in published experimental beta **`v0.1.0b2`** (combined acceptance in [`docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md`](GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md)).
+> **Historical Baseline Reference (`D0`):** `kaiwen-gateway v0.1.0b1` (`main` `91ee612fdfc179b94945ec9cde332748de57ea56`; **Voice** was the only implemented communication module at `D0` authoring time)
 > **Related ADR:** [ADR-0006 — Events Module Architecture (`Accepted`)](decisions/0006-events-module-architecture.md)
 > **Related Docs:** [Architecture](ARCHITECTURE.md) · [Requirements](REQUIREMENTS.md) · [Roadmap](../ROADMAP.md) · [Public API Policy](PUBLIC_API_AND_COMPATIBILITY.md)
 
@@ -46,7 +46,7 @@ src/kaiwen_gateway/
 └── server/                       # Composition root (app.py, lifespan.py)
 ```
 
-Optional dependencies (`redis>=5,<6` or similar) will be gated behind `kaiwen-gateway[redis]` in a future `E3` milestone. Importing `kaiwen_gateway`, `kaiwen_gateway.core`, or `kaiwen_gateway.modules.voice` must never require or import `redis`.
+Optional Redis dependencies (`redis>=5.0,<7` in `pyproject.toml`) are gated behind `kaiwen-gateway[redis]` (`E3`–`E4`, included in `v0.1.0b2`). Importing `kaiwen_gateway`, `kaiwen_gateway.core`, or `kaiwen_gateway.modules.voice` must never require or import `redis`.
 
 ### 2.2 Dependency Diagram
 
