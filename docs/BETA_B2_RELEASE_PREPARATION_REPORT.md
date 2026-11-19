@@ -2,7 +2,7 @@
 
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
 > **Verified Starting `main` HEAD:** `20e97282423ed3710c68a7ec9523f68aa3754661` (PR #74 merged, post-merge Fast CI `44476116177` passed)
-> **Candidate Branch:** `chore/beta-b2-release-prep`
+> **Candidate Branch & Draft PR:** `chore/beta-b2-release-prep` — [Draft PR #77](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/77) (unmerged)
 > **Target Candidate Version:** `0.1.0b2` (**NOT YET PUBLISHED** — preparation only; latest published release on PyPI & GitHub Releases remains `v0.1.0b1`)
 > **Experimental Beta Disclaimer:** Experimental beta — **production use is not supported**. No SLA, multi-host WAN/TLS load qualification, or live Kaiwen Agent / Kaiwen Speech / Verimor interoperability is claimed.
 
@@ -110,7 +110,9 @@
   - Caught **1 P0 CI blocker** (5 hardcoded `0.1.0b1` wheel/version lines in `.github/workflows/ci.yml`) — **resolved** by updating all 5 lines to `0.1.0b2`.
   - **0 P1** findings; **2 P2** items (report placeholders filled here; optional future `release.yml` wheel inspection assertions noted as non-blocking).
   - Confirmed zero security, public API, or release-workflow regressions.
-- **GitHub Actions Fast CI (Draft PR on exact candidate HEAD):** Verified across `Quality & Tests (Python 3.11)`, `Quality & Tests (Python 3.12)`, `Quality & Tests (Python 3.13)`, and `Package Build & Clean Wheel Smoke Test`.
+- **GitHub Actions Fast CI (Draft PR #77):**
+  - Initial candidate HEAD `815625bdb98916b2d21b3df4abbfa65d746808a4`: **4/4 PASSED** in run [`44479900075`](https://github.com/ImtheKaiwen/kaiwen-gateway/actions/runs/44479900075) (`Package Build & Clean Wheel Smoke Test` 14s, `Quality & Tests (Python 3.11)` 2m45s, `Quality & Tests (Python 3.12)` 2m46s, `Quality & Tests (Python 3.13)` 2m44s).
+  - Subsequent documentation-consistency commit triggers a fresh Fast CI run on the updated PR #77 HEAD (reported with exact SHA and run URL on Draft PR #77; earlier run `44479900075` is strictly scoped to `815625bdb98916b2d21b3df4abbfa65d746808a4`).
 
 ---
 

@@ -1,7 +1,7 @@
 # Kaiwen Gateway — Public API Surface and Compatibility Policy
 
-> **Status:** Active Beta Reference (Published: `v0.1.0b1` on PyPI & GitHub Releases; Candidate prepared: `v0.1.0b2` — **NOT YET PUBLISHED**)
-> **Applies to:** `kaiwen-gateway` (`0.1.0b2` candidate on `main`, preserving `0.1.0b1` compatibility)
+> **Status:** Active Beta Reference (Published: `v0.1.0b1` on PyPI & GitHub Releases; Candidate prepared in Draft PR #77: `v0.1.0b2` — **NOT YET PUBLISHED**)
+> **Applies to:** `kaiwen-gateway` (`0.1.0b2` candidate prepared in Draft PR #77, not yet merged to `main`, preserving `0.1.0b1` compatibility)
 
 This document defines the supported public API surface, versioning model, compatibility expectations, internal boundaries, and provider adapter ownership rules for Kaiwen Gateway.
 
