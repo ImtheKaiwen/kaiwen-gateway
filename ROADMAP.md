@@ -316,7 +316,7 @@ Milestone IDs are stable; do not renumber completed milestones. Update the statu
 
 ### Post-Beta Notifications Initiative (`N0`–`N4`, `ADR-0007 Accepted` — Does Not Alter V1 Voice Baseline)
 
-> **Status note:** [`ADR-0007`](docs/decisions/0007-notifications-module-architecture.md) and [`docs/NOTIFICATIONS_MODULE_DESIGN.md`](docs/NOTIFICATIONS_MODULE_DESIGN.md) are **Accepted** (`N0 Complete` 2026-11-18). Milestones `N1`–`N4` remain `Not started` until separately authorized.
+> **Status note:** [`ADR-0007`](docs/decisions/0007-notifications-module-architecture.md) and [`docs/NOTIFICATIONS_MODULE_DESIGN.md`](docs/NOTIFICATIONS_MODULE_DESIGN.md) are **Accepted**, and milestones `N0`–`N4` are **Complete** and published in experimental beta **`v0.1.0b2`** (2026-11-19).
 
 #### N0 — Notifications Architecture & Contracts (`Complete`)
 - **Scope:** Architecture, domain contracts (`NotificationEnvelope`, `NotificationPreferencePort`, `NotificationChannelPort`), 6-stage ACK separation, `/ws/events/v1` transport reuse evaluation, security threat model, Core/Voice/Events compatibility assessment, and `N1`–`N4` roadmap.
@@ -474,6 +474,7 @@ A future idea becomes committed scope **only after** the maintainer approves an 
 | 2026-11-15 | Final Closeout & Maintenance Freeze: entered `MAINTENANCE — INTEGRATION PENDING`, replaced hardcoded `0.1.0a1` version in `.github/workflows/release.yml` (`PR #50`), independently verified `v0.1.0a1` on PyPI, audited `main` branch protection, and recorded deferred Dependabot backlog (`#5, #6, #7, #25, #44, #45, #46`) | `MAINTENANCE — INTEGRATION PENDING` |
 | 2026-11-15 | Released `v0.1.0a2` Synthetic Alpha (`PR #51` / `26f7034`): published GitHub prerelease `v0.1.0a2` and PyPI `kaiwen-gateway==0.1.0a2` via OIDC Trusted Publishing (`Release` run `43744346608`), including `S1`/`S1-R2` drain safety, `M4-R1` conformance suite, and `MOCK_VERIFIED` OpenAI Realtime adapter | `Complete` (`v0.1.0a2` published; `MAINTENANCE — INTEGRATION PENDING` preserved) |
 | 2026-11-16 | Completed M4-R4 OpenAI GPT-Live Adapter Integration & Published `v0.1.0b1` Public Beta (`PR #54`, `PR #55` / `3a3b5f2`): implemented `kaiwen_gateway.adapters.openai_gpt_live` (`LIVE_VERIFIED` & `MOCK_VERIFIED` on `gpt-live-1`), verified both OpenAI voice adapters end-to-end through `VoiceBridgeSession`, and published GitHub prerelease `v0.1.0b1` and PyPI `kaiwen-gateway==0.1.0b1` via OIDC Trusted Publishing (`Release` run `43928772418`) | `Complete` (`v0.1.0b1` published; `MAINTENANCE — INTEGRATION PENDING` preserved) |
+| 2026-11-19 | Completed Events (`E1`–`E4`, `PR #58`–`#62`), Notifications (`N0`–`N4`, `PR #64`–`#72`), Combined Beta Integration Acceptance (`PR #74`), and Published `v0.1.0b2` Experimental Beta (`PR #77` / `6865d29`): published GitHub prerelease `v0.1.0b2` and PyPI `kaiwen-gateway==0.1.0b2` via OIDC Trusted Publishing (`Release` run `44485209352`) | `Complete` (`v0.1.0b2` published; tracked beta limitations `#68`, `#75`, `#76`) |
 
 ---
 
@@ -490,7 +491,8 @@ Development is temporarily paused at a verified, maintainable baseline (not proj
 - **Drain Safety:** `InstanceDrainCoordinator` and fail-closed `DrainReport` lifespan verification (`PR #48`).
 - **Synthetic Load & Conformance Testing:** 1/5/25/50/100 call synthetic qualification and `RealtimeAdapterConformanceSuite` (`main`).
 - **OpenAI Voice Adapters (`LIVE_VERIFIED` & `MOCK_VERIFIED`):** `kaiwen_gateway.adapters.openai_realtime` (`PR #49`, `PR #53`) and `kaiwen_gateway.adapters.openai_gpt_live` (`PR #54`).
-- **Packaging & Release Baseline:** `v0.1.0b1` (Public Beta) and historical alphas `v0.1.0a2` / `v0.1.0a1` published on GitHub Releases and PyPI (independently verified via PyPI JSON API); dynamic version inspection in `.github/workflows/release.yml`.
+- **Events & Notifications Modules (`v0.1.0b2`):** Events `E1`–`E4` (`/ws/events/v1`, optional `[redis]` Pub/Sub & Streams), Notifications `N0`–`N4` (mandatory recipient isolation, durable delivery & recovery), and Combined Beta Integration Acceptance (`PR #74`).
+- **Packaging & Release Baseline:** `v0.1.0b2` (Experimental Beta), `v0.1.0b1` (historical Voice Beta), and historical alphas `v0.1.0a2` / `v0.1.0a1` published on GitHub Releases and PyPI; dynamic version inspection in `.github/workflows/release.yml`.
 
 ### Pending Integrations & Gates
 - **Kaiwen Agent Integration:** Alignment with `kaiwen-agent` public realtime APIs.

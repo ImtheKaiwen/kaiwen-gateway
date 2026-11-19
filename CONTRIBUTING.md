@@ -5,7 +5,7 @@
 > **Phase:** `MAINTENANCE — INTEGRATION PENDING` (Experimental Beta `v0.1.0b2` released — **Core + Voice + Events + Notifications Beta**, superseding `v0.1.0b1`, `v0.1.0a2`, and `v0.1.0a1`)
 > **Latest published release:** `v0.1.0b2` (PyPI & GitHub Releases)
 > **Document status:** Active contributor guide (accepted 2026-11-01; updated 2026-11-16)
-> **Last reviewed:** 2026-11-16
+> **Last reviewed:** 2026-11-19
 
 Thank you for your interest in Kaiwen Gateway. This guide describes how to propose, develop, test, review, and document changes to the project. It applies to human contributors and complements the [coding-agent instructions](AGENTS.md). It does **not** grant permission to use production systems, customer data, paid AI services, or release credentials.
 

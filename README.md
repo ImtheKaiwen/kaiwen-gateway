@@ -248,7 +248,7 @@ uv build
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Hexagonal architecture, ports, adapters, and data flow. |
 | [`docs/guides/OPENAI_REALTIME_ADAPTER.md`](docs/guides/OPENAI_REALTIME_ADAPTER.md) | OpenAI Realtime (`wss://api.openai.com/v1/realtime`, `gpt-realtime`) adapter guide and capability matrix. |
 | [`docs/guides/OPENAI_GPT_LIVE_ADAPTER.md`](docs/guides/OPENAI_GPT_LIVE_ADAPTER.md) | OpenAI GPT-Live (`wss://api.openai.com/v1/live/sessions`, `gpt-live-1`) adapter guide and capability matrix. |
-| [`docs/decisions/`](docs/decisions/) | Numbered Architecture Decision Records (`ADR-0001` through `ADR-0005`). |
+| [`docs/decisions/`](docs/decisions/) | Numbered Architecture Decision Records (`ADR-0001` through `ADR-0007`). |
 | [`SECURITY.md`](SECURITY.md) | Security policy and vulnerability disclosure instructions. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Development workflow and PR submission standards. |
 | [`AGENTS.md`](AGENTS.md) | Rules and verification protocols for autonomous coding agents. |
