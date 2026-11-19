@@ -8,10 +8,14 @@ execution, slow-consumer isolation, and graceful shutdown under active mixed wor
 from __future__ import annotations
 
 import asyncio
+import json
+import socket
 import time
 from typing import Any
 
 import pytest
+import uvicorn
+import websockets
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -20,6 +24,7 @@ from kaiwen_gateway.core import (
     AdmissionController,
     CoreConfig,
     CoreConfigurationError,
+    DrainPolicy,
     GatewayCore,
     ModuleDescriptor,
     ProviderPrincipal,
@@ -37,6 +42,7 @@ from kaiwen_gateway.modules.notifications import (
     NOTIFICATIONS_SCHEMA_VERSION,
     InMemoryNotificationPreferenceStore,
     InMemoryNotificationsTelemetrySink,
+    NotificationAuthorizationError,
     NotificationEnvelope,
     NotificationPriority,
     NotificationsModule,
@@ -734,3 +740,220 @@ def test_phase5_slow_events_subscriber_isolated_from_healthy_and_voice() -> None
             ):
                 time.sleep(0.02)
             assert app.state.events_module.broker.stats().active_connections == 1
+
+
+# ---------------------------------------------------------------------------
+# R1 Evidence Closure: Active Mixed-Workload Graceful Shutdown & Producer Auth
+# ---------------------------------------------------------------------------
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@pytest.mark.anyio
+async def test_r1_phase1_graceful_asgi_shutdown_under_active_mixed_workload() -> None:
+    """Verify genuine ASGI lifespan graceful shutdown while Voice + Events + worker are active."""
+    worker_cancelled = False
+
+    class _BackgroundWorkerModule:
+        def __init__(self) -> None:
+            self._descriptor = ModuleDescriptor(
+                module_id="test_notif_worker",
+                contract_version=CORE_CONTRACT_VERSION,
+                description="Simulated durable worker loop for active shutdown check",
+            )
+            self._task: asyncio.Task[None] | None = None
+
+        @property
+        def descriptor(self) -> ModuleDescriptor:
+            return self._descriptor
+
+        async def _loop(self) -> None:
+            nonlocal worker_cancelled
+            try:
+                while True:
+                    await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                worker_cancelled = True
+                raise
+
+        async def startup(self) -> None:
+            self._task = asyncio.create_task(self._loop(), name="r1-active-shutdown-worker")
+
+        async def shutdown(self) -> None:
+            if self._task is not None:
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
+                self._task = None
+
+    cfg = CoreConfig(
+        instance_name="r1-active-shutdown",
+        ingress_mode="synthetic",
+        events_ingress_mode="authenticated",
+    )
+    bridge = _make_voice_bridge()
+    principals = {"tok-t1-u1": _make_principal("tenant-a", "user-1")}
+    core = compose_gateway_core(config=cfg, modules=[_BackgroundWorkerModule()])
+    app = create_gateway_app(
+        cfg,
+        core=core,
+        drain_policy=DrainPolicy(grace_period=1.5, force_close_timeout=1.5),
+        synthetic_auth_bridge=bridge,
+        enable_synthetic_media=True,
+        ai_media_port_factory=lambda: BoundedInterruptibleFakeAIEchoPort(),
+        enable_events=True,
+        events_authenticator=_TokenMapEventsAuth(principals),
+        events_authorizer=_TokenMapEventsAuthorizer(principals),
+        events_topic_authorizer=NotificationsTopicAuthorizer(),
+        enable_notifications=True,
+        notifications_module=NotificationsModule(
+            preference_port=InMemoryNotificationPreferenceStore(),
+            producer_authorizer=_AllowAllProducerAuth(),
+            telemetry=InMemoryNotificationsTelemetrySink(),
+        ),
+    )
+
+    port = _free_port()
+    server = uvicorn.Server(
+        uvicorn.Config(app=app, host="127.0.0.1", port=port, log_level="warning")
+    )
+    serve_task = asyncio.create_task(server.serve(), name="r1-uvicorn-serve")
+
+    try:
+        deadline = time.monotonic() + 10.0
+        while not server.started and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert server.started is True
+
+        v_tok = _make_voice_token(bridge, tenant_id="tenant-a", call_id="call-shutdown-1")
+        u1_topic = derive_recipient_topic("tenant-a", "user-1")
+
+        # Keep BOTH Voice and Events WebSocket sessions actively open when shutdown begins
+        vws = await websockets.connect(
+            f"ws://127.0.0.1:{port}{SYNTHETIC_MEDIA_WS_ENDPOINT_PATH}",
+            additional_headers={"Authorization": f"Bearer {v_tok}"},
+        )
+        ews = await websockets.connect(
+            f"ws://127.0.0.1:{port}/ws/events/v1",
+            additional_headers={"Authorization": "Bearer tok-t1-u1"},
+        )
+        try:
+            assert json.loads(await vws.recv())["event"] == EVENT_SESSION_READY
+            assert json.loads(await ews.recv())["type"] == "session.ready"
+            await ews.send(
+                json.dumps(
+                    {
+                        "type": "events.subscribe",
+                        "protocol_version": "v1",
+                        "topic": u1_topic,
+                        "request_id": "sub-active-shutdown",
+                    }
+                )
+            )
+            assert json.loads(await ews.recv())["type"] == "events.subscribed"
+            await vws.send(json.dumps({"event": EVENT_CALL_START, "call_id": "call-shutdown-1"}))
+            assert json.loads(await vws.recv())["event"] == EVENT_CALL_STARTED
+
+            pcm = b"\x07\x08" * (PCM16LE_FRAME_BYTES // 2)
+            await vws.send(pcm)
+            assert await vws.recv() == pcm
+
+            assert app.state.admission_controller.snapshot().active_connections == 2
+
+            # Initiate graceful ASGI shutdown while both connections & worker are active
+            t_shutdown = time.perf_counter()
+            server.should_exit = True
+            await asyncio.wait_for(serve_task, timeout=6.0)
+            shutdown_elapsed_s = time.perf_counter() - t_shutdown
+            assert shutdown_elapsed_s < 5.0
+        finally:
+            await vws.close()
+            await ews.close()
+    finally:
+        if not serve_task.done():
+            server.should_exit = True
+            await asyncio.wait_for(serve_task, timeout=5.0)
+
+    # Verify clean draining, lease release, module teardown, and worker cancellation
+    assert worker_cancelled is True
+    assert app.state.stopped is True
+    assert app.state.shutdown_failed is False
+    report = app.state.drain_coordinator.report
+    assert report is not None
+    assert report.unresolved_connections == 0
+    assert report.active_leases_remaining == 0
+    assert app.state.admission_controller.snapshot().active_connections == 0
+    assert app.state.events_module.broker.is_closed is True
+    assert app.state.notifications_module.is_closed is True
+    surviving = [
+        t
+        for t in asyncio.all_tasks()
+        if not t.done() and "r1-active-shutdown-worker" in t.get_name()
+    ]
+    assert surviving == []
+
+
+def test_r1_phase5_unauthorized_notification_publication_rejected() -> None:
+    """Verify default DenyAllProducerAuthorizer and cross-tenant producer rejection fail closed."""
+    # 1) Default NotificationsModule (no custom producer_authorizer -> DenyAllProducerAuthorizer)
+    cfg = CoreConfig(
+        ingress_mode="synthetic",
+        events_ingress_mode="authenticated",
+    )
+    bridge = _make_voice_bridge()
+    principals = {"tok-t1-u1": _make_principal("tenant-a", "user-1")}
+    app_default = create_gateway_app(
+        cfg,
+        synthetic_auth_bridge=bridge,
+        enable_synthetic_media=True,
+        ai_media_port_factory=lambda: BoundedInterruptibleFakeAIEchoPort(),
+        enable_events=True,
+        events_authenticator=_TokenMapEventsAuth(principals),
+        events_authorizer=_TokenMapEventsAuthorizer(principals),
+        events_topic_authorizer=NotificationsTopicAuthorizer(),
+        enable_notifications=True,
+    )
+    notif = NotificationEnvelope(
+        notification_id=generate_notification_id(),
+        schema_version=NOTIFICATIONS_SCHEMA_VERSION,
+        tenant_id="tenant-a",
+        recipient_id="user-1",
+        category="system.alert",
+        notification_type="alert.unauth",
+        priority=NotificationPriority.HIGH,
+        payload={"msg": "must be denied"},
+        created_at="2026-11-18T20:00:00Z",
+    )
+    with TestClient(app_default):
+        with pytest.raises(NotificationAuthorizationError):
+            asyncio.run(
+                app_default.state.notifications_dispatcher.publish(
+                    notif,
+                    producer=_make_principal(
+                        "tenant-a", "svc-unauth", scopes=frozenset({"notifications:publish"})
+                    ),
+                )
+            )
+
+    # 2) Cross-tenant producer rejected even when custom tenant authorizer is configured
+    app_custom, _ = _build_full_stack_app(
+        enable_voice=True,
+        enable_events=True,
+        enable_notifications=True,
+    )
+    with TestClient(app_custom):
+        with pytest.raises((NotificationAuthorizationError, EventAuthorizationError)):
+            asyncio.run(
+                app_custom.state.notifications_dispatcher.publish(
+                    notif,
+                    producer=_make_principal(
+                        "tenant-b", "svc-other-tenant", scopes=frozenset({"notifications:publish"})
+                    ),
+                )
+            )

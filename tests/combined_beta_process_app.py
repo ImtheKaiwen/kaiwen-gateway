@@ -3,12 +3,19 @@
 Launches an independent Gateway OS process via `uvicorn --factory` configured with
 Core + Voice + Events + Notifications, Redis Pub/Sub broker, and optional competing
 NotificationsDurableWorker.
+
+Note: The ``/_test/*`` HTTP routes added by this module exist strictly for test-harness
+control and telemetry collection and are NOT part of the documented public Gateway API
+or built wheel distributions.
 """
 
 from __future__ import annotations
 
+import asyncio
+import collections
 import os
 import sys
+import time
 from typing import Any
 
 from starlette.requests import Request
@@ -29,6 +36,7 @@ from kaiwen_gateway.modules.events import (
     EVENTS_PROTOCOL_VERSION,
     EventAuthorizationError,
     EventEnvelope,
+    EventsBackendUnavailableError,
     EventsModule,
 )
 from kaiwen_gateway.modules.events.redis import (
@@ -159,7 +167,7 @@ class _AllowTenantProducerAuth:
 
 
 class _DurableWorkerModule:
-    """Lifecycle-managed NotificationsDurableWorker wrapper for multi-process tests."""
+    """Lifecycle-managed NotificationsDurableWorker + server loop-lag probe for tests."""
 
     def __init__(
         self,
@@ -173,17 +181,43 @@ class _DurableWorkerModule:
         )
         self._store = store
         self._worker = worker
+        self._lag_samples_ms: collections.deque[float] = collections.deque(maxlen=2000)
+        self._lag_task: asyncio.Task[None] | None = None
 
     @property
     def descriptor(self) -> ModuleDescriptor:
         return self._descriptor
 
+    @property
+    def lag_samples_ms(self) -> list[float]:
+        return list(self._lag_samples_ms)
+
+    async def _probe_server_loop_lag(self) -> None:
+        interval = 0.02
+        while True:
+            t0 = time.perf_counter()
+            await asyncio.sleep(interval)
+            lag_ms = max(0.0, (time.perf_counter() - t0 - interval) * 1000.0)
+            self._lag_samples_ms.append(lag_ms)
+
     async def startup(self) -> None:
         await self._store.startup()
         if self._worker is not None:
             self._worker.start()
+        if self._lag_task is None:
+            self._lag_task = asyncio.create_task(
+                self._probe_server_loop_lag(),
+                name="test-server-loop-lag-probe",
+            )
 
     async def shutdown(self) -> None:
+        if self._lag_task is not None:
+            self._lag_task.cancel()
+            try:
+                await self._lag_task
+            except asyncio.CancelledError:
+                pass
+            self._lag_task = None
         if self._worker is not None:
             await self._worker.stop()
         await self._store.shutdown()
@@ -243,7 +277,8 @@ def build_process_app() -> Any:
             telemetry=notif_telemetry,
             durable_telemetry=durable_telemetry,
         )
-    modules: list[Any] = [events_mod, notif_mod, _DurableWorkerModule(durable_store, worker)]
+    worker_mod = _DurableWorkerModule(durable_store, worker)
+    modules: list[Any] = [events_mod, notif_mod, worker_mod]
 
     cfg = CoreConfig(
         instance_name=instance_id,
@@ -294,7 +329,10 @@ def build_process_app() -> Any:
             timestamp="2026-11-18T20:00:00Z",
             payload=body["payload"],
         )
-        res = await broker.publish(env)
+        try:
+            res = await broker.publish(env)
+        except EventsBackendUnavailableError:
+            return JSONResponse({"error": "backend_unavailable"}, status_code=503)
         return JSONResponse(
             {"accepted": res.accepted, "delivered_subscribers": res.delivered_subscribers}
         )
@@ -325,18 +363,39 @@ def build_process_app() -> Any:
             }
         )
 
+    def _pct(sorted_vals: list[float], pct: float) -> float:
+        if not sorted_vals:
+            return 0.0
+        idx = min(
+            len(sorted_vals) - 1,
+            max(0, int(round((pct / 100.0) * (len(sorted_vals) - 1)))),
+        )
+        return sorted_vals[idx]
+
     async def _test_stats(request: Request) -> JSONResponse:
         snap = durable_telemetry.snapshot()
+        lag_sorted = sorted(worker_mod.lag_samples_ms)
+        worker_tasks = [
+            t
+            for t in asyncio.all_tasks()
+            if not t.done() and "gw-notif-durable" in t.get_name().lower()
+        ]
         return JSONResponse(
             {
                 "instance_id": instance_id,
                 "broker_healthy": broker.is_healthy,
                 "broker_active_connections": broker.stats().active_connections,
+                "worker_running": bool(worker is not None and worker.is_running),
+                "worker_consumer": worker.config.consumer if worker is not None else None,
+                "worker_task_count": len(worker_tasks),
                 "worker_processed": snap.worker_processed,
                 "worker_acked": snap.worker_acked,
                 "worker_reclaimed": snap.worker_reclaimed,
                 "worker_deduplicated": snap.worker_deduplicated,
                 "rss_bytes": _get_process_rss_bytes(),
+                "server_loop_lag_samples": len(lag_sorted),
+                "server_loop_lag_p50_ms": round(_pct(lag_sorted, 50.0), 3),
+                "server_loop_lag_p95_ms": round(_pct(lag_sorted, 95.0), 3),
             }
         )
 

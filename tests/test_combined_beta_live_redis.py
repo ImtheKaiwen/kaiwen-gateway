@@ -840,3 +840,427 @@ async def test_phase5_worker_crash_before_and_after_dispatch_before_xack() -> No
         finally:
             await store.shutdown()
             await broker.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# R1 Evidence Closure: Competing Workers, 20ms Paced Voice + In-Flight Interrupt,
+# Server-Side Loop Lag, and Idle Redis Readiness Characterization
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_r1_phase2_competing_workers_individual_processing_and_bounded_loops() -> None:
+    """Deterministically prove both independent workers process from one consumer group."""
+    redis_url = os.environ["KAIWEN_TEST_REDIS_URL"]
+    run_id = uuid.uuid4().hex[:8]
+    key_prefix = f"kwr1w{run_id}"
+    group_name = f"{key_prefix}-group"
+    id1 = f"gw-1-{run_id}"
+    id2 = f"gw-2-{run_id}"
+    port1 = _get_free_port()
+    port2 = _get_free_port()
+
+    proc1: subprocess.Popen[str] | None = None
+    proc2: subprocess.Popen[str] | None = None
+    proc1_restarted: subprocess.Popen[str] | None = None
+
+    async with _redis_cleanup(redis_url, key_prefix):
+        try:
+            # Phase A: Only gw-1 runs -> deterministically processes 5 notifications
+            proc1 = _start_gateway_process(
+                port=port1,
+                instance_id=id1,
+                redis_url=redis_url,
+                key_prefix=key_prefix,
+            )
+            for idx in range(5):
+                res = await asyncio.to_thread(
+                    _http_post_json,
+                    f"http://127.0.0.1:{port1}/_test/publish-notification",
+                    {
+                        "notification_id": generate_notification_id(),
+                        "tenant_id": "tenant-alpha",
+                        "recipient_id": "user-1",
+                        "payload": {"phase": "A", "idx": idx},
+                    },
+                )
+                assert res["status"] == "durable_accepted"
+
+            deadline = time.monotonic() + 8.0
+            stats1: dict[str, Any] = {}
+            while time.monotonic() < deadline:
+                stats1 = _http_get_json(f"http://127.0.0.1:{port1}/_test/stats")[1]
+                if stats1["worker_acked"] == 5:
+                    break
+                await asyncio.sleep(0.05)
+            assert stats1["worker_running"] is True
+            assert stats1["worker_consumer"] == id1
+            assert stats1["worker_acked"] == 5
+            assert stats1["worker_task_count"] == 2
+
+            # Phase B: Start gw-2, stop gw-1 -> gw-2 deterministically processes 5 notifications
+            proc2 = _start_gateway_process(
+                port=port2,
+                instance_id=id2,
+                redis_url=redis_url,
+                key_prefix=key_prefix,
+            )
+            _stop_gateway_process(proc1)
+            proc1 = None
+
+            for idx in range(5):
+                res = await asyncio.to_thread(
+                    _http_post_json,
+                    f"http://127.0.0.1:{port2}/_test/publish-notification",
+                    {
+                        "notification_id": generate_notification_id(),
+                        "tenant_id": "tenant-alpha",
+                        "recipient_id": "user-1",
+                        "payload": {"phase": "B", "idx": idx},
+                    },
+                )
+                assert res["status"] == "durable_accepted"
+
+            deadline = time.monotonic() + 8.0
+            stats2: dict[str, Any] = {}
+            while time.monotonic() < deadline:
+                stats2 = _http_get_json(f"http://127.0.0.1:{port2}/_test/stats")[1]
+                if stats2["worker_acked"] == 5:
+                    break
+                await asyncio.sleep(0.05)
+            assert stats2["worker_running"] is True
+            assert stats2["worker_consumer"] == id2
+            assert stats2["worker_acked"] == 5
+            assert stats2["worker_task_count"] == 2
+
+            # Phase C: Both gw-1 (restarted) and gw-2 run concurrently on the same consumer group
+            port1b = _get_free_port()
+            proc1_restarted = _start_gateway_process(
+                port=port1b,
+                instance_id=id1,
+                redis_url=redis_url,
+                key_prefix=key_prefix,
+            )
+            for idx in range(20):
+                res = await asyncio.to_thread(
+                    _http_post_json,
+                    f"http://127.0.0.1:{port1b}/_test/publish-notification",
+                    {
+                        "notification_id": generate_notification_id(),
+                        "tenant_id": "tenant-alpha",
+                        "recipient_id": "user-1",
+                        "payload": {"phase": "C", "idx": idx},
+                    },
+                )
+                assert res["status"] == "durable_accepted"
+
+            deadline = time.monotonic() + 10.0
+            s1b: dict[str, Any] = {}
+            s2b: dict[str, Any] = {}
+            while time.monotonic() < deadline:
+                s1b = _http_get_json(f"http://127.0.0.1:{port1b}/_test/stats")[1]
+                s2b = _http_get_json(f"http://127.0.0.1:{port2}/_test/stats")[1]
+                if s1b["worker_acked"] + (s2b["worker_acked"] - 5) == 20:
+                    break
+                await asyncio.sleep(0.05)
+
+            assert s1b["worker_acked"] + (s2b["worker_acked"] - 5) == 20
+            assert s1b["worker_task_count"] == 2
+            assert s2b["worker_task_count"] == 2
+
+            # Verify Redis XINFO CONSUMERS contains both independent workers and pending == 0
+            store = RedisStreamsDurableStore(
+                RedisStreamsConfig(redis=RedisClientConfig(url=redis_url, key_prefix=key_prefix))
+            )
+            await store.startup()
+            try:
+                topic = NotificationsDurableConfig(tenant_id="tenant-alpha").topic
+                summary = await store.pending_summary(
+                    tenant_id="tenant-alpha", topic=topic, group=group_name
+                )
+                assert summary.pending_count == 0
+
+                raw_client = create_async_redis_client(RedisClientConfig(url=redis_url))
+                try:
+                    stream_key = store.stream_key("tenant-alpha", topic)
+                    consumers = await raw_client.xinfo_consumers(stream_key, group_name)
+                    consumer_names = {
+                        c["name"].decode("utf-8")
+                        if isinstance(c["name"], bytes)
+                        else str(c["name"])
+                        for c in consumers
+                    }
+                    assert id1 in consumer_names
+                    assert id2 in consumer_names
+                finally:
+                    await raw_client.aclose()
+            finally:
+                await store.shutdown()
+        finally:
+            if proc1 is not None:
+                _stop_gateway_process(proc1)
+            if proc2 is not None:
+                _stop_gateway_process(proc2)
+            if proc1_restarted is not None:
+                _stop_gateway_process(proc1_restarted)
+
+
+@pytest.mark.anyio
+async def test_r1_phase3_voice_20ms_pacing_and_inflight_interruption_with_events() -> None:
+    """Verify 20ms paced PCM16LE frames, in-flight turn-fencing interruption, and server loop lag."""
+    redis_url = os.environ["KAIWEN_TEST_REDIS_URL"]
+    run_id = uuid.uuid4().hex[:8]
+    key_prefix = f"kwr1v{run_id}"
+    port1 = _get_free_port()
+    port2 = _get_free_port()
+
+    async with _redis_cleanup(redis_url, key_prefix):
+        proc1 = _start_gateway_process(
+            port=port1,
+            instance_id=f"gw-1-{run_id}",
+            redis_url=redis_url,
+            key_prefix=key_prefix,
+        )
+        proc2 = _start_gateway_process(
+            port=port2,
+            instance_id=f"gw-2-{run_id}",
+            redis_url=redis_url,
+            key_prefix=key_prefix,
+        )
+        try:
+            u1_topic = derive_recipient_topic("tenant-alpha", "user-1")
+            async with websockets.connect(
+                f"ws://127.0.0.1:{port2}/ws/events/v1",
+                additional_headers={"Authorization": "Bearer tok-t1-u1"},
+            ) as ws_evt:
+                assert json.loads(await ws_evt.recv())["type"] == "session.ready"
+                await ws_evt.send(
+                    json.dumps(
+                        {
+                            "type": "events.subscribe",
+                            "protocol_version": "v1",
+                            "topic": u1_topic,
+                            "request_id": "sub-r1-p3",
+                        }
+                    )
+                )
+                assert json.loads(await ws_evt.recv())["type"] == "events.subscribed"
+
+                send_intervals_ms: list[float] = []
+                echo_rtts_ms: list[float] = []
+                notif_latencies_ms: list[float] = []
+                sent_notifs: dict[str, float] = {}
+                received_notifs: list[str] = []
+
+                async def _paced_voice_session(port: int, call_id: str, tag: int) -> None:
+                    tok = _issue_voice_token("tenant-alpha", call_id)
+                    uri = f"ws://127.0.0.1:{port}{SYNTHETIC_MEDIA_WS_ENDPOINT_PATH}"
+                    async with websockets.connect(
+                        uri, additional_headers={"Authorization": f"Bearer {tok}"}
+                    ) as vws:
+                        assert json.loads(await vws.recv())["event"] == EVENT_SESSION_READY
+                        await vws.send(json.dumps({"event": EVENT_CALL_START, "call_id": call_id}))
+                        assert json.loads(await vws.recv())["event"] == EVENT_CALL_STARTED
+
+                        # 1) 10 identifiable PCM16LE frames paced at 20 ms intervals
+                        prev_send: float | None = None
+                        for seq in range(10):
+                            t_now = time.perf_counter()
+                            if prev_send is not None:
+                                target = prev_send + 0.020
+                                if t_now < target:
+                                    await asyncio.sleep(target - t_now)
+                                t_send = time.perf_counter()
+                                send_intervals_ms.append((t_send - prev_send) * 1000.0)
+                            else:
+                                t_send = t_now
+                            prev_send = t_send
+                            frame = bytes([tag, seq]) * (PCM16LE_FRAME_BYTES // 2)
+                            await vws.send(frame)
+                            echo = await vws.recv()
+                            echo_rtts_ms.append((time.perf_counter() - t_send) * 1000.0)
+                            assert isinstance(echo, bytes)
+                            assert echo == frame
+
+                        # 2) Controlled in-flight burst (6 Turn-1 frames queued) + immediate interrupt
+                        burst_frames = [
+                            bytes([0xA0 + idx, tag]) * (PCM16LE_FRAME_BYTES // 2)
+                            for idx in range(6)
+                        ]
+                        for bf in burst_frames:
+                            await vws.send(bf)
+                        await vws.send(
+                            json.dumps(
+                                {
+                                    "event": EVENT_CALL_INTERRUPT,
+                                    "call_id": call_id,
+                                    "turn_id": 1,
+                                    "request_id": f"req-inflight-{call_id}",
+                                }
+                            )
+                        )
+
+                        # Drain any pre-interrupt Turn-1 frames until call.interrupted arrives
+                        interrupted_msg: dict[str, Any] | None = None
+                        for _ in range(16):
+                            raw = await asyncio.wait_for(vws.recv(), timeout=5.0)
+                            if isinstance(raw, str):
+                                parsed = json.loads(raw)
+                                if parsed.get("event") == EVENT_CALL_INTERRUPTED:
+                                    interrupted_msg = parsed
+                                    break
+                        assert interrupted_msg is not None
+                        assert interrupted_msg["interrupted_turn_id"] == 1
+                        assert interrupted_msg["new_turn_id"] == 2
+
+                        # 3) Turn-2 frames: zero Turn-1 frames (0xA0..0xA5) may leak after interrupt
+                        for seq in range(5):
+                            t2_frame = bytes([0xB0 + seq, tag]) * (PCM16LE_FRAME_BYTES // 2)
+                            await vws.send(t2_frame)
+                            echo2 = await asyncio.wait_for(vws.recv(), timeout=5.0)
+                            assert isinstance(echo2, bytes)
+                            assert echo2 == t2_frame
+
+                        await vws.send(json.dumps({"event": EVENT_CALL_END, "call_id": call_id}))
+                        assert json.loads(await vws.recv())["event"] == EVENT_CALL_ENDED
+
+                async def _publish_concurrent_notifs(count: int) -> None:
+                    for idx in range(count):
+                        nid = generate_notification_id()
+                        sent_notifs[nid] = time.perf_counter()
+                        res = await asyncio.to_thread(
+                            _http_post_json,
+                            f"http://127.0.0.1:{port1}/_test/publish-notification",
+                            {
+                                "notification_id": nid,
+                                "tenant_id": "tenant-alpha",
+                                "recipient_id": "user-1",
+                                "payload": {"r1_p3_seq": idx},
+                            },
+                        )
+                        assert res["status"] == "durable_accepted"
+
+                async def _receive_notifs(expected: int) -> None:
+                    while len(received_notifs) < expected:
+                        msg = json.loads(await asyncio.wait_for(ws_evt.recv(), timeout=15.0))
+                        if msg.get("type") == "events.delivery":
+                            nid = msg["event"]["payload"]["notification_id"]
+                            received_notifs.append(nid)
+                            if nid in sent_notifs:
+                                notif_latencies_ms.append(
+                                    (time.perf_counter() - sent_notifs[nid]) * 1000.0
+                                )
+
+                t_batch = time.perf_counter()
+                await asyncio.gather(
+                    _paced_voice_session(port1, "call-r1-v1", 0x11),
+                    _paced_voice_session(port2, "call-r1-v2", 0x22),
+                    _publish_concurrent_notifs(20),
+                    _receive_notifs(20),
+                )
+                elapsed_s = time.perf_counter() - t_batch
+                assert len(received_notifs) == 20
+                assert len(set(received_notifs)) == 20
+
+                s1 = _http_get_json(f"http://127.0.0.1:{port1}/_test/stats")[1]
+                s2 = _http_get_json(f"http://127.0.0.1:{port2}/_test/stats")[1]
+                assert s1["server_loop_lag_samples"] > 0
+                assert s2["server_loop_lag_samples"] > 0
+
+                s_int = sorted(send_intervals_ms)
+                s_rtt = sorted(echo_rtts_ms)
+                s_n = sorted(notif_latencies_ms)
+                print(
+                    f"\n[R1_PHASE3_METRICS] notifs=20 elapsed_s={elapsed_s:.3f} "
+                    f"notif_p50_ms={_percentile(s_n, 50):.2f} notif_p95_ms={_percentile(s_n, 95):.2f} "
+                    f"voice_send_interval_p50_ms={_percentile(s_int, 50):.2f} "
+                    f"voice_send_interval_p95_ms={_percentile(s_int, 95):.2f} "
+                    f"voice_rtt_p50_ms={_percentile(s_rtt, 50):.2f} "
+                    f"voice_rtt_p95_ms={_percentile(s_rtt, 95):.2f} "
+                    f"gw1_srv_lag_p95_ms={s1['server_loop_lag_p95_ms']:.2f} "
+                    f"gw2_srv_lag_p95_ms={s2['server_loop_lag_p95_ms']:.2f} "
+                    f"gw1_ws_mb={s1['rss_bytes'] / (1024 * 1024):.1f} "
+                    f"gw2_ws_mb={s2['rss_bytes'] / (1024 * 1024):.1f}"
+                )
+        finally:
+            _stop_gateway_process(proc1)
+            _stop_gateway_process(proc2)
+
+
+@pytest.mark.anyio
+async def test_r1_phase4_idle_redis_readiness_characterization() -> None:
+    """Characterize Phase 4 P2 observation: idle RedisPubSubEventBroker readiness on outage."""
+    real_redis_url = os.environ["KAIWEN_TEST_REDIS_URL"]
+    parsed = urlparse(real_redis_url)
+    target_host = parsed.hostname or "127.0.0.1"
+    target_port = parsed.port or 6379
+    proxy_port = _get_free_port()
+    proxy_url = f"redis://127.0.0.1:{proxy_port}/0"
+
+    run_id = uuid.uuid4().hex[:8]
+    key_prefix = f"kwr1idle{run_id}"
+    gw_port = _get_free_port()
+
+    proxy = _RestartableTcpProxy(proxy_port, target_host, target_port)
+    await proxy.start()
+    proc: subprocess.Popen[str] | None = None
+
+    async with _redis_cleanup(real_redis_url, key_prefix):
+        try:
+            proc = await asyncio.to_thread(
+                _start_gateway_process,
+                port=gw_port,
+                instance_id=f"gw-idle-{run_id}",
+                redis_url=proxy_url,
+                key_prefix=key_prefix,
+                enable_worker=False,
+            )
+            # Drop Redis while ZERO Pub/Sub subscriptions exist
+            await proxy.drop_all()
+            await asyncio.sleep(0.3)
+
+            # Documented P2 behavior: /ready stays 200 while idle because listener has no subs
+            status_idle, body_idle = await asyncio.to_thread(
+                _http_get_json, f"http://127.0.0.1:{gw_port}/ready"
+            )
+            assert status_idle == 200
+            assert body_idle["status"] == "ready"
+
+            # First Redis operation fails closed and flips broker.is_healthy -> /ready 503
+            with pytest.raises(urllib.error.HTTPError) as exc_info:
+                await asyncio.to_thread(
+                    _http_post_json,
+                    f"http://127.0.0.1:{gw_port}/_test/publish-event",
+                    {
+                        "event_id": f"evt-idle-{run_id}",
+                        "event_type": "call.probe",
+                        "tenant_id": "tenant-alpha",
+                        "topic": "calls.status",
+                        "payload": {"probe": True},
+                    },
+                )
+            assert exc_info.value.code == 503
+            exc_info.value.close()
+
+            status_after, body_after = await asyncio.to_thread(
+                _http_get_json, f"http://127.0.0.1:{gw_port}/ready", 5.0
+            )
+            assert status_after == 503
+            assert body_after["reason"] == "events_backend_unavailable"
+
+            # Restoring Redis allows automatic recovery to 200
+            await proxy.start()
+            deadline = time.monotonic() + 10.0
+            rec_status = 503
+            while time.monotonic() < deadline:
+                rec_status, _ = await asyncio.to_thread(
+                    _http_get_json, f"http://127.0.0.1:{gw_port}/ready"
+                )
+                if rec_status == 200:
+                    break
+                await asyncio.sleep(0.15)
+            assert rec_status == 200
+        finally:
+            if proc is not None:
+                _stop_gateway_process(proc)
+            await proxy.drop_all()
