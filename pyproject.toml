@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kaiwen-gateway"
-version = "0.1.0b1"
+version = "0.1.0b2"
 description = "Modular, provider-agnostic communication gateway for real-time AI applications."
 readme = "README.md"
 requires-python = ">=3.11"

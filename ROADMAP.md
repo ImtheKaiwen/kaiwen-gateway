@@ -3,7 +3,8 @@
 > **Status:** `MAINTENANCE — INTEGRATION PENDING` (2026-11-16) — M0–M3 Complete; Core Stabilization S1 (`PR #47`) & Drain Safety S1-R2 (`PR #48`) Complete; M4-R1 Adapter Conformance (`PR #42`, `PR #43`) Complete; M4-R2/R3 OpenAI Realtime Adapter (`PR #49`, `PR #53`, `LIVE_VERIFIED` & `MOCK_VERIFIED`) Complete; M4-R4 OpenAI GPT-Live Adapter (`PR #54`, `LIVE_VERIFIED` & `MOCK_VERIFIED`) Complete; M5 Synthetic Qualification Complete (`1/5/25/50/100` calls, `PR #35`/`#36`; full M5 depends on live external integrations); M6 Complete (`v0.1.0a1` & `v0.1.0a2` published alphas); **`v0.1.0b1` Public Beta** published to GitHub Releases & PyPI on 2026-11-16 (`PR #55`).
 > **Project phase:** `MAINTENANCE — INTEGRATION PENDING` (Public Beta `v0.1.0b1` released; Kaiwen Agent, Kaiwen Speech, and Verimor integrations deferred)
 > **Latest published release:** `v0.1.0b1` (**Gateway Core + OpenAI Voice Adapters Beta**, superseding synthetic alphas `v0.1.0a2` and `v0.1.0a1`)
-> **Last reviewed:** 2026-11-16
+> **Prepared candidate:** `v0.1.0b2` (**NOT YET PUBLISHED** — Core + Voice + Events `E1`–`E4` + Notifications `N0`–`N4`; Combined Beta Integration Acceptance PR #74 merged at `20e9728`; tracked beta limitations `#68`, `#75`, `#76`)
+> **Last reviewed:** 2026-11-19
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
 > **Primary scope:** Reusable Python library and optional ASGI service; **Voice is the only V1 functional module**.
 

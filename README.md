@@ -6,7 +6,8 @@
 > **Release & Maintenance Status: `v0.1.0b1` Public Beta Released (`Gateway Core + OpenAI Voice Adapters Beta`, 2026-11-16; `MAINTENANCE — INTEGRATION PENDING`).**
 >
 > - **Latest Published Beta Release (`v0.1.0b1`):** Installable public beta published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0b1/) and [GitHub Releases](https://github.com/ImtheKaiwen/kaiwen-gateway/releases/tag/v0.1.0b1) (superseding synthetic alphas `v0.1.0a2` and `v0.1.0a1`). Covers Gateway Core, ASGI server hosting, synthetic telephony/media transports, `VoiceBridgeSession`, `RealtimeAdapterConformanceSuite`, and both **`LIVE_VERIFIED`** OpenAI voice integrations — `kaiwen_gateway.adapters.openai_realtime` (`wss://api.openai.com/v1/realtime`, `gpt-realtime`) and `kaiwen_gateway.adapters.openai_gpt_live` (`wss://api.openai.com/v1/live/sessions`, `gpt-live-1`).
-> - **Pending / Not Yet Supported:** **Experimental beta — production use is not supported.** Kaiwen Agent integration, Kaiwen Speech integration, live Verimor PSTN/WSS interoperability (`FR-INT-007`), and production-readiness assessment remain deferred.
+> - **Prepared Beta Candidate (`v0.1.0b2` — NOT YET PUBLISHED):** Release candidate prepared on `main` adding Events (`E1`–`E4`, `/ws/events/v1`, optional `kaiwen-gateway[redis]` Pub/Sub & Streams), Notifications (`N0`–`N4`, mandatory recipient isolation, durable delivery & recovery), and Combined Beta Integration Acceptance ([`docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md`](docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md), PR #74). Not yet published to PyPI or GitHub Releases.
+> - **Pending / Not Yet Supported:** **Experimental beta — production use is not supported.** Kaiwen Agent integration, Kaiwen Speech integration, live Verimor PSTN/WSS interoperability (`FR-INT-007`), and production-readiness assessment remain deferred. Tracked beta limitations: `#68` (Windows timer-flake), `#75` (Linux `SIGTERM` shutdown verification with active mixed workloads), and `#76` (passive idle Redis Pub/Sub readiness detection policy).
 
 Kaiwen Gateway is designed to be both a **reusable Python library** and a **deployable ASGI service**. It accepts connections from external systems, authenticates and isolates them, translates provider-specific protocols into well-defined internal contracts, and bridges live communication to application and AI backends.
 
@@ -32,13 +33,13 @@ uv sync --extra server
 
 # Option 2: Build and install local wheel into an isolated virtual environment
 uv build
-pip install dist/kaiwen_gateway-0.1.0b1-py3-none-any.whl[server]
+pip install dist/kaiwen_gateway-0.1.0b2-py3-none-any.whl[server]
 ```
 
 To install only the minimal core library (contracts, admission control, identity, lifecycle supervision) without server dependencies:
 
 ```bash
-pip install dist/kaiwen_gateway-0.1.0b1-py3-none-any.whl
+pip install dist/kaiwen_gateway-0.1.0b2-py3-none-any.whl
 ```
 
 #### B. Installing from PyPI

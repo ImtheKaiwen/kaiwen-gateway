@@ -4,8 +4,9 @@
 > **Package:** `kaiwen-gateway` / import `kaiwen_gateway`
 > **Product phase:** `MAINTENANCE — INTEGRATION PENDING` (Public Beta `v0.1.0b1` released — **Gateway Core + OpenAI Voice Adapters Beta**, superseding `v0.1.0a2` and `v0.1.0a1`)
 > **Published beta:** `0.1.0b1` (PyPI & GitHub Releases)
-> **Document status:** Active operating rules (M0 baseline accepted 2026-11-01; updated 2026-11-16)
-> **Last reviewed:** 2026-11-16
+> **Prepared candidate:** `0.1.0b2` (**NOT YET PUBLISHED** — Core + Voice + Events `E1`–`E4` + Notifications `N0`–`N4` + PR #74 combined acceptance)
+> **Document status:** Active operating rules (M0 baseline accepted 2026-11-01; updated 2026-11-19)
+> **Last reviewed:** 2026-11-19
 
 This file governs autonomous and assisted coding work in the Kaiwen Gateway repository, including work performed by Antigravity, Codex, and other coding agents. It is a **repository-level working contract**, not permission to expand the project, deploy a system, or claim that unimplemented features exist.
 
