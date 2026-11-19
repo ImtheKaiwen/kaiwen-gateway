@@ -59,7 +59,7 @@ A model producing a poor answer **without a security boundary being crossed** is
 | --- | --- | --- |
 | `main` | Maintenance baseline (`v0.1.0b2` beta — Core + Voice + Events + Notifications) | Best-effort review; **no production support or service-level commitment**. |
 | `0.1.0b2` | Latest published experimental beta (PyPI & GitHub Releases) | Best-effort review only; **no production support or SLA**. |
-| `0.1.0b1` | Prior experimental beta (superseded by `0.1.0b2`) | No ongoing support; upgrade to `0.1.0b2`. |
+| `0.1.0b1` | Prior experimental beta (superseded by `0.1.0b2`) | Best-effort review only; **no production support or SLA**. Upgrade to `0.1.0b2` recommended. |
 | `0.1.0a2` | Prior synthetic-environment alpha (superseded by `0.1.0b2`) | No ongoing support; upgrade to `0.1.0b2`. |
 | `0.1.0a1` | Prior synthetic-environment alpha (superseded by `0.1.0b2`) | No ongoing support; upgrade to `0.1.0b2`. |
 | Future releases | Not yet defined | Policy will be updated when versions are actually published and maintained. |
