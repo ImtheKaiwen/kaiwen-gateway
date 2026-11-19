@@ -2,9 +2,8 @@
 
 > **Repository:** `ImtheKaiwen/kaiwen-gateway`
 > **Package:** `kaiwen-gateway` / import `kaiwen_gateway`
-> **Product phase:** `MAINTENANCE — INTEGRATION PENDING` (Public Beta `v0.1.0b1` released — **Gateway Core + OpenAI Voice Adapters Beta**, superseding `v0.1.0a2` and `v0.1.0a1`)
-> **Published beta:** `0.1.0b1` (PyPI & GitHub Releases)
-> **Prepared candidate:** `0.1.0b2` (**NOT YET PUBLISHED** — Core + Voice + Events `E1`–`E4` + Notifications `N0`–`N4` + PR #74 combined acceptance)
+> **Product phase:** `MAINTENANCE — INTEGRATION PENDING` (Public Beta `v0.1.0b2` released — **Core + Voice + Events + Notifications Beta**, superseding `v0.1.0b1`, `v0.1.0a2`, and `v0.1.0a1`)
+> **Published beta:** `0.1.0b2` (PyPI & GitHub Releases; previous beta: `0.1.0b1`)
 > **Document status:** Active operating rules (M0 baseline accepted 2026-11-01; updated 2026-11-19)
 > **Last reviewed:** 2026-11-19
 

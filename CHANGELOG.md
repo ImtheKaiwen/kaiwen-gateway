@@ -4,21 +4,20 @@ All notable **user-facing changes** to Kaiwen Gateway are recorded in this file.
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for its Python distribution. The **Python package version**, any **external Gateway wire/API protocol version**, and **provider adapter compatibility** are separate concerns; a package release does not automatically change a wire protocol version.
 
-> **Project status (2026-11-16): `v0.1.0b1` Public Beta Released (Gateway Core + OpenAI Voice Adapters Beta; `MAINTENANCE — INTEGRATION PENDING`).**
-> Kaiwen Gateway `v0.1.0b1` is published on PyPI and GitHub Releases (superseding synthetic alphas `v0.1.0a2` and `v0.1.0a1`), covering Gateway Core, ASGI server hosting, synthetic telephony/media transports, `VoiceBridgeSession`, `RealtimeAdapterConformanceSuite`, and both `LIVE_VERIFIED` OpenAI voice adapters (`kaiwen_gateway.adapters.openai_realtime` and `kaiwen_gateway.adapters.openai_gpt_live`).
+> **Project status (2026-11-19): `v0.1.0b2` Public Beta Released (Core + Voice + Events + Notifications Beta; `MAINTENANCE — INTEGRATION PENDING`).**
+> Kaiwen Gateway `v0.1.0b2` is published on PyPI and GitHub Releases (superseding `v0.1.0b1`, `v0.1.0a2`, and `v0.1.0a1`), covering Gateway Core, ASGI server hosting, synthetic telephony/media transports, `VoiceBridgeSession`, `RealtimeAdapterConformanceSuite`, both `LIVE_VERIFIED` OpenAI voice adapters, Events (`E1`–`E4`), Notifications (`N0`–`N4`), and Combined Beta Integration Acceptance (PR #74).
 >
 > **Experimental beta — production use is not supported.** Kaiwen Agent, Kaiwen Speech, and live Verimor PSTN/WSS interoperability (`FR-INT-007`) remain deferred external integrations.
 
 ## [Unreleased]
 
-*(No additional changes beyond prepared candidate `0.1.0b2` below.)*
+*(No unreleased changes since `v0.1.0b2`.)*
 
 ---
 
-## [0.1.0b2] - Candidate Prepared (NOT YET PUBLISHED)
+## [0.1.0b2] - 2026-11-19
 
-> **Release status:** Candidate prepared on `chore/beta-b2-release-prep` — **NOT YET PUBLISHED** to PyPI or GitHub Releases. Latest published beta remains `v0.1.0b1`.
-> **Experimental beta — production use is not supported.** Tracked beta limitations remain open: GitHub `#68` (Windows timer-flake), `#75` (Linux OS-process `SIGTERM` shutdown verification with active mixed workloads), and `#76` (passive idle Redis Pub/Sub readiness detection policy — Option A retained for beta).
+> **Experimental beta — production use is not supported.** Published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0b2/) and [GitHub Releases](https://github.com/ImtheKaiwen/kaiwen-gateway/releases/tag/v0.1.0b2) from commit `6865d2953689bb22fdbb46d055804ded757a44c9`. Tracked beta limitations remain open: GitHub `#68` (Windows timer-flake), `#75` (Linux OS-process `SIGTERM` shutdown verification with active mixed workloads), and `#76` (passive idle Redis Pub/Sub readiness detection policy — Option A retained for beta).
 
 ### Added
 - **Combined Beta Integration Acceptance (`PR #74`, `docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md`):** Added combined cross-module lifecycle & security tests (`tests/test_combined_beta_lifecycle.py`) covering all 4 supported Core/Voice/Events/Notifications configurations, active mixed-workload graceful ASGI shutdown, fail-closed producer authorization, and live multi-process Uvicorn + Redis 7 + real `websockets` integration tests (`tests/test_combined_beta_live_redis.py`, `tests/combined_beta_process_app.py`) verifying cross-instance Events/Notifications, competing durable workers (`XINFO CONSUMERS`), 20 ms paced Voice + in-flight turn-fencing interruption, and live Redis outage isolation/recovery.

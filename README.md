@@ -3,10 +3,10 @@
 **A modular, provider-agnostic communication gateway for real-time AI applications.**
 
 > [!IMPORTANT]
-> **Release & Maintenance Status: `v0.1.0b1` Public Beta Released (`Gateway Core + OpenAI Voice Adapters Beta`, 2026-11-16; `MAINTENANCE — INTEGRATION PENDING`).**
+> **Release & Maintenance Status: `v0.1.0b2` Public Beta Released (`Core + Voice + Events + Notifications Beta`, 2026-11-19; `MAINTENANCE — INTEGRATION PENDING`).**
 >
-> - **Latest Published Beta Release (`v0.1.0b1`):** Installable public beta published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0b1/) and [GitHub Releases](https://github.com/ImtheKaiwen/kaiwen-gateway/releases/tag/v0.1.0b1) (superseding synthetic alphas `v0.1.0a2` and `v0.1.0a1`). Covers Gateway Core, ASGI server hosting, synthetic telephony/media transports, `VoiceBridgeSession`, `RealtimeAdapterConformanceSuite`, and both **`LIVE_VERIFIED`** OpenAI voice integrations — `kaiwen_gateway.adapters.openai_realtime` (`wss://api.openai.com/v1/realtime`, `gpt-realtime`) and `kaiwen_gateway.adapters.openai_gpt_live` (`wss://api.openai.com/v1/live/sessions`, `gpt-live-1`).
-> - **Prepared Beta Candidate (`v0.1.0b2` — NOT YET PUBLISHED):** Release candidate prepared in [Draft PR #77](https://github.com/ImtheKaiwen/kaiwen-gateway/pull/77) (not yet merged to `main` or published to PyPI / GitHub Releases) covering Events (`E1`–`E4`, `/ws/events/v1`, optional `kaiwen-gateway[redis]` Pub/Sub & Streams), Notifications (`N0`–`N4`, mandatory recipient isolation, durable delivery & recovery), and Combined Beta Integration Acceptance ([`docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md`](docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md), PR #74).
+> - **Latest Published Beta Release (`v0.1.0b2`):** Installable experimental beta published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0b2/) and [GitHub Releases](https://github.com/ImtheKaiwen/kaiwen-gateway/releases/tag/v0.1.0b2) (superseding `v0.1.0b1`, `v0.1.0a2`, and `v0.1.0a1`). Covers Gateway Core, ASGI server hosting, synthetic telephony/media transports, `VoiceBridgeSession`, `RealtimeAdapterConformanceSuite`, both **`LIVE_VERIFIED`** OpenAI voice adapters (`openai_realtime` and `openai_gpt_live`), Events (`E1`–`E4`, `/ws/events/v1`, optional `[redis]` Pub/Sub & Streams), Notifications (`N0`–`N4`, mandatory recipient isolation, durable delivery & recovery), and Combined Beta Integration Acceptance ([`docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md`](docs/GATEWAY_COMBINED_BETA_ACCEPTANCE_REPORT.md), PR #74).
+> - **Previous Published Beta (`v0.1.0b1`):** Historical Gateway Core + OpenAI Voice Adapters Beta ([PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0b1/) / [GitHub Releases](https://github.com/ImtheKaiwen/kaiwen-gateway/releases/tag/v0.1.0b1)).
 > - **Pending / Not Yet Supported:** **Experimental beta — production use is not supported.** Kaiwen Agent integration, Kaiwen Speech integration, live Verimor PSTN/WSS interoperability (`FR-INT-007`), and production-readiness assessment remain deferred. Tracked beta limitations: `#68` (Windows timer-flake), `#75` (Linux `SIGTERM` shutdown verification with active mixed workloads), and `#76` (passive idle Redis Pub/Sub readiness detection policy).
 
 Kaiwen Gateway is designed to be both a **reusable Python library** and a **deployable ASGI service**. It accepts connections from external systems, authenticates and isolates them, translates provider-specific protocols into well-defined internal contracts, and bridges live communication to application and AI backends.
@@ -44,20 +44,20 @@ pip install dist/kaiwen_gateway-0.1.0b2-py3-none-any.whl
 
 #### B. Installing from PyPI
 
-Kaiwen Gateway `v0.1.0b1` is published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0b1/):
+Kaiwen Gateway `v0.1.0b2` is published on [PyPI](https://pypi.org/project/kaiwen-gateway/0.1.0b2/):
 
 ```bash
-# Install core package + ASGI runtime + OpenAI voice adapters (Realtime & GPT-Live):
-pip install "kaiwen-gateway[server,openai]==0.1.0b1"
+# Install core package + ASGI runtime + Redis Events/Notifications + OpenAI voice adapters:
+pip install "kaiwen-gateway[server,redis,openai]==0.1.0b2"
 
-# Install core package + OpenAI voice adapters only:
-pip install "kaiwen-gateway[openai]==0.1.0b1"
+# Install core package + ASGI runtime + Redis Events/Notifications:
+pip install "kaiwen-gateway[server,redis]==0.1.0b2"
 
 # Install core package + ASGI runtime:
-pip install "kaiwen-gateway[server]==0.1.0b1"
+pip install "kaiwen-gateway[server]==0.1.0b2"
 
 # Install minimal core library only:
-pip install "kaiwen-gateway==0.1.0b1"
+pip install "kaiwen-gateway==0.1.0b2"
 ```
 
 ---
