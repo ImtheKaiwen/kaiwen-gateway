@@ -45,7 +45,7 @@ openai = [
     "websockets>=13.0,<16",
 ]
 redis = [
-    "redis>=5.0,<7",
+    "redis>=5.0,<9",
 ]
 server = [
     "starlette>=0.40,<2",
