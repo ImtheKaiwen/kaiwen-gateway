@@ -7,7 +7,7 @@ import base64
 import binascii
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from kaiwen_gateway.adapters.openai_realtime.audio import (
     GATEWAY_FRAME_DURATION_MS,
@@ -33,6 +33,23 @@ from kaiwen_gateway.modules.voice.domain import (
     MediaPortError,
 )
 from kaiwen_gateway.modules.voice.ports import InterruptionCapabilities
+from kaiwen_gateway.modules.voice.semantic import (
+    MAX_TOOL_ARGUMENTS_BYTES,
+    MAX_TRANSCRIPT_TEXT_CHARS,
+    BoundedSemanticEventChannel,
+    ProviderErrorEvent,
+    ResponseLifecycleEvent,
+    SemanticCapabilities,
+    SemanticEvent,
+    SessionLifecycleEvent,
+    StaleToolCallError,
+    ToolCallCancelled,
+    ToolCallRequested,
+    ToolCallTracker,
+    ToolResult,
+    TranscriptEvent,
+    UnsupportedSemanticCapabilityError,
+)
 
 
 class _EOFSentinel:
@@ -56,6 +73,12 @@ def _drain_queue_nowait(queue: asyncio.Queue[Any]) -> None:
 
 
 _MAX_RESPONSE_TURN_HISTORY = 64
+_RESPONSE_PHASES: dict[str, Literal["completed", "cancelled", "failed", "incomplete"]] = {
+    "completed": "completed",
+    "cancelled": "cancelled",
+    "failed": "failed",
+    "incomplete": "incomplete",
+}
 
 
 class OpenAIRealtimeMediaAdapter:
@@ -142,6 +165,18 @@ class OpenAIRealtimeMediaAdapter:
         self._response_turn_map: dict[str, int] = {}
         self._delivered_outbound_seq = 0
 
+        # Semantic side channel: opt-in, published without awaiting (never stalls audio).
+        self._semantic: BoundedSemanticEventChannel | None = (
+            BoundedSemanticEventChannel(config.semantic_queue_capacity)
+            if config.enable_semantic_events
+            else None
+        )
+        self._tool_calls = ToolCallTracker()
+        self._session_ready_emitted = False
+        self._semantic_closed = False
+        self._rejected_tool_calls = 0
+        self._last_provider_error_code: str | None = None
+
     @property
     def call_id(self) -> str:
         """Return the call ID bound to this adapter instance."""
@@ -176,6 +211,240 @@ class OpenAIRealtimeMediaAdapter:
             cannot_confirm_playback=True,
         )
 
+    @property
+    def semantic_capabilities(self) -> SemanticCapabilities:
+        """Declare semantic capabilities mapped from the OpenAI Realtime GA contract."""
+        if self._semantic is None:
+            return SemanticCapabilities()
+        has_tools = bool(self._config.tools)
+        has_input_transcript = self._config.input_transcription_model is not None
+        return SemanticCapabilities(
+            tool_calls=has_tools,
+            tool_result_continuation=has_tools,
+            tool_call_cancellation=has_tools,
+            input_transcript_delta=has_input_transcript,
+            input_transcript_final=has_input_transcript,
+            output_transcript_delta=True,
+            output_transcript_final=True,
+            response_lifecycle=True,
+            session_lifecycle=True,
+        )
+
+    @property
+    def semantic_dropped_count(self) -> int:
+        """Number of droppable semantic events discarded under consumer backpressure."""
+        return self._semantic.dropped_count if self._semantic is not None else 0
+
+    @property
+    def rejected_tool_call_count(self) -> int:
+        """Tool calls not surfaced (duplicate, oversized, malformed or over the pending limit)."""
+        return self._rejected_tool_calls
+
+    async def receive_semantic_event(self) -> SemanticEvent | None:
+        """Return the next semantic event, or None once the channel has ended."""
+        if self._semantic is None:
+            raise UnsupportedSemanticCapabilityError(
+                "semantic events are disabled (enable_semantic_events=False)"
+            )
+        return await self._semantic.receive()
+
+    async def submit_tool_result(self, result: ToolResult) -> None:
+        """Send ``function_call_output`` for a pending call, then ``response.create``."""
+        if self._semantic is None or not self._config.tools:
+            raise UnsupportedSemanticCapabilityError("tool results are not enabled")
+        self._raise_if_closed()
+        async with self._cancel_lock:
+            self._raise_if_closed()
+            transport = self._transport
+            if transport is None:
+                raise MediaPortClosedError("OpenAI Realtime transport is not connected")
+            turn_id = self._tool_calls.claim_for_result(result.call_id)
+            if turn_id <= self._fenced_turn_id:
+                raise StaleToolCallError("tool call belongs to an interrupted turn")
+            try:
+                await asyncio.wait_for(
+                    transport.send_json(
+                        {
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "function_call_output",
+                                "call_id": result.call_id,
+                                "output": result.output,
+                            },
+                        }
+                    ),
+                    timeout=self._config.cancel_timeout_seconds,
+                )
+                await asyncio.wait_for(
+                    transport.send_json({"type": "response.create"}),
+                    timeout=self._config.cancel_timeout_seconds,
+                )
+            except TimeoutError as exc:
+                raise OpenAIRealtimeError("Timed out submitting tool result") from exc
+
+    def _emit_semantic(self, event: SemanticEvent) -> None:
+        if self._semantic is not None and not self._semantic_closed:
+            self._semantic.publish(event)
+
+    def _next_seq(self) -> int:
+        return self._semantic.next_sequence() if self._semantic is not None else 0
+
+    def _emit_tool_cancel(
+        self, call_id: str, turn_id: int, reason: Literal["turn_interrupted", "session_closed"]
+    ) -> None:
+        self._emit_semantic(
+            ToolCallCancelled(
+                sequence=self._next_seq(), turn_id=turn_id, call_id=call_id, reason=reason
+            )
+        )
+
+    def _close_semantic(self, reason: str, error: Exception | None = None) -> None:
+        """Cancel pending tool calls and end the semantic channel exactly once."""
+        if self._semantic is None or self._semantic_closed:
+            return
+        for cid, turn in self._tool_calls.cancel_all():
+            self._emit_tool_cancel(cid, turn, "session_closed")
+        if error is not None:
+            self._emit_semantic(
+                ProviderErrorEvent(
+                    sequence=self._next_seq(),
+                    turn_id=self._current_turn_id,
+                    code=self._last_provider_error_code or "upstream_failure",
+                    message=sanitize_provider_message(str(error), self._config.api_key)[:300],
+                    fatal=True,
+                )
+            )
+        self._emit_semantic(
+            SessionLifecycleEvent(
+                sequence=self._next_seq(),
+                turn_id=self._current_turn_id,
+                phase="closed",
+                reason=reason,
+            )
+        )
+        self._semantic_closed = True
+        self._semantic.close()
+
+    def _turn_for_response(self, resp_id: object) -> int:
+        if isinstance(resp_id, str) and resp_id in self._response_turn_map:
+            return self._response_turn_map[resp_id]
+        if self._pending_cancel_boundaries > 0:
+            return self._fenced_turn_id
+        return self._current_turn_id
+
+    def _surface_tool_call(
+        self, *, call_id: object, name: object, arguments: object, resp_id: object
+    ) -> None:
+        if self._semantic is None or not self._config.tools:
+            return
+        if not isinstance(call_id, str) or not call_id or len(call_id) > 128:
+            self._rejected_tool_calls += 1
+            return
+        if not isinstance(name, str) or not name or not isinstance(arguments, str):
+            self._rejected_tool_calls += 1
+            return
+        if len(arguments.encode("utf-8")) > MAX_TOOL_ARGUMENTS_BYTES:
+            self._rejected_tool_calls += 1
+            return
+        turn_id = self._turn_for_response(resp_id)
+        if turn_id <= self._fenced_turn_id:
+            return  # belongs to an interrupted turn: never surfaced
+        if self._tool_calls.turn_of(call_id) is not None:
+            return  # same call reported again by a later event (arguments.done / item.done)
+        if not self._tool_calls.register(call_id, turn_id):
+            self._rejected_tool_calls += 1  # replay of a settled call or pending limit
+            return
+        self._emit_semantic(
+            ToolCallRequested(
+                sequence=self._next_seq(),
+                turn_id=turn_id,
+                call_id=call_id,
+                name=name[:64],
+                arguments_json=arguments,
+            )
+        )
+
+    def _handle_semantic_event(self, event_type: str, event: dict[str, Any]) -> None:
+        """Map OpenAI Realtime GA semantic server events to provider-neutral events."""
+        if self._semantic is None:
+            return
+        if event_type == "session.updated":
+            if not self._session_ready_emitted:
+                self._session_ready_emitted = True
+                self._emit_semantic(
+                    SessionLifecycleEvent(
+                        sequence=self._next_seq(), turn_id=self._current_turn_id, phase="ready"
+                    )
+                )
+            return
+        if event_type == "response.function_call_arguments.done":
+            self._surface_tool_call(
+                call_id=event.get("call_id"),
+                name=event.get("name"),
+                arguments=event.get("arguments"),
+                resp_id=event.get("response_id"),
+            )
+            return
+        if event_type == "response.output_item.done":
+            item = event.get("item")
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "function_call"
+                and item.get("status") in (None, "completed")
+            ):
+                self._surface_tool_call(
+                    call_id=item.get("call_id"),
+                    name=item.get("name"),
+                    arguments=item.get("arguments"),
+                    resp_id=event.get("response_id"),
+                )
+            return
+        if event_type in {
+            "response.output_audio_transcript.delta",
+            "response.output_audio_transcript.done",
+        }:
+            final = event_type.endswith(".done")
+            text = event.get("transcript" if final else "delta")
+            if not isinstance(text, str):
+                return
+            turn_id = self._turn_for_response(event.get("response_id"))
+            if turn_id <= self._fenced_turn_id:
+                return
+            item_id = event.get("item_id")
+            self._emit_semantic(
+                TranscriptEvent(
+                    sequence=self._next_seq(),
+                    turn_id=turn_id,
+                    role="assistant",
+                    text=text[:MAX_TRANSCRIPT_TEXT_CHARS],
+                    is_final=final,
+                    segment_id=item_id[:128] if isinstance(item_id, str) else None,
+                )
+            )
+            return
+        if event_type in {
+            "conversation.item.input_audio_transcription.delta",
+            "conversation.item.input_audio_transcription.completed",
+        }:
+            if self._config.input_transcription_model is None:
+                return
+            final = event_type.endswith(".completed")
+            text = event.get("transcript" if final else "delta")
+            if not isinstance(text, str):
+                return
+            item_id = event.get("item_id")
+            self._emit_semantic(
+                TranscriptEvent(
+                    sequence=self._next_seq(),
+                    turn_id=self._current_turn_id,
+                    role="user",
+                    text=text[:MAX_TRANSCRIPT_TEXT_CHARS],
+                    is_final=final,
+                    segment_id=item_id[:128] if isinstance(item_id, str) else None,
+                )
+            )
+            return
+
     def trigger_upstream_failure(self, error: Exception | None = None) -> None:
         """Inject a simulated upstream transport failure for deterministic testing."""
         err = error or OpenAIRealtimeError("Simulated upstream transport failure")
@@ -188,6 +457,7 @@ class OpenAIRealtimeMediaAdapter:
         self._closed = True
         self._closed_event.set()
         self._turn_transition_event.set()
+        self._close_semantic("upstream_failure", error)
         _drain_queue_nowait(self._inbound_queue)
         _drain_queue_nowait(self._outbound_queue)
         self._response_turn_map.clear()
@@ -365,6 +635,7 @@ class OpenAIRealtimeMediaAdapter:
                 if tail is not None:
                     await self._put_outbound_bounded(tail)
         self._eof_reached = True
+        self._close_semantic("provider_closed")
         try:
             self._outbound_queue.put_nowait(_EOF)
         except asyncio.QueueFull:
@@ -386,6 +657,7 @@ class OpenAIRealtimeMediaAdapter:
                     return
                 msg = str(err_obj.get("message") or "OpenAI Realtime error")
                 safe_msg = sanitize_provider_message(msg, self._config.api_key)
+                self._last_provider_error_code = str(code)[:64]
                 raise OpenAIRealtimeError(f"OpenAI Realtime error ({code}): {safe_msg}")
             raise OpenAIRealtimeError("OpenAI Realtime returned an error event")
 
@@ -396,9 +668,18 @@ class OpenAIRealtimeMediaAdapter:
                 if isinstance(resp_id, str) and resp_id:
                     self._active_response_id = resp_id
                     if self._pending_cancel_boundaries > 0:
-                        self._record_response_turn(resp_id, self._fenced_turn_id)
+                        turn = self._record_response_turn(resp_id, self._fenced_turn_id)
                     else:
-                        self._record_response_turn(resp_id, self._current_turn_id)
+                        turn = self._record_response_turn(resp_id, self._current_turn_id)
+                    if turn > self._fenced_turn_id:
+                        self._emit_semantic(
+                            ResponseLifecycleEvent(
+                                sequence=self._next_seq(),
+                                turn_id=turn,
+                                phase="started",
+                                response_ref=resp_id[:128],
+                            )
+                        )
             return
 
         if event_type == "response.output_audio.delta":
@@ -451,6 +732,31 @@ class OpenAIRealtimeMediaAdapter:
                     else self._current_turn_id
                 )
 
+            if event_type == "response.done" and self._semantic is not None:
+                outputs = resp_obj.get("output") if resp_obj is not None else None
+                if status in (None, "completed") and isinstance(outputs, list):
+                    for item in outputs:
+                        if (
+                            isinstance(item, dict)
+                            and item.get("type") == "function_call"
+                            and item.get("status") in (None, "completed")
+                        ):
+                            self._surface_tool_call(
+                                call_id=item.get("call_id"),
+                                name=item.get("name"),
+                                arguments=item.get("arguments"),
+                                resp_id=resp_id,
+                            )
+                phase = _RESPONSE_PHASES.get(status if isinstance(status, str) else "completed")
+                if phase is not None and (turn_id > self._fenced_turn_id or phase == "cancelled"):
+                    self._emit_semantic(
+                        ResponseLifecycleEvent(
+                            sequence=self._next_seq(),
+                            turn_id=turn_id,
+                            phase=phase,
+                            response_ref=resp_id[:128] if isinstance(resp_id, str) else None,
+                        )
+                    )
             if status == "cancelled":
                 self._resampler_out.reset()
                 self._packer.reset()
@@ -494,6 +800,8 @@ class OpenAIRealtimeMediaAdapter:
                             )
                     raise OpenAIRealtimeError(f"OpenAI Realtime response incomplete ({reason})")
             return
+
+        self._handle_semantic_event(event_type, event)
 
     async def send_frame(self, frame: AudioFrame) -> None:
         """Validate, enqueue, resample (16 kHz -> 24 kHz), and stream an inbound frame."""
@@ -602,6 +910,8 @@ class OpenAIRealtimeMediaAdapter:
                     self._pending_cancel_boundaries += 1
                 self._packer.reset()
                 self._resampler_out.reset()
+                for cid, turn in self._tool_calls.cancel_through_turn(self._fenced_turn_id):
+                    self._emit_tool_cancel(cid, turn, "turn_interrupted")
 
                 # Purge locally queued frames belonging to superseded turns
                 retained: list[AudioFrame | _EOFSentinel | _ErrorSentinel] = []
@@ -646,6 +956,7 @@ class OpenAIRealtimeMediaAdapter:
         while not self._inbound_queue.empty() and not self._closed and time.monotonic() < deadline:
             await asyncio.sleep(0.005)
         self._eof_reached = True
+        self._close_semantic("local_eof")
         if self._receiver_task is not None and not self._receiver_task.done():
             self._receiver_task.cancel()
         try:
@@ -658,6 +969,7 @@ class OpenAIRealtimeMediaAdapter:
         self._closed = True
         self._closed_event.set()
         self._turn_transition_event.set()
+        self._close_semantic("local_close")
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._perform_close())
         await asyncio.shield(self._close_task)

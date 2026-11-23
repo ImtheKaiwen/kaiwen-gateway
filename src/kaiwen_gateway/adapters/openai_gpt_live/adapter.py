@@ -33,6 +33,17 @@ from kaiwen_gateway.modules.voice.domain import (
     MediaPortError,
 )
 from kaiwen_gateway.modules.voice.ports import InterruptionCapabilities
+from kaiwen_gateway.modules.voice.semantic import (
+    MAX_TRANSCRIPT_TEXT_CHARS,
+    BoundedSemanticEventChannel,
+    ProviderErrorEvent,
+    SemanticCapabilities,
+    SemanticEvent,
+    SessionLifecycleEvent,
+    ToolResult,
+    TranscriptEvent,
+    UnsupportedSemanticCapabilityError,
+)
 
 
 class _EOFSentinel:
@@ -148,6 +159,16 @@ class OpenAIGPTLiveMediaAdapter:
         self._suppress_until_next_input = False
         self._delivered_outbound_seq = 0
 
+        # Semantic side channel (opt-in). GPT-Live documents transcript deltas without
+        # a final marker and no client-delegation tool-call contract (see guide).
+        self._semantic: BoundedSemanticEventChannel | None = (
+            BoundedSemanticEventChannel(config.semantic_queue_capacity)
+            if config.enable_semantic_events
+            else None
+        )
+        self._semantic_closed = False
+        self._last_provider_error_code: str | None = None
+
     @property
     def call_id(self) -> str:
         """Return the call ID bound to this adapter instance."""
@@ -192,6 +213,71 @@ class OpenAIGPTLiveMediaAdapter:
             cannot_confirm_playback=True,
         )
 
+    @property
+    def semantic_capabilities(self) -> SemanticCapabilities:
+        """Declare semantic capabilities documented for GPT-Live client delegation.
+
+        Tool calls are not declared: client delegation exposes no function-call
+        contract, and Responses delegation is not implemented by this adapter.
+        """
+        if self._semantic is None:
+            return SemanticCapabilities()
+        return SemanticCapabilities(
+            input_transcript_delta=True,
+            output_transcript_delta=True,
+            session_lifecycle=True,
+        )
+
+    @property
+    def semantic_dropped_count(self) -> int:
+        """Number of droppable semantic events discarded under consumer backpressure."""
+        return self._semantic.dropped_count if self._semantic is not None else 0
+
+    async def receive_semantic_event(self) -> SemanticEvent | None:
+        """Return the next semantic event, or None once the channel has ended."""
+        if self._semantic is None:
+            raise UnsupportedSemanticCapabilityError(
+                "semantic events are disabled (enable_semantic_events=False)"
+            )
+        return await self._semantic.receive()
+
+    async def submit_tool_result(self, result: ToolResult) -> None:
+        """Tool results are not supported by this adapter (no verified contract)."""
+        raise UnsupportedSemanticCapabilityError(
+            "OpenAI GPT-Live adapter does not support tool results"
+        )
+
+    def _emit_semantic(self, event: SemanticEvent) -> None:
+        if self._semantic is not None and not self._semantic_closed:
+            self._semantic.publish(event)
+
+    def _next_seq(self) -> int:
+        return self._semantic.next_sequence() if self._semantic is not None else 0
+
+    def _close_semantic(self, reason: str, error: Exception | None = None) -> None:
+        if self._semantic is None or self._semantic_closed:
+            return
+        if error is not None:
+            self._emit_semantic(
+                ProviderErrorEvent(
+                    sequence=self._next_seq(),
+                    turn_id=self._current_turn_id,
+                    code=self._last_provider_error_code or "upstream_failure",
+                    message=sanitize_provider_message(str(error), self._config.api_key)[:300],
+                    fatal=True,
+                )
+            )
+        self._emit_semantic(
+            SessionLifecycleEvent(
+                sequence=self._next_seq(),
+                turn_id=self._current_turn_id,
+                phase="closed",
+                reason=reason[:64],
+            )
+        )
+        self._semantic_closed = True
+        self._semantic.close()
+
     def trigger_upstream_failure(self, error: Exception | None = None) -> None:
         """Inject a simulated upstream transport failure for deterministic testing."""
         err = error or OpenAIGPTLiveError("Simulated upstream GPT-Live transport failure")
@@ -205,6 +291,7 @@ class OpenAIGPTLiveMediaAdapter:
         self._closed_event.set()
         self._session_started_event.set()
         self._turn_transition_event.set()
+        self._close_semantic("upstream_failure", error)
         _drain_queue_nowait(self._inbound_queue)
         _drain_queue_nowait(self._outbound_queue)
         current = asyncio.current_task()
@@ -405,6 +492,7 @@ class OpenAIGPTLiveMediaAdapter:
             if tail is not None:
                 await self._put_outbound_bounded(tail)
         self._eof_reached = True
+        self._close_semantic("provider_closed")
         try:
             self._outbound_queue.put_nowait(_EOF)
         except asyncio.QueueFull:
@@ -419,6 +507,7 @@ class OpenAIGPTLiveMediaAdapter:
             err_obj = event.get("error")
             if isinstance(err_obj, dict):
                 code = err_obj.get("code") or err_obj.get("type") or "provider_error"
+                self._last_provider_error_code = str(code)[:64]
                 msg = str(err_obj.get("message") or "OpenAI GPT-Live error")
                 safe_msg = sanitize_provider_message(msg, self._config.api_key)
                 raise OpenAIGPTLiveError(f"OpenAI GPT-Live error ({code}): {safe_msg}")
@@ -431,6 +520,32 @@ class OpenAIGPTLiveMediaAdapter:
                 if isinstance(sid, str) and sid:
                     self._provider_session_id = sid
             self._session_started_event.set()
+            self._emit_semantic(
+                SessionLifecycleEvent(
+                    sequence=self._next_seq(), turn_id=self._current_turn_id, phase="ready"
+                )
+            )
+            return
+
+        if event_type in {"session.input_transcript.delta", "session.output_transcript.delta"}:
+            delta = event.get("delta")
+            if isinstance(delta, str) and delta:
+                is_input = event_type == "session.input_transcript.delta"
+                if is_input or not self._suppress_until_next_input:
+                    self._emit_semantic(
+                        TranscriptEvent(
+                            sequence=self._next_seq(),
+                            turn_id=self._current_turn_id,
+                            role="user" if is_input else "assistant",
+                            text=delta[:MAX_TRANSCRIPT_TEXT_CHARS],
+                            is_final=False,
+                        )
+                    )
+            return
+
+        if event_type == "session.closed":
+            reason = event.get("reason")
+            self._close_semantic(reason if isinstance(reason, str) else "provider_closed")
             return
 
         if event_type == "session.output_audio.delta":
@@ -618,6 +733,7 @@ class OpenAIGPTLiveMediaAdapter:
         while not self._inbound_queue.empty() and not self._closed and time.monotonic() < deadline:
             await asyncio.sleep(0.005)
         self._eof_reached = True
+        self._close_semantic("local_eof")
         if self._receiver_task is not None and not self._receiver_task.done():
             self._receiver_task.cancel()
         try:
@@ -631,6 +747,7 @@ class OpenAIGPTLiveMediaAdapter:
         self._closed_event.set()
         self._session_started_event.set()
         self._turn_transition_event.set()
+        self._close_semantic("local_close")
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._perform_close())
         await asyncio.shield(self._close_task)

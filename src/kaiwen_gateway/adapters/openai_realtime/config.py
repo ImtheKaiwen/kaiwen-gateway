@@ -10,6 +10,10 @@ from typing import Any, Final
 from urllib.parse import quote, urlparse
 
 from kaiwen_gateway.modules.voice.domain import MediaPortError
+from kaiwen_gateway.modules.voice.semantic import (
+    DEFAULT_SEMANTIC_QUEUE_CAPACITY,
+    ToolDeclaration,
+)
 
 DEFAULT_OPENAI_REALTIME_URL: Final[str] = "wss://api.openai.com/v1/realtime"
 DEFAULT_OPENAI_REALTIME_MODEL: Final[str] = "gpt-realtime"
@@ -115,6 +119,11 @@ class OpenAIRealtimeConfig:
     outbound_queue_capacity: int = 32
     backpressure_timeout_seconds: float = 0.05
     turn_detection: dict[str, Any] | None = field(default_factory=_default_turn_detection)
+    enable_semantic_events: bool = False
+    semantic_queue_capacity: int = DEFAULT_SEMANTIC_QUEUE_CAPACITY
+    tools: tuple[ToolDeclaration, ...] = ()
+    tool_choice: str = "auto"
+    input_transcription_model: str | None = None
 
     def __post_init__(self) -> None:
         if not self.model or not self.model.strip():
@@ -134,6 +143,26 @@ class OpenAIRealtimeConfig:
             raise ValueError("outbound_queue_capacity must be > 0")
         if self.backpressure_timeout_seconds <= 0:
             raise ValueError("backpressure_timeout_seconds must be > 0")
+        if self.semantic_queue_capacity <= 0:
+            raise ValueError("semantic_queue_capacity must be > 0")
+        if not isinstance(self.tools, tuple) or not all(
+            isinstance(tool, ToolDeclaration) for tool in self.tools
+        ):
+            raise ValueError("tools must be a tuple of ToolDeclaration")
+        names = [tool.name for tool in self.tools]
+        if len(names) != len(set(names)):
+            raise ValueError("tool names must be unique")
+        if self.tools and not self.enable_semantic_events:
+            raise ValueError(
+                "tools require enable_semantic_events=True so tool calls can be answered"
+            )
+        if self.tool_choice not in {"auto", "none", "required"}:
+            raise ValueError("tool_choice must be 'auto', 'none' or 'required'")
+        if self.input_transcription_model is not None:
+            if not self.input_transcription_model.strip():
+                raise ValueError("input_transcription_model must be non-empty when set")
+            if not self.enable_semantic_events:
+                raise ValueError("input transcription requires enable_semantic_events=True")
 
     @classmethod
     def from_env(
@@ -189,6 +218,8 @@ class OpenAIRealtimeConfig:
         }
         if self.turn_detection is not None:
             input_cfg["turn_detection"] = dict(self.turn_detection)
+        if self.input_transcription_model is not None:
+            input_cfg["transcription"] = {"model": self.input_transcription_model}
 
         session: dict[str, Any] = {
             "type": "realtime",
@@ -206,6 +237,17 @@ class OpenAIRealtimeConfig:
         }
         if self.instructions is not None:
             session["instructions"] = self.instructions
+        if self.tools:
+            session["tools"] = [
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": dict(tool.parameters),
+                }
+                for tool in self.tools
+            ]
+            session["tool_choice"] = self.tool_choice
 
         return {
             "type": "session.update",
