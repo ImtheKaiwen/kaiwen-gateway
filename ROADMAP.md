@@ -495,7 +495,7 @@ Development is temporarily paused at a verified, maintainable baseline (not proj
 - **Packaging & Release Baseline:** `v0.1.0b2` (Experimental Beta), `v0.1.0b1` (historical Voice Beta), and historical alphas `v0.1.0a2` / `v0.1.0a1` published on GitHub Releases and PyPI; dynamic version inspection in `.github/workflows/release.yml`.
 
 ### Pending Integrations & Gates
-- **Kaiwen Agent Integration:** Alignment with `kaiwen-agent` public realtime APIs.
+- **Kaiwen Agent Integration:** Alignment with `kaiwen-agent` public realtime APIs. **In progress (2026-11-23):** provider-neutral semantic/tool-result side channel (`ADR-0008`, Proposed) on `feat/realtime-semantic-tool-bridge` for the OpenAI Realtime adapter (tool calls, transcripts, lifecycle) and GPT-Live (transcripts, lifecycle only). Mock-verified; live tool-calling verification and maintainer acceptance pending. First consumer: Relay, which keeps tool policy/approval in Kaiwen Agent.
 - **Kaiwen Speech Integration:** Future speech adapter integration.
 - **Verimor Interoperability:** Official vendor WebSocket specification (`OPEN-001`, `OPEN-002`) and authorized interoperability testing.
 - **Production-Readiness Assessment:** Gate C / Gate D operational, legal, and multi-instance scaling review.

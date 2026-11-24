@@ -13,6 +13,7 @@ from kaiwen_gateway.adapters.openai_realtime.config import (
     validate_endpoint_url,
 )
 from kaiwen_gateway.modules.voice.domain import MediaPortError
+from kaiwen_gateway.modules.voice.semantic import DEFAULT_SEMANTIC_QUEUE_CAPACITY
 
 DEFAULT_OPENAI_GPT_LIVE_URL: Final[str] = "wss://api.openai.com/v1/live/sessions"
 DEFAULT_OPENAI_GPT_LIVE_MODEL: Final[str] = "gpt-live-1"
@@ -53,6 +54,8 @@ class OpenAIGPTLiveConfig:
     outbound_queue_capacity: int = 32
     backpressure_timeout_seconds: float = 0.05
     delegation: dict[str, Any] | None = field(default_factory=_default_delegation)
+    enable_semantic_events: bool = False
+    semantic_queue_capacity: int = DEFAULT_SEMANTIC_QUEUE_CAPACITY
 
     def __post_init__(self) -> None:
         if not self.model or not self.model.strip():
@@ -74,6 +77,8 @@ class OpenAIGPTLiveConfig:
             raise ValueError("outbound_queue_capacity must be > 0")
         if self.backpressure_timeout_seconds <= 0:
             raise ValueError("backpressure_timeout_seconds must be > 0")
+        if self.semantic_queue_capacity <= 0:
+            raise ValueError("semantic_queue_capacity must be > 0")
 
     @classmethod
     def from_env(

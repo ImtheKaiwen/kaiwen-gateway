@@ -86,10 +86,40 @@ app = create_gateway_app(
 
 ---
 
-## 6. Mock Testing Instructions
+## 6. Semantic & Tool-Result Side Channel (`ADR-0008`, opt-in, `MOCK_VERIFIED`)
+
+```python
+from kaiwen_gateway.modules.voice import ToolDeclaration, ToolResult, ToolCallRequested
+
+cfg = OpenAIRealtimeConfig(
+    api_key=server_owned_key,
+    enable_semantic_events=True,
+    tools=(ToolDeclaration(name="tasks_add", description="Add a task",
+                           parameters={"type": "object", "properties": {"title": {"type": "string"}}}),),
+    input_transcription_model="gpt-4o-transcribe",  # optional
+)
+adapter = OpenAIRealtimeMediaAdapter(call_id=call_id, tenant_id=tenant_id, config=cfg)
+# Media flows through VoiceBridgeSession as before. In a separate task:
+while (event := await adapter.receive_semantic_event()) is not None:
+    if isinstance(event, ToolCallRequested):
+        output = await my_policy_checked_executor(event)  # Gateway never authorizes
+        await adapter.submit_tool_result(ToolResult(call_id=event.call_id, output=output))
+```
+
+| Server event | Semantic event |
+| --- | --- |
+| `session.updated` (first) | `SessionLifecycleEvent(phase="ready")` |
+| `response.created` / `response.done` | `ResponseLifecycleEvent` (`started` / `completed` / `cancelled` / `failed` / `incomplete`) |
+| `response.function_call_arguments.done`, `response.output_item.done`, `response.done` `function_call` items | one `ToolCallRequested` per `call_id` |
+| `response.output_audio_transcript.delta` / `.done` | `TranscriptEvent(role="assistant")` |
+| `conversation.item.input_audio_transcription.delta` / `.completed` | `TranscriptEvent(role="user")` (only with `input_transcription_model`) |
+
+Tool results are sent as `conversation.item.create` (`function_call_output`) followed by `response.create`. `cancel_turn()` and close/failure cancel pending calls (`ToolCallCancelled`); results for them raise `StaleToolCallError`. Live verification of this channel is **NOT_VERIFIED**.
+
+## 7. Mock Testing Instructions
 
 Run the conformance and integration suites offline with zero API keys or external network:
 
 ```bash
-uv run --extra server pytest tests/test_openai_realtime_conformance.py tests/test_openai_realtime_adapter.py -v
+uv run --extra server pytest tests/test_openai_realtime_conformance.py tests/test_openai_realtime_adapter.py tests/test_openai_realtime_semantic.py -v
 ```

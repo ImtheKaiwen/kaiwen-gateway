@@ -95,7 +95,11 @@ Because GPT-Live handles overlapping speech natively in full-duplex and does not
 
 ---
 
-## 6. Mock Testing Instructions
+## 6. Semantic Side Channel (`ADR-0008`, opt-in, `MOCK_VERIFIED`)
+
+With `enable_semantic_events=True` the adapter exposes `session.input_transcript.delta` / `session.output_transcript.delta` as non-final `TranscriptEvent`s and `session.started` / `session.closed` as `SessionLifecycleEvent`s. Current OpenAI docs describe no transcript completion event and no client-delegation function-call contract, so `tool_calls`, `*_transcript_final` and `response_lifecycle` stay `False` and `submit_tool_result()` raises `UnsupportedSemanticCapabilityError`. Responses delegation is not implemented.
+
+## 7. Mock Testing Instructions
 
 Run the conformance and integration suites offline with zero API keys or external network:
 

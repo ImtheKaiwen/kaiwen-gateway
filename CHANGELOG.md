@@ -11,7 +11,14 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
-*(No unreleased changes since `v0.1.0b2`.)*
+### Added
+- **Semantic & tool-result side channel (`ADR-0008`, Proposed):** New provider-neutral contract in `kaiwen_gateway.modules.voice` — `SemanticRealtimePort`, `SemanticCapabilities`, `ToolDeclaration`, `ToolResult`, events `ToolCallRequested` / `ToolCallCancelled` / `TranscriptEvent` / `ResponseLifecycleEvent` / `ProviderErrorEvent` / `SessionLifecycleEvent`, `BoundedSemanticEventChannel` (non-blocking publish, droppable transcript deltas, fail-closed `SemanticBackpressureError`), `ToolCallTracker` (dedupe, replay rejection, turn-bound cancellation), `parse_tool_arguments`, `SEMANTIC_CONTRACT_VERSION = "1.0"` and typed errors.
+- **OpenAI Realtime adapter:** opt-in `enable_semantic_events`, `tools`, `tool_choice`, `input_transcription_model`, `semantic_queue_capacity` config; maps GA function-call, transcript and response lifecycle events; `submit_tool_result()` sends `conversation.item.create` (`function_call_output`) followed by `response.create`. Pending calls are cancelled on `cancel_turn()` and on close/failure; stale or duplicate results are rejected without upstream traffic.
+- **OpenAI GPT-Live adapter:** opt-in `enable_semantic_events` exposing documented transcript deltas and `session.started` / `session.closed` lifecycle. Tool results raise `UnsupportedSemanticCapabilityError` (no verified client-delegation tool contract).
+
+### Notes
+- Additive and backward compatible: defaults keep both adapters audio-only with unchanged session events.
+- Semantic mappings are **mock-verified only**; live tool-calling verification is pending an authorized, cost-bounded run.
 
 ---
 
