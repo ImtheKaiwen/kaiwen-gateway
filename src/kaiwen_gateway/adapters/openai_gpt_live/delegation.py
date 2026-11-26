@@ -42,10 +42,29 @@ class DelegationLedger:
 
     def __init__(self) -> None:
         self._current: OrderedDict[str, DelegationBatch] = OrderedDict()
-        self._by_call: dict[str, DelegationBatch] = {}
+        self._by_call: dict[str, DelegationBatch] = {}  # unanswered calls only
+        self._origin: OrderedDict[str, int] = OrderedDict()
+
+    @property
+    def indexed_call_count(self) -> int:
+        return len(self._by_call)
+
+    def origin_turn(self, delegation_id: str, current_turn: int) -> int:
+        """The turn a delegation started in; later events never move it to a newer turn."""
+        if not delegation_id:  # not correlated with a delegation
+            return current_turn
+        turn = self._origin.setdefault(delegation_id, current_turn)
+        while len(self._origin) > _MAX_BATCHES:
+            self._origin.popitem(last=False)
+        return turn
 
     def start(self, delegation_id: str, response_id: str | None) -> DelegationBatch:
         batch = DelegationBatch(delegation_id=delegation_id, response_id=response_id)
+        replaced = self._current.get(delegation_id)
+        if replaced is not None:
+            # Calls still awaiting an output stay indexed so they can be answered.
+            for call_id in replaced.call_ids - replaced.pending:
+                self._by_call.pop(call_id, None)
         self._current[delegation_id] = batch
         self._current.move_to_end(delegation_id)
         while len(self._current) > _MAX_BATCHES:
@@ -68,7 +87,8 @@ class DelegationLedger:
         return batch
 
     def answer(self, call_id: str) -> DelegationBatch | None:
-        batch = self._by_call.get(call_id)
+        """Record that the output of ``call_id`` has been sent (or will never be)."""
+        batch = self._by_call.pop(call_id, None)
         if batch is not None:
             batch.pending.discard(call_id)
         return batch

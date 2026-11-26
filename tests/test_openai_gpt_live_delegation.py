@@ -22,11 +22,13 @@ from kaiwen_gateway.adapters.openai_gpt_live import (
     OpenAIGPTLiveMediaAdapter,
     ResponsesDelegationConfig,
 )
+from kaiwen_gateway.adapters.openai_gpt_live.delegation import DelegationLedger
 from kaiwen_gateway.modules.voice import (
     AudioFormat,
     AudioFrame,
     DuplicateToolResultError,
     ProviderErrorEvent,
+    ResponseLifecycleEvent,
     StaleToolCallError,
     ToolCallCancelled,
     ToolCallRequested,
@@ -297,6 +299,66 @@ def test_close_cancels_pending_calls() -> None:
             assert (await _next(adapter, ToolCallCancelled)).reason == "session_closed"
 
     asyncio.run(run())
+
+
+def test_call_proposed_after_interrupt_by_old_work_is_not_surfaced() -> None:
+    async def run() -> None:
+        async with _live() as (mock, adapter):
+            await mock.lifecycle("d1", "response.created")
+            await _next(adapter, ResponseLifecycleEvent)
+            await adapter.cancel_turn(1)
+            await mock.call("d1", "late_call")
+            await mock.lifecycle("d1", "response.completed")
+            await _until(lambda: bool(mock.sent("response.create")))
+            output = mock.sent("response.item.create")[0]["item"]
+            assert output["call_id"] == "late_call" and json.loads(output["output"])["ok"] is False
+            # A new delegation after the interrupt is surfaced normally.
+            await mock.lifecycle("d2", "response.created", "resp_2")
+            await mock.call("d2", "new_call")
+            assert (await _next(adapter, ToolCallRequested)).call_id == "new_call"
+
+    asyncio.run(run())
+
+
+def test_continuation_never_overtakes_a_slow_tool_output() -> None:
+    async def run() -> None:
+        async with _live() as (mock, adapter):
+            await mock.lifecycle("d1", "response.created")
+            await mock.call("d1", "call_1")
+            await _next(adapter, ToolCallRequested)
+            transport = adapter._transport
+            assert transport is not None
+            original = transport.send_json
+            released = asyncio.Event()
+
+            async def slow(payload: dict[str, Any]) -> None:
+                if payload["type"] == "response.item.create":
+                    await released.wait()
+                await original(payload)
+
+            transport.send_json = slow  # type: ignore[method-assign]
+            submit = asyncio.create_task(adapter.submit_tool_result(_result("call_1")))
+            await asyncio.sleep(0.02)
+            await mock.lifecycle("d1", "response.completed")
+            await asyncio.sleep(0.05)
+            assert mock.sent("response.create") == []
+            released.set()
+            await submit
+            await _until(lambda: bool(mock.sent("response.create")))
+            kinds = [e["type"] for e in mock.received if e["type"].startswith("response.")]
+            assert kinds == ["response.item.create", "response.create"]
+
+    asyncio.run(run())
+
+
+def test_answered_calls_do_not_accumulate_across_backend_responses() -> None:
+    ledger = DelegationLedger()
+    for index in range(200):
+        ledger.start("d1", f"resp_{index}")
+        ledger.add_call("d1", f"call_{index}")
+        ledger.answer(f"call_{index}")
+    ledger.start("d1", "last")
+    assert ledger.indexed_call_count == 0
 
 
 def test_delegated_tools_require_semantic_events() -> None:

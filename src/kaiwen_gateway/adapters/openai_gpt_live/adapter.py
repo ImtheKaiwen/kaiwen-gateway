@@ -314,7 +314,6 @@ class OpenAIGPTLiveMediaAdapter:
     async def _send_tool_output(
         self, transport: OpenAIGPTLiveTransport, call_id: str, output: str
     ) -> None:
-        batch = self._ledger.answer(call_id)
         await self._send_command(
             transport,
             {
@@ -322,6 +321,8 @@ class OpenAIGPTLiveMediaAdapter:
                 "item": {"type": "function_call_output", "call_id": call_id, "output": output},
             },
         )
+        # Only now may response.completed continue the batch: never before the output.
+        batch = self._ledger.answer(call_id)
         if batch is not None:
             await self._continue_if_ready(transport, batch)
 
@@ -365,13 +366,14 @@ class OpenAIGPTLiveMediaAdapter:
         ref = response.get("id") if isinstance(response, dict) else None
         response_id = ref[:128] if isinstance(ref, str) else None
 
+        origin = self._ledger.origin_turn(delegation_id, self._current_turn_id)
         if kind == "response.created":
             self._ledger.start(delegation_id, response_id)
             self._emit_response_phase("started", response_id)
         elif kind == "response.output_item.done":
             item = nested.get("item")
             if isinstance(item, dict) and item.get("type") == "function_call":
-                self._surface_tool_call(delegation_id, item)
+                await self._surface_tool_call(delegation_id, origin, item)
         elif kind == "response.completed":
             batch = self._ledger.current(delegation_id)
             batch.completed = True
@@ -383,6 +385,7 @@ class OpenAIGPTLiveMediaAdapter:
             batch.continued = True  # a failed response is never continued
             for call_id in list(batch.pending):
                 turn = self._tool_calls.cancel(call_id)
+                self._ledger.answer(call_id)
                 if turn is not None:
                     self._emit_cancelled(call_id, turn, "backend_failed")
             self._emit_response_phase(
@@ -402,7 +405,9 @@ class OpenAIGPTLiveMediaAdapter:
             )
         )
 
-    def _surface_tool_call(self, delegation_id: str, item: dict[str, Any]) -> None:
+    async def _surface_tool_call(
+        self, delegation_id: str, turn_id: int, item: dict[str, Any]
+    ) -> None:
         call_id = item.get("call_id")
         name = item.get("name")
         arguments = item.get("arguments")
@@ -417,13 +422,18 @@ class OpenAIGPTLiveMediaAdapter:
         ):
             self._rejected_tool_calls += 1
             return
-        turn_id = self._current_turn_id
-        if turn_id <= self._fenced_turn_id:
-            return
         if not self._tool_calls.register(call_id, turn_id):
             self._rejected_tool_calls += 1  # duplicate, replay or pending limit
             return
         self._ledger.add_call(delegation_id, call_id)
+        if turn_id <= self._fenced_turn_id:
+            # Proposed late by work of an interrupted turn: never surfaced to the
+            # application, but answered so the backend response is not left blocked.
+            self._tool_calls.cancel(call_id)
+            self._rejected_tool_calls += 1
+            if self._transport is not None:
+                await self._send_tool_output(self._transport, call_id, _CANCELLED_OUTPUT)
+            return
         self._emit_semantic(
             ToolCallRequested(
                 sequence=self._next_seq(),
@@ -743,6 +753,14 @@ class OpenAIGPTLiveMediaAdapter:
                             is_final=False,
                         )
                     )
+            return
+
+        if event_type == "session.delegation.created":
+            delegation = event.get("delegation")
+            if self._tools_enabled and isinstance(delegation, dict):
+                created = delegation.get("id")
+                if isinstance(created, str):
+                    self._ledger.origin_turn(created, self._current_turn_id)
             return
 
         if event_type == "response.event":
