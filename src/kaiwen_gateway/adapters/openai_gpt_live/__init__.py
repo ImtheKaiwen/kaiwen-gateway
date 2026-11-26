@@ -14,6 +14,7 @@ from kaiwen_gateway.adapters.openai_gpt_live.config import (
     OpenAIGPTLiveConfig,
     OpenAIGPTLiveDependencyError,
     OpenAIGPTLiveError,
+    ResponsesDelegationConfig,
 )
 from kaiwen_gateway.adapters.openai_gpt_live.transport import (
     OpenAIGPTLiveTransport,
@@ -32,6 +33,7 @@ __all__ = [
     "OpenAIGPTLiveMediaAdapter",
     "OpenAIGPTLiveTransport",
     "OpenAIGPTLiveTransportConnector",
+    "ResponsesDelegationConfig",
     "connect_openai_gpt_live_websocket",
     "create_openai_gpt_live_adapter_factory",
 ]

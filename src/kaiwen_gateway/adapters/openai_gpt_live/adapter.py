@@ -14,6 +14,10 @@ from kaiwen_gateway.adapters.openai_gpt_live.config import (
     OpenAIGPTLiveError,
     sanitize_provider_message,
 )
+from kaiwen_gateway.adapters.openai_gpt_live.delegation import (
+    DelegationBatch,
+    DelegationLedger,
+)
 from kaiwen_gateway.adapters.openai_gpt_live.transport import (
     OpenAIGPTLiveTransport,
     OpenAIGPTLiveTransportConnector,
@@ -34,16 +38,31 @@ from kaiwen_gateway.modules.voice.domain import (
 )
 from kaiwen_gateway.modules.voice.ports import InterruptionCapabilities
 from kaiwen_gateway.modules.voice.semantic import (
+    MAX_TOOL_ARGUMENTS_BYTES,
     MAX_TRANSCRIPT_TEXT_CHARS,
     BoundedSemanticEventChannel,
     ProviderErrorEvent,
+    ResponseLifecycleEvent,
     SemanticCapabilities,
     SemanticEvent,
     SessionLifecycleEvent,
+    StaleToolCallError,
+    ToolCallCancelled,
+    ToolCallRequested,
+    ToolCallTracker,
     ToolResult,
     TranscriptEvent,
     UnsupportedSemanticCapabilityError,
 )
+
+# Live errors that leave the session open (Responses delegation only).
+_NONFATAL_DELEGATION_ERRORS = frozenset(
+    {"responses_validation_failed", "tool_outputs_required", "function_call_outputs_required"}
+)
+# Prefix of the event_id on every delegation command this adapter sends, so a rejection
+# of one of them is reported without tearing down the audio session.
+_COMMAND_PREFIX = "kg_dlg_"
+_CANCELLED_OUTPUT = '{"ok": false, "error": "cancelled_by_application"}'
 
 
 class _EOFSentinel:
@@ -160,7 +179,7 @@ class OpenAIGPTLiveMediaAdapter:
         self._delivered_outbound_seq = 0
 
         # Semantic side channel (opt-in). GPT-Live documents transcript deltas without
-        # a final marker and no client-delegation tool-call contract (see guide).
+        # a final marker; function calls exist only under Responses delegation.
         self._semantic: BoundedSemanticEventChannel | None = (
             BoundedSemanticEventChannel(config.semantic_queue_capacity)
             if config.enable_semantic_events
@@ -168,6 +187,12 @@ class OpenAIGPTLiveMediaAdapter:
         )
         self._semantic_closed = False
         self._last_provider_error_code: str | None = None
+
+        self._tool_calls = ToolCallTracker()
+        self._ledger = DelegationLedger()
+        self._command_seq = 0
+        self._delegation_rejected = False
+        self._rejected_tool_calls = 0
 
     @property
     def call_id(self) -> str:
@@ -215,18 +240,34 @@ class OpenAIGPTLiveMediaAdapter:
 
     @property
     def semantic_capabilities(self) -> SemanticCapabilities:
-        """Declare semantic capabilities documented for GPT-Live client delegation.
+        """Declare semantic capabilities for the configured delegation mode.
 
-        Tool calls are not declared: client delegation exposes no function-call
-        contract, and Responses delegation is not implemented by this adapter.
+        Tool calls are declared only for Responses delegation with declared tools, and
+        withdrawn if the provider rejected the backend settings. Client delegation
+        exposes no function-call contract.
         """
         if self._semantic is None:
             return SemanticCapabilities()
+        tools = self._tools_enabled and not self._delegation_rejected
         return SemanticCapabilities(
+            tool_calls=tools,
+            tool_result_continuation=tools,
+            tool_call_cancellation=tools,
             input_transcript_delta=True,
             output_transcript_delta=True,
+            response_lifecycle=self._tools_enabled,
             session_lifecycle=True,
         )
+
+    @property
+    def _tools_enabled(self) -> bool:
+        delegation = self._config.responses_delegation
+        return self._semantic is not None and delegation is not None and bool(delegation.tools)
+
+    @property
+    def rejected_tool_call_count(self) -> int:
+        """Tool calls not surfaced (duplicate, oversized, malformed or over the pending limit)."""
+        return self._rejected_tool_calls
 
     @property
     def semantic_dropped_count(self) -> int:
@@ -242,9 +283,155 @@ class OpenAIGPTLiveMediaAdapter:
         return await self._semantic.receive()
 
     async def submit_tool_result(self, result: ToolResult) -> None:
-        """Tool results are not supported by this adapter (no verified contract)."""
-        raise UnsupportedSemanticCapabilityError(
-            "OpenAI GPT-Live adapter does not support tool results"
+        """Send ``response.item.create`` and continue once the backend batch is answered."""
+        if not self._tools_enabled:
+            raise UnsupportedSemanticCapabilityError(
+                "tool results require Responses delegation with declared tools"
+            )
+        self._raise_if_closed()
+        async with self._cancel_lock:
+            self._raise_if_closed()
+            transport = self._transport
+            if transport is None:
+                raise MediaPortClosedError("OpenAI GPT-Live transport is not connected")
+            turn_id = self._tool_calls.claim_for_result(result.call_id)
+            if turn_id <= self._fenced_turn_id:
+                raise StaleToolCallError("tool call belongs to an interrupted turn")
+            await self._send_tool_output(transport, result.call_id, result.output)
+
+    async def _send_command(
+        self, transport: OpenAIGPTLiveTransport, payload: dict[str, Any]
+    ) -> None:
+        self._command_seq += 1
+        payload["event_id"] = f"{_COMMAND_PREFIX}{self._command_seq}"
+        try:
+            await asyncio.wait_for(
+                transport.send_json(payload), timeout=self._config.cancel_timeout_seconds
+            )
+        except TimeoutError as exc:
+            raise OpenAIGPTLiveError("Timed out sending a delegation command") from exc
+
+    async def _send_tool_output(
+        self, transport: OpenAIGPTLiveTransport, call_id: str, output: str
+    ) -> None:
+        batch = self._ledger.answer(call_id)
+        await self._send_command(
+            transport,
+            {
+                "type": "response.item.create",
+                "item": {"type": "function_call_output", "call_id": call_id, "output": output},
+            },
+        )
+        if batch is not None:
+            await self._continue_if_ready(transport, batch)
+
+    async def _continue_if_ready(
+        self, transport: OpenAIGPTLiveTransport, batch: DelegationBatch
+    ) -> None:
+        if not batch.ready_to_continue():
+            return
+        batch.continued = True  # set before awaiting: exactly one response.create
+        await self._send_command(transport, {"type": "response.create"})
+
+    def _emit_cancelled(self, call_id: str, turn_id: int, reason: Any) -> None:
+        self._emit_semantic(
+            ToolCallCancelled(
+                sequence=self._next_seq(), turn_id=turn_id, call_id=call_id, reason=reason
+            )
+        )
+
+    def _emit_provider_error(self, code: str, message: str) -> None:
+        self._emit_semantic(
+            ProviderErrorEvent(
+                sequence=self._next_seq(),
+                turn_id=self._current_turn_id,
+                code=code[:64],
+                message=sanitize_provider_message(message, self._config.api_key)[:300],
+                fatal=False,
+            )
+        )
+
+    async def _handle_response_event(self, event: dict[str, Any]) -> None:
+        """Dispatch one nested Responses event from a delegated backend."""
+        if not self._tools_enabled:
+            return
+        nested = event.get("event")
+        if not isinstance(nested, dict):
+            return
+        raw_id = event.get("delegation_id")
+        delegation_id = raw_id if isinstance(raw_id, str) else ""
+        kind = nested.get("type")
+        response = nested.get("response")
+        ref = response.get("id") if isinstance(response, dict) else None
+        response_id = ref[:128] if isinstance(ref, str) else None
+
+        if kind == "response.created":
+            self._ledger.start(delegation_id, response_id)
+            self._emit_response_phase("started", response_id)
+        elif kind == "response.output_item.done":
+            item = nested.get("item")
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                self._surface_tool_call(delegation_id, item)
+        elif kind == "response.completed":
+            batch = self._ledger.current(delegation_id)
+            batch.completed = True
+            self._emit_response_phase("completed", response_id)
+            if self._transport is not None:
+                await self._continue_if_ready(self._transport, batch)
+        elif kind in {"response.failed", "response.incomplete", "error"}:
+            batch = self._ledger.current(delegation_id)
+            batch.continued = True  # a failed response is never continued
+            for call_id in list(batch.pending):
+                turn = self._tool_calls.cancel(call_id)
+                if turn is not None:
+                    self._emit_cancelled(call_id, turn, "backend_failed")
+            self._emit_response_phase(
+                "incomplete" if kind == "response.incomplete" else "failed", response_id
+            )
+            self._emit_provider_error(
+                "backend_response_failed", "The delegated backend response did not complete"
+            )
+
+    def _emit_response_phase(self, phase: Any, response_id: str | None) -> None:
+        self._emit_semantic(
+            ResponseLifecycleEvent(
+                sequence=self._next_seq(),
+                turn_id=self._current_turn_id,
+                phase=phase,
+                response_ref=response_id,
+            )
+        )
+
+    def _surface_tool_call(self, delegation_id: str, item: dict[str, Any]) -> None:
+        call_id = item.get("call_id")
+        name = item.get("name")
+        arguments = item.get("arguments")
+        if (
+            not isinstance(call_id, str)
+            or not call_id
+            or len(call_id) > 128
+            or not isinstance(name, str)
+            or not name
+            or not isinstance(arguments, str)
+            or len(arguments.encode("utf-8")) > MAX_TOOL_ARGUMENTS_BYTES
+        ):
+            self._rejected_tool_calls += 1
+            return
+        turn_id = self._current_turn_id
+        if turn_id <= self._fenced_turn_id:
+            return
+        if not self._tool_calls.register(call_id, turn_id):
+            self._rejected_tool_calls += 1  # duplicate, replay or pending limit
+            return
+        self._ledger.add_call(delegation_id, call_id)
+        self._emit_semantic(
+            ToolCallRequested(
+                sequence=self._next_seq(),
+                turn_id=turn_id,
+                call_id=call_id,
+                name=name[:64],
+                arguments_json=arguments,
+            )
         )
 
     def _emit_semantic(self, event: SemanticEvent) -> None:
@@ -257,6 +444,8 @@ class OpenAIGPTLiveMediaAdapter:
     def _close_semantic(self, reason: str, error: Exception | None = None) -> None:
         if self._semantic is None or self._semantic_closed:
             return
+        for call_id, turn in self._tool_calls.cancel_all():
+            self._emit_cancelled(call_id, turn, "session_closed")
         if error is not None:
             self._emit_semantic(
                 ProviderErrorEvent(
@@ -505,6 +694,19 @@ class OpenAIGPTLiveMediaAdapter:
 
         if event_type == "error":
             err_obj = event.get("error")
+            if isinstance(err_obj, dict) and self._config.responses_delegation is not None:
+                delegation_code = str(err_obj.get("code") or "")
+                command_id = str(err_obj.get("client_event_id") or "")
+                if delegation_code in _NONFATAL_DELEGATION_ERRORS or command_id.startswith(
+                    _COMMAND_PREFIX
+                ):
+                    if delegation_code == "responses_validation_failed":
+                        self._delegation_rejected = True
+                    self._emit_provider_error(
+                        delegation_code or "delegation_command_rejected",
+                        str(err_obj.get("message") or "OpenAI GPT-Live delegation error"),
+                    )
+                    return
             if isinstance(err_obj, dict):
                 code = err_obj.get("code") or err_obj.get("type") or "provider_error"
                 self._last_provider_error_code = str(code)[:64]
@@ -541,6 +743,10 @@ class OpenAIGPTLiveMediaAdapter:
                             is_final=False,
                         )
                     )
+            return
+
+        if event_type == "response.event":
+            await self._handle_response_event(event)
             return
 
         if event_type == "session.closed":
@@ -723,6 +929,21 @@ class OpenAIGPTLiveMediaAdapter:
             finally:
                 self._committed_turn_id = max(self._committed_turn_id, self._current_turn_id)
                 self._turn_transition_event.set()
+            await self._cancel_delegated_calls(turn_id)
+
+    async def _cancel_delegated_calls(self, turn_id: int) -> None:
+        """Fail pending calls of an interrupted turn.
+
+        Live documents no command that cancels delegated work, and a backend response with
+        an unanswered call stays blocked, so each cancelled call gets a fixed failure output.
+        """
+        for call_id, turn in self._tool_calls.cancel_through_turn(turn_id):
+            self._emit_cancelled(call_id, turn, "turn_interrupted")
+            if self._transport is not None:
+                try:
+                    await self._send_tool_output(self._transport, call_id, _CANCELLED_OUTPUT)
+                except Exception:  # best effort: a closing session needs no continuation
+                    return
 
     async def push_eof(self, timeout: float | None = None) -> None:
         """Signal clean end-of-stream once queued inbound frames have been transmitted."""

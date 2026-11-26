@@ -200,7 +200,7 @@ class ToolCallCancelled:
     sequence: int
     turn_id: int
     call_id: str
-    reason: Literal["turn_interrupted", "session_closed"]
+    reason: Literal["turn_interrupted", "session_closed", "backend_failed"]
     kind: Literal["tool_call.cancelled"] = "tool_call.cancelled"
 
 
@@ -438,6 +438,13 @@ class ToolCallTracker:
         for cid, _ in victims:
             self._settle(cid, "cancelled")
         return victims
+
+    def cancel(self, call_id: str) -> int | None:
+        """Cancel one pending call; returns its turn id, or None if it is not pending."""
+        turn = self._pending.get(call_id)
+        if turn is not None:
+            self._settle(call_id, "cancelled")
+        return turn
 
     def cancel_all(self) -> list[tuple[str, int]]:
         victims = list(self._pending.items())

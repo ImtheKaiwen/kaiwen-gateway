@@ -13,7 +13,10 @@ from kaiwen_gateway.adapters.openai_realtime.config import (
     validate_endpoint_url,
 )
 from kaiwen_gateway.modules.voice.domain import MediaPortError
-from kaiwen_gateway.modules.voice.semantic import DEFAULT_SEMANTIC_QUEUE_CAPACITY
+from kaiwen_gateway.modules.voice.semantic import (
+    DEFAULT_SEMANTIC_QUEUE_CAPACITY,
+    ToolDeclaration,
+)
 
 DEFAULT_OPENAI_GPT_LIVE_URL: Final[str] = "wss://api.openai.com/v1/live/sessions"
 DEFAULT_OPENAI_GPT_LIVE_MODEL: Final[str] = "gpt-live-1"
@@ -31,6 +34,56 @@ class OpenAIGPTLiveDependencyError(OpenAIGPTLiveError):
 
 def _default_delegation() -> dict[str, Any]:
     return {"type": "client"}
+
+
+@dataclass(frozen=True, slots=True)
+class ResponsesDelegationConfig:
+    """Backend settings for GPT-Live Responses delegation.
+
+    The backend model reasons and *proposes* function calls; the consuming application
+    still validates, authorizes and executes them. Backend token usage is billed by the
+    provider separately from the Live audio session.
+    """
+
+    model: str
+    tools: tuple[ToolDeclaration, ...] = ()
+    instructions: str | None = None
+    reasoning_effort: str | None = "low"
+    max_output_tokens: int | None = None
+    parallel_tool_calls: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.model or not self.model.strip():
+            raise ValueError("responses delegation model must be a non-empty string")
+        if self.max_output_tokens is not None and self.max_output_tokens < 16:
+            raise ValueError("max_output_tokens must be >= 16")
+        names = [tool.name for tool in self.tools]
+        if len(names) != len(set(names)):
+            raise ValueError("tool names must be unique")
+
+    def to_wire(self) -> dict[str, Any]:
+        responses: dict[str, Any] = {
+            "model": self.model,
+            "parallel_tool_calls": self.parallel_tool_calls,
+        }
+        if self.instructions is not None:
+            responses["instructions"] = self.instructions
+        if self.reasoning_effort is not None:
+            responses["reasoning"] = {"effort": self.reasoning_effort}
+        if self.max_output_tokens is not None:
+            responses["max_output_tokens"] = self.max_output_tokens
+        if self.tools:
+            responses["tools"] = [
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": dict(tool.parameters),
+                }
+                for tool in self.tools
+            ]
+            responses["tool_choice"] = "auto"
+        return {"type": "responses", "responses": responses}
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +109,8 @@ class OpenAIGPTLiveConfig:
     delegation: dict[str, Any] | None = field(default_factory=_default_delegation)
     enable_semantic_events: bool = False
     semantic_queue_capacity: int = DEFAULT_SEMANTIC_QUEUE_CAPACITY
+    # When set, replaces ``delegation`` with Responses delegation.
+    responses_delegation: ResponsesDelegationConfig | None = None
 
     def __post_init__(self) -> None:
         if not self.model or not self.model.strip():
@@ -79,6 +134,9 @@ class OpenAIGPTLiveConfig:
             raise ValueError("backpressure_timeout_seconds must be > 0")
         if self.semantic_queue_capacity <= 0:
             raise ValueError("semantic_queue_capacity must be > 0")
+        delegated = self.responses_delegation
+        if delegated is not None and delegated.tools and not self.enable_semantic_events:
+            raise ValueError("delegated tools require enable_semantic_events=True")
 
     @classmethod
     def from_env(
@@ -141,7 +199,9 @@ class OpenAIGPTLiveConfig:
         }
         if self.instructions is not None:
             session["instructions"] = self.instructions
-        if self.delegation is not None:
+        if self.responses_delegation is not None:
+            session["delegation"] = self.responses_delegation.to_wire()
+        elif self.delegation is not None:
             session["delegation"] = dict(self.delegation)
 
         return {
@@ -159,6 +219,7 @@ __all__ = [
     "OpenAIGPTLiveConfig",
     "OpenAIGPTLiveDependencyError",
     "OpenAIGPTLiveError",
+    "ResponsesDelegationConfig",
     "sanitize_provider_message",
     "validate_endpoint_url",
 ]
